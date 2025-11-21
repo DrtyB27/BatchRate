@@ -1,53 +1,70 @@
 # Privacy Policy
 
 Effective Date: [11/20/2025]
+_Last updated: November 21, 2025_
 
-This privacy policy explains how this GPT-powered application ("the app") accesses and uses your Google Drive data. By authorizing the app, you agree to the terms described below.
+This Privacy Policy outlines how data is collected, used, and protected when you interact with LTL services, including the LTL custom GPT ("the GPT"). We are committed to protecting your privacy and being transparent about data handling.
 
-## 1. Data Access
+---
 
-This app connects to your Google Drive account via OAuth 2.0 authentication. Upon authorization, the app is granted access to your files based on the selected permissions (scopes).
+## 1. Information We Do Not Collect
 
-Typical scopes include:
+We do **not** collect or store any of the following:
 
-- `https://www.googleapis.com/auth/drive.readonly`: Read-only access to files you own or have access to.
+- Personally identifiable information (PII)
+- Uploaded files (documents, images, or other attachments)
+- Persistent chat logs
+- User location or IP addresses
 
-## 2. Data Usage
+Your interactions with the GPT are transient and session-based. Once your session ends, all data is discarded.
 
-The app accesses your data **only at your request** and **only for the purpose of fulfilling your prompts** within the ChatGPT interface. Examples include:
+---
 
-- Listing files in your Google Drive
-- Retrieving file metadata
+## 2. File Uploads in the Custom GPT
 
-## 3. Data Storage
+When you upload a file to the LTL GPT (e.g., via [chat.openai.com/gpts](https://chat.openai.com/gpts)), the following applies:
 
-We **do not store**, log, or transmit any personal data, file contents, or metadata to external servers.
+- **Usage Limitation:** Files are only used to generate a response in your **current session**. They are **not retained** after the response is generated.
+- **No General Learning:** Your files are **not used to train or fine-tune** OpenAI’s models or any third-party AI systems.
+- **No External Sharing:** Files are not sent to any external APIs or systems unless explicitly stated and approved by the user.
+- **Privacy by Design:** This GPT was built with minimal data usage in mind. File content remains confined to your local interaction with the assistant.
 
-All data access is transient and happens in real-time via Google's API during the chat session. No information is retained after the session ends.
+> ⚠️ Please do not upload sensitive personal, financial, or legal documents unless necessary for the specific interaction, and understand that all use is session-bound.
 
-## 4. Data Sharing
+---
 
-We do **not share your data** with any third parties. The data accessed via the Google Drive API is used **exclusively** within the ChatGPT context and is not visible to anyone other than the authenticated user.
+## 3. How We Use Session Data
 
-## 5. Revoking Access
+Session data is used only to generate a response to your query. We do not log or analyze these interactions beyond the session.
 
-You can revoke the app’s access to your Google Drive at any time by visiting:
+OpenAI may temporarily retain conversation data for abuse prevention and system monitoring, as described in their [data usage policy](https://openai.com/enterprise-privacy).
 
-[Google Account Permissions](https://myaccount.google.com/permissions)
+---
 
-Find the app in the list and click “Remove Access”.
+## 4. Third-Party Integrations
 
-## 6. Compliance with Google API Policies
+If this GPT uses third-party APIs or services (e.g., via Custom Actions), their privacy policies and data handling practices apply. We will always disclose when data is being sent outside the GPT platform.
 
-This app complies with the [Google API Services User Data Policy](https://developers.google.com/terms/api-services-user-data-policy), including the Limited Use requirements.
+---
 
-## 7. Contact
+## 5. Your Responsibility
+
+As a user, you are responsible for:
+
+- Ensuring you do not share content you are not authorized to upload
+- Avoiding the submission of sensitive or confidential data unless necessary
+- Reviewing privacy practices of any third-party APIs used by this GPT
+
+---
+
+## 6. Contact
+
 
 If you have any questions or concerns about this privacy policy, please contact:
 
-**[Your Name or Project Name]**  
+**My LTL Assistant**  
 Email: [ltlinsightgpt@gmail.com]  
-GitHub: [https://github.com/dirtyB27](https://github.com/yourusername)
+GitHub: [https://github.com/dirtyB27]
 
 ---
 

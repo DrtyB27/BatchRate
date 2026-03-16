@@ -5,24 +5,23 @@ import { buildRatingRequest } from '../services/xmlBuilder.js';
 import { postToG3, applyMargin, sleep } from '../services/ratingClient.js';
 import { parseRatingResponse } from '../services/xmlParser.js';
 
-const DEFAULT_PARAMS = {
-  contRef: '',
-  contractStatus: 'BeingEntered',
-  clientTPNum: '',
-  carrierTPNum: '',
-  skipSafety: true,
-  contractUse: ['ClientCost'],
-  useRoutingGuides: false,
-  forceRoutingGuideName: '',
-  numberOfRates: 4,
-  showTMSMarkup: false,
-  margins: [],
-  saveRequestXml: true,
-  saveResponseXml: true,
-};
-
 export default function InputScreen({ credentials, onBatchStart, onResultRow }) {
-  const [params, setParams] = useState(DEFAULT_PARAMS);
+  // Inherit session-level settings from credentials screen
+  const [params, setParams] = useState({
+    contRef: credentials.contRef || '',
+    contractStatus: credentials.contractStatus || 'BeingEntered',
+    clientTPNum: credentials.clientTPNum || '',
+    carrierTPNum: credentials.carrierTPNum || '',
+    skipSafety: true,
+    contractUse: credentials.contractUse || ['ClientCost'],
+    useRoutingGuides: false,
+    forceRoutingGuideName: '',
+    numberOfRates: 4,
+    showTMSMarkup: false,
+    margins: [],
+    saveRequestXml: true,
+    saveResponseXml: true,
+  });
   const [csvRows, setCsvRows] = useState(null);
   const [running, setRunning] = useState(false);
 

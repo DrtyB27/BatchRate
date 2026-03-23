@@ -1,10 +1,18 @@
 /**
  * Browser-side HTTP client for 3G TMS Rating API.
- * Uses fetch() directly from the browser.
+ *
+ * All requests are routed through a Cloudflare Worker proxy to bypass CORS.
+ * On localhost, the local Node.js server proxy is used instead.
  */
 
+// ── UPDATE THIS after deploying your Cloudflare Worker ──
+const WORKER_URL = 'https://batchtool.ltlinsightgpt.workers.dev';
+
+const isLocalhost = ['localhost', '127.0.0.1'].includes(window.location.hostname);
+const PROXY_URL = isLocalhost ? '/api/rate' : WORKER_URL;
+
 /**
- * Posts XML to the 3G TMS Rating API.
+ * Posts XML to the 3G TMS Rating API (via proxy).
  * @returns {Promise<string>} Raw XML response string.
  */
 export async function postToG3(xmlBody, credentials) {
@@ -12,16 +20,16 @@ export async function postToG3(xmlBody, credentials) {
 
   const encodedUsername = encodeURIComponent(username);
   const encodedPassword = encodeURIComponent(password);
-  const url = `${baseURL}/web/services/rating/findRates?username=${encodedUsername}&password=${encodedPassword}`;
+  const targetUrl = `${baseURL}/web/services/rating/findRates?username=${encodedUsername}&password=${encodedPassword}`;
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30000);
 
   try {
-    const res = await fetch(url, {
+    const res = await fetch(PROXY_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/xml' },
-      body: xmlBody,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: targetUrl, xmlBody }),
       signal: controller.signal,
     });
 
@@ -35,12 +43,10 @@ export async function postToG3(xmlBody, credentials) {
     if (err.name === 'AbortError') {
       throw new Error('Request timed out after 30s');
     }
-    // CORS error shows as TypeError: Failed to fetch
     if (err.message === 'Failed to fetch' || err.message.includes('NetworkError')) {
       throw new Error(
-        'Network error — this may be a CORS issue. ' +
-        'The 3G TMS server must allow cross-origin requests from this page. ' +
-        'Contact your 3G admin to whitelist this origin, or use a CORS proxy.'
+        'Network error — could not reach the proxy. ' +
+        'Check that the Cloudflare Worker is deployed and the URL is correct in ratingClient.js.'
       );
     }
     throw err;

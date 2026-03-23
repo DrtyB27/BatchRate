@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import ResultsTable, { flattenResults, computeLowCostFlags } from '../components/ResultsTable.jsx';
 import ExportWarningModal from '../components/ExportWarningModal.jsx';
+import AnalyticsDashboard from '../components/AnalyticsDashboard.jsx';
 
 function downloadCsv(filename, csvContent) {
   const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -175,7 +176,7 @@ function buildCustomRateCsv(flatRows) {
 // RESULTS SCREEN
 // ============================================================
 export default function ResultsScreen({ results, totalRows, batchParams, onNewBatch }) {
-  const [viewMode, setViewMode] = useState('both'); // raw | customer | both
+  const [viewMode, setViewMode] = useState('both'); // raw | customer | both | analytics
   const [modal, setModal] = useState(null); // null | 'customer' | 'customRate'
   const [xmlModal, setXmlModal] = useState(null); // row data for XML modal
 
@@ -278,15 +279,27 @@ export default function ResultsScreen({ results, totalRows, batchParams, onNewBa
         <button className={viewBtnCls('raw')} onClick={() => setViewMode('raw')}>Show Raw</button>
         <button className={viewBtnCls('customer')} onClick={() => setViewMode('customer')}>Show Customer</button>
         <button className={viewBtnCls('both')} onClick={() => setViewMode('both')}>Show Both</button>
+        <button
+          className={viewBtnCls('analytics')}
+          onClick={() => setViewMode('analytics')}
+          disabled={!isComplete}
+          title={!isComplete ? 'Available when batch is complete' : ''}
+        >
+          Analytics
+        </button>
       </div>
 
-      {/* Results table */}
-      <ResultsTable
-        flatRows={flatRows}
-        lowCostFlags={lowCostFlags}
-        viewMode={viewMode}
-        onRowClick={handleRowClick}
-      />
+      {/* Results table or Analytics dashboard */}
+      {viewMode === 'analytics' ? (
+        <AnalyticsDashboard flatRows={flatRows} />
+      ) : (
+        <ResultsTable
+          flatRows={flatRows}
+          lowCostFlags={lowCostFlags}
+          viewMode={viewMode}
+          onRowClick={handleRowClick}
+        />
+      )}
 
       {/* Export warning modal */}
       {modal && (

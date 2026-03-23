@@ -6,7 +6,7 @@
  */
 
 // ── UPDATE THIS after deploying your Cloudflare Worker ──
-const WORKER_URL = 'https://ltl-rating-proxy.<YOUR-CF-SUBDOMAIN>.workers.dev';
+const WORKER_URL = 'https://batchtool.ltlinsightgpt.workers.dev';
 
 const isLocalhost = ['localhost', '127.0.0.1'].includes(window.location.hostname);
 const PROXY_URL = isLocalhost ? '/api/rate' : WORKER_URL;

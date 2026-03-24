@@ -68,6 +68,8 @@ export function computeLowCostFlags(flatRows) {
 const COLUMNS = [
   // Shipment identity
   { key: 'reference', label: 'Reference', get: r => r.reference },
+  { key: 'historicCarrier', label: 'Hist. Carrier', get: r => r.historicCarrier || '' },
+  { key: 'historicCost', label: 'Hist. Cost', get: r => r.historicCost || '', fmt: 'money' },
   { key: 'origCity', label: 'Orig City', get: r => r.origCity },
   { key: 'origState', label: 'Org State', get: r => r.origState },
   { key: 'origPostal', label: 'Org Postal Code', get: r => r.origPostal },

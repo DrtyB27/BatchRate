@@ -10,8 +10,17 @@ function discountColor(pct) {
   return 'bg-green-100 text-green-800';
 }
 
+/** Green if below lane avg, Yellow if near (within 5%), Red if above */
+function benchmarkColor(avgTotalCharge, laneAvg) {
+  if (laneAvg == null || laneAvg === 0) return '';
+  const ratio = avgTotalCharge / laneAvg;
+  if (ratio <= 0.95) return 'bg-green-100 text-green-800';
+  if (ratio <= 1.05) return 'bg-yellow-100 text-yellow-800';
+  return 'bg-red-100 text-red-800';
+}
+
 export default function LaneComparisonPanel({ flatRows }) {
-  const [subView, setSubView] = useState('discount'); // 'discount' | 'minimum' | 'all'
+  const [subView, setSubView] = useState('discount');
   const [sortCol, setSortCol] = useState('laneKey');
   const [sortDir, setSortDir] = useState('asc');
   const [scacFilter, setScacFilter] = useState([]);
@@ -21,10 +30,9 @@ export default function LaneComparisonPanel({ flatRows }) {
 
   const uniqueSCACs = useMemo(() => [...new Set(data.map(r => r.scac))].sort(), [data]);
 
-  // Define columns based on subView
   const columns = useMemo(() => {
     const base = [
-      { key: 'laneKey', label: 'Lane (Org\u2192Dst)', numeric: false },
+      { key: 'laneKey', label: 'Lane', numeric: false },
       { key: 'scac', label: 'SCAC', numeric: false },
     ];
 
@@ -36,6 +44,7 @@ export default function LaneComparisonPanel({ flatRows }) {
         { key: 'avgTariffGross', label: 'Avg Tariff Gross', numeric: true, fmt: 'money' },
         { key: 'avgDiscountPct', label: 'Avg Discount %', numeric: true, fmt: 'discPct' },
         { key: 'avgTotalCharge', label: 'Avg Total Charge', numeric: true, fmt: 'money' },
+        { key: 'laneAvgBenchmark', label: 'Lane Avg (All Carriers)', numeric: true, fmt: 'benchmark' },
         { key: 'lowCostWinner', label: 'Low Cost', numeric: false, center: true },
       ];
     } else if (subView === 'minimum') {
@@ -45,6 +54,7 @@ export default function LaneComparisonPanel({ flatRows }) {
         { key: 'avgWeight', label: 'Avg Weight', numeric: true },
         { key: 'avgMinCharge', label: 'Avg Min Charge', numeric: true, fmt: 'money' },
         { key: 'avgTotalCharge', label: 'Avg Total Charge', numeric: true, fmt: 'money' },
+        { key: 'laneAvgBenchmark', label: 'Lane Avg (All Carriers)', numeric: true, fmt: 'benchmark' },
         { key: 'lowCostWinner', label: 'Low Cost', numeric: false, center: true },
       ];
     } else {
@@ -55,6 +65,7 @@ export default function LaneComparisonPanel({ flatRows }) {
         { key: 'discCount', label: '# Disc', numeric: true },
         { key: 'avgWeight', label: 'Avg Weight', numeric: true },
         { key: 'avgTotalCharge', label: 'Avg Total Charge', numeric: true, fmt: 'money' },
+        { key: 'laneAvgBenchmark', label: 'Lane Avg (All Carriers)', numeric: true, fmt: 'benchmark' },
         { key: 'avgDiscPctDiscOnly', label: 'Avg Disc % (disc only)', numeric: true, fmt: 'discPct' },
         { key: 'lowCostWinner', label: 'Low Cost', numeric: false, center: true },
       ];
@@ -203,6 +214,15 @@ export default function LaneComparisonPanel({ flatRows }) {
                           className={`px-3 py-2 text-center ${val ? 'bg-green-100 text-green-700 font-bold' : ''}`}
                         >
                           {val ? '\u2713' : ''}
+                        </td>
+                      );
+                    }
+
+                    if (col.fmt === 'benchmark') {
+                      const colorCls = benchmarkColor(row.avgTotalCharge, val);
+                      return (
+                        <td key={col.key} className={`px-3 py-2 text-right font-medium ${colorCls}`}>
+                          {val != null ? fmtMoney(val) : '-'}
                         </td>
                       );
                     }

@@ -5,7 +5,7 @@
  */
 
 export function getLaneKey(row) {
-  return `${row.origState}-${row.origPostal} → ${row.destState}-${row.destPostal}`;
+  return `${row.origState} → ${row.destState}`;
 }
 
 function mean(arr) {
@@ -17,8 +17,9 @@ function mean(arr) {
 // Minimum Rate Detection
 // ============================================================
 export function isMinimumRated(rate) {
-  if (!rate || !rate.tariffNet || !rate.netCharge) return false;
-  return rate.netCharge > rate.tariffNet + 0.01;
+  if (!rate || !rate.ratingDescription) return false;
+  const desc = rate.ratingDescription.toLowerCase();
+  return desc.includes('absolute minimum') || desc.includes('tariff minimum');
 }
 
 // ============================================================
@@ -184,7 +185,7 @@ export function computeLaneComparison(flatRows, filter = 'all') {
     return base;
   });
 
-  // Determine low-cost winner per lane
+  // Determine low-cost winner per lane + compute lane average benchmark
   const byLane = {};
   for (const r of result) {
     if (!byLane[r.laneKey]) byLane[r.laneKey] = [];
@@ -192,8 +193,10 @@ export function computeLaneComparison(flatRows, filter = 'all') {
   }
   for (const rows of Object.values(byLane)) {
     const minAvg = Math.min(...rows.map(r => r.avgTotalCharge));
+    const laneAvg = mean(rows.map(r => r.avgTotalCharge));
     for (const r of rows) {
       if (r.avgTotalCharge === minAvg) r.lowCostWinner = true;
+      r.laneAvgBenchmark = laneAvg;
     }
   }
 

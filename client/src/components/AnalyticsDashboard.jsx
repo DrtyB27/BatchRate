@@ -25,13 +25,14 @@ function timestamp() {
   return new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 }
 
-function PanelCard({ title, count, children }) {
+function PanelCard({ title, count, accentColor, children }) {
   return (
     <div className="bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col overflow-hidden">
-      <div className="bg-[#002144] text-white px-4 py-2 flex items-center justify-between shrink-0">
-        <h3 className="text-sm font-semibold" style={{ fontFamily: "'Montserrat', Arial, sans-serif" }}>
-          {title}
-        </h3>
+      <div
+        className="text-white px-4 py-2 flex items-center justify-between shrink-0"
+        style={{ backgroundColor: accentColor || '#002144', fontFamily: "'Montserrat', Arial, sans-serif" }}
+      >
+        <h3 className="text-sm font-semibold">{title}</h3>
         {count != null && (
           <span className="text-xs bg-[#39b6e6] px-2 py-0.5 rounded-full">{count} rows</span>
         )}
@@ -44,22 +45,20 @@ function PanelCard({ title, count, children }) {
 export default function AnalyticsDashboard({ flatRows }) {
   const ranking = useMemo(() => computeCarrierRanking(flatRows), [flatRows]);
   const spend = useMemo(() => computeSpendAward(flatRows), [flatRows]);
-  const lanes = useMemo(() => computeLaneComparison(flatRows), [flatRows]);
   const heatmap = useMemo(() => computeDiscountHeatmap(flatRows), [flatRows]);
 
   const handleExportCsv = () => {
-    const csv = buildAnalyticsCsv(lanes, heatmap);
+    const csv = buildAnalyticsCsv(flatRows, heatmap);
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     downloadBlob(`Analytics_${timestamp()}.csv`, blob);
   };
 
   const handleExportXlsx = () => {
-    const xlsxData = buildAnalyticsXlsx(lanes, heatmap);
+    const xlsxData = buildAnalyticsXlsx(flatRows, heatmap);
     if (xlsxData) {
       const blob = new Blob([xlsxData], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
       downloadBlob(`Analytics_${timestamp()}.xlsx`, blob);
     } else {
-      // SheetJS not available — fall back to CSV
       handleExportCsv();
     }
   };
@@ -94,8 +93,8 @@ export default function AnalyticsDashboard({ flatRows }) {
           <SpendAwardPanel data={spend} />
         </PanelCard>
 
-        <PanelCard title="Lane Comparison Table" count={lanes.length}>
-          <LaneComparisonPanel data={lanes} />
+        <PanelCard title="Lane Comparison Table">
+          <LaneComparisonPanel flatRows={flatRows} />
         </PanelCard>
 
         <PanelCard title="Discount Comparison Heatmap" count={heatmap.lanes.length}>

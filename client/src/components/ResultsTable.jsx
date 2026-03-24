@@ -1,14 +1,17 @@
 import React, { useState, useMemo } from 'react';
+import { isMinimumRated } from '../services/analyticsEngine.js';
 
 /**
  * Flatten results into one row per carrier per shipment.
  * Failed/no-rate rows get one row with blank carrier columns.
+ * Adds isMinimumRated flag to each rate object.
  */
 export function flattenResults(results) {
   const rows = [];
   for (const r of results) {
     if (r.rates && r.rates.length > 0) {
       for (const rate of r.rates) {
+        rate.isMinimumRated = isMinimumRated(rate);
         rows.push({ ...r, rate, hasRate: true });
       }
     } else {
@@ -96,6 +99,7 @@ const COLUMNS = [
   { key: 'netCharge', label: 'Net Charge', get: r => r.rate?.netCharge, fmt: 'money', view: 'raw' },
   { key: 'accTotal', label: 'Acc Total', get: r => r.rate?.accTotal, fmt: 'money', view: 'raw' },
   { key: 'totalCharge', label: 'TOTAL CHARGE', get: r => r.rate?.totalCharge, fmt: 'money', view: 'raw' },
+  { key: 'minRated', label: 'Min Rated', get: r => r.rate?.isMinimumRated ? 'MIN' : '', special: 'minRated' },
   // Service
   { key: 'serviceDays', label: 'Service Days', get: r => r.rate?.serviceDays, group: 'carrier' },
   { key: 'serviceDesc', label: 'Service Desc', get: r => r.rate?.serviceDescription || '', group: 'carrier' },
@@ -228,7 +232,10 @@ export default function ResultsTable({ flatRows, lowCostFlags, viewMode, onRowCl
                   let cellVal;
                   let bgClass = '';
 
-                  if (col.special === 'lowCostRaw') {
+                  if (col.special === 'minRated') {
+                    cellVal = row.rate?.isMinimumRated ? 'MIN' : '';
+                    if (row.rate?.isMinimumRated) bgClass = 'font-bold';
+                  } else if (col.special === 'lowCostRaw') {
                     cellVal = flags.lowCostRaw ? '\u2713' : '';
                     if (flags.lowCostRaw) bgClass = 'bg-green-100';
                   } else if (col.special === 'lowCostCustomer') {
@@ -241,10 +248,14 @@ export default function ResultsTable({ flatRows, lowCostFlags, viewMode, onRowCl
                     cellVal = fmtVal(col.get(row), col.fmt);
                   }
 
+                  const inlineStyle = col.special === 'minRated' && row.rate?.isMinimumRated
+                    ? { backgroundColor: '#FFF3E0' } : undefined;
+
                   return (
                     <td
                       key={col.key}
                       className={`px-2 py-1.5 whitespace-nowrap ${bgClass}`}
+                      style={inlineStyle}
                     >
                       {cellVal}
                     </td>

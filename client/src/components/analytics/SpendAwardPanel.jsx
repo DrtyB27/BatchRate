@@ -13,6 +13,8 @@ export default function SpendAwardPanel({ data }) {
   const totals = {
     lanesAwarded: rows.reduce((s, r) => s + r.lanesAwarded, 0),
     shipments: rows.reduce((s, r) => s + r.shipments, 0),
+    minRated: rows.reduce((s, r) => s + r.minRatedCount, 0),
+    discRated: rows.reduce((s, r) => s + r.discRatedCount, 0),
   };
 
   return (
@@ -24,6 +26,8 @@ export default function SpendAwardPanel({ data }) {
             <th className="px-3 py-2 text-left font-semibold">Carrier Name</th>
             <th className="px-3 py-2 text-right font-semibold"># Lanes Awarded</th>
             <th className="px-3 py-2 text-right font-semibold"># Shipments</th>
+            <th className="px-3 py-2 text-right font-semibold"># Min Rated</th>
+            <th className="px-3 py-2 text-right font-semibold"># Disc Rated</th>
             <th className="px-3 py-2 text-right font-semibold">Total Est. Spend</th>
             <th className="px-3 py-2 text-right font-semibold">% of Total Spend</th>
           </tr>
@@ -37,6 +41,10 @@ export default function SpendAwardPanel({ data }) {
                 <td className="px-3 py-2">{row.carrierName}</td>
                 <td className="px-3 py-2 text-right">{row.lanesAwarded}</td>
                 <td className="px-3 py-2 text-right">{row.shipments}</td>
+                <td className={`px-3 py-2 text-right ${row.minRatedCount > 0 ? 'text-amber-600 font-medium' : ''}`}>
+                  {row.minRatedCount}
+                </td>
+                <td className="px-3 py-2 text-right">{row.discRatedCount}</td>
                 <td className="px-3 py-2 text-right relative">
                   <div
                     className="absolute inset-y-0 left-0 bg-green-100 opacity-60 rounded-r"
@@ -53,6 +61,8 @@ export default function SpendAwardPanel({ data }) {
             <td className="px-3 py-2" colSpan={2}>TOTAL</td>
             <td className="px-3 py-2 text-right">{totals.lanesAwarded}</td>
             <td className="px-3 py-2 text-right">{totals.shipments}</td>
+            <td className="px-3 py-2 text-right">{totals.minRated}</td>
+            <td className="px-3 py-2 text-right">{totals.discRated}</td>
             <td className="px-3 py-2 text-right">{fmtMoney(totalSpend)}</td>
             <td className="px-3 py-2 text-right">100.0%</td>
           </tr>

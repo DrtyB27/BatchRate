@@ -42,6 +42,9 @@ export default function DiscountHeatmapPanel({ data }) {
 
   return (
     <div className="overflow-auto max-h-[50vh]">
+      <div className="px-3 py-1.5 text-xs text-amber-700 bg-amber-50 border-b border-amber-200 shrink-0">
+        Minimum-rated shipments excluded. Showing discount-rated only.
+      </div>
       <table className="w-full text-xs border-collapse">
         <thead className="sticky top-0 z-10">
           <tr className="bg-[#002144] text-white">

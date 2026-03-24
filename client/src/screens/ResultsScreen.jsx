@@ -37,6 +37,7 @@ function buildRawCsv(flatRows, lowCostFlags) {
     'Strategy Description', 'Tier ID', 'Rating Type', 'FAK',
     'Tariff Gross', 'Tariff Discount', 'Tariff Disc %', 'Tariff Net',
     'Net Charge', 'Acc Total', 'Total Charge',
+    'Min Rated',
     'Low Cost Carrier (raw)',
     'Service Days', 'Service Description', 'Est. Delivery', 'Distance', 'Distance UOM',
     'Rating Description', 'Orig Terminal', 'Dest Terminal',
@@ -57,6 +58,7 @@ function buildRawCsv(flatRows, lowCostFlags) {
       r.rate?.tariffDiscountPct ?? '', r.rate?.tariffNet ?? '',
       r.rate?.netCharge ?? '', r.rate?.accTotal ?? '',
       r.rate?.totalCharge ?? '',
+      r.rate?.isMinimumRated ? 'MIN' : '',
       flags.lowCostRaw ? 'Y' : '',
       r.rate?.serviceDays ?? '', r.rate?.serviceDescription || '',
       r.rate?.estimatedDelivery || '', r.rate?.distance ?? '',
@@ -81,6 +83,7 @@ function buildCustomerCsv(flatRows, lowCostFlags) {
     'SCAC', 'Carrier Name', 'Contract Ref', 'Contract Description',
     'Strategy Description', 'Tier ID', 'Rating Type',
     'Margin Type', 'Margin Value', 'Customer Price',
+    'Min Rated',
     'Low Cost Carrier (customer)',
     'Service Days', 'Service Description', 'Est. Delivery', 'Distance', 'Distance UOM',
     'Rating Description', 'Orig Terminal', 'Dest Terminal',
@@ -99,6 +102,7 @@ function buildCustomerCsv(flatRows, lowCostFlags) {
       r.rate?.ratingType || '',
       r.rate?.marginType || '', r.rate?.marginValue ?? '',
       r.rate?.customerPrice != null ? Number(r.rate.customerPrice).toFixed(2) : '',
+      r.rate?.isMinimumRated ? 'MIN' : '',
       flags.lowCostCustomer ? 'Y' : '',
       r.rate?.serviceDays ?? '', r.rate?.serviceDescription || '',
       r.rate?.estimatedDelivery || '', r.rate?.distance ?? '',
@@ -140,6 +144,7 @@ const CUSTOM_RATE_HEADERS = [
 ];
 
 function buildCustomRateCsv(flatRows) {
+  const headersWithFlag = [...CUSTOM_RATE_HEADERS, '_minRatedFlag'];
   let detailNum = 1;
   const dataRows = flatRows
     .filter(r => r.hasRate)
@@ -166,10 +171,13 @@ function buildCustomRateCsv(flatRows) {
       row[64] = rate.tariffNet != null ? String(rate.tariffNet) : '';  // minCharge
       row[67] = rate.firstFAK || '';                             // freightClassValues
 
+      // Append _minRatedFlag as metadata column after all 3G import columns
+      row.push(rate.isMinimumRated ? 'MIN' : '');
+
       return row.map(escCsv);
     });
 
-  return [CUSTOM_RATE_HEADERS.join(','), ...dataRows.map(r => r.join(','))].join('\n');
+  return [headersWithFlag.join(','), ...dataRows.map(r => r.join(','))].join('\n');
 }
 
 // ============================================================

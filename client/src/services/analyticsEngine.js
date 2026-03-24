@@ -4,13 +4,21 @@
  * NO side effects, NO DOM access.
  */
 
-function getLaneKey(row) {
+export function getLaneKey(row) {
   return `${row.origState}-${row.origPostal} → ${row.destState}-${row.destPostal}`;
 }
 
 function mean(arr) {
   if (arr.length === 0) return 0;
   return arr.reduce((a, b) => a + b, 0) / arr.length;
+}
+
+// ============================================================
+// Minimum Rate Detection
+// ============================================================
+export function isMinimumRated(rate) {
+  if (!rate || !rate.tariffNet || !rate.netCharge) return false;
+  return rate.netCharge > rate.tariffNet + 0.01;
 }
 
 // ============================================================
@@ -25,7 +33,7 @@ function getLowCostByReference(flatRows) {
     groups[ref].push(row);
   }
 
-  const winners = {}; // reference -> winning row
+  const winners = {};
   for (const [ref, rows] of Object.entries(groups)) {
     let best = null;
     for (const r of rows) {
@@ -49,7 +57,6 @@ export function computeCarrierRanking(flatRows) {
   const uniqueRefs = new Set(Object.keys(winners));
   const totalUniqueRefs = uniqueRefs.size;
 
-  // Group by SCAC
   const byCarrier = {};
   for (const row of validRows) {
     const scac = row.rate.carrierSCAC || 'UNKNOWN';
@@ -59,21 +66,26 @@ export function computeCarrierRanking(flatRows) {
     byCarrier[scac].rows.push(row);
   }
 
-  // Count wins
   for (const winner of Object.values(winners)) {
     const scac = winner.rate.carrierSCAC || 'UNKNOWN';
     if (byCarrier[scac]) byCarrier[scac].wins++;
   }
 
-  const result = Object.values(byCarrier).map(c => ({
-    scac: c.scac,
-    carrierName: c.name,
-    lowCostWins: c.wins,
-    winRate: totalUniqueRefs > 0 ? (c.wins / totalUniqueRefs) * 100 : 0,
-    avgTotalCharge: mean(c.rows.map(r => r.rate.totalCharge ?? 0)),
-    avgTariffDiscPct: mean(c.rows.map(r => r.rate.tariffDiscountPct ?? 0)),
-    totalShipmentsRated: c.rows.length,
-  }));
+  const result = Object.values(byCarrier).map(c => {
+    const discRows = c.rows.filter(r => !r.rate.isMinimumRated);
+    const minRows = c.rows.filter(r => r.rate.isMinimumRated);
+    return {
+      scac: c.scac,
+      carrierName: c.name,
+      lowCostWins: c.wins,
+      winRate: totalUniqueRefs > 0 ? (c.wins / totalUniqueRefs) * 100 : 0,
+      avgTotalCharge: mean(c.rows.map(r => r.rate.totalCharge ?? 0)),
+      avgTariffDiscPct: mean(discRows.map(r => r.rate.tariffDiscountPct ?? 0)),
+      totalShipmentsRated: c.rows.length,
+      minRatedCount: minRows.length,
+      discRatedCount: discRows.length,
+    };
+  });
 
   result.sort((a, b) => b.lowCostWins - a.lowCostWins);
   return result;
@@ -90,11 +102,16 @@ export function computeSpendAward(flatRows) {
     const scac = row.rate.carrierSCAC || 'UNKNOWN';
     const laneKey = getLaneKey(row);
     if (!byCarrier[scac]) {
-      byCarrier[scac] = { scac, name: row.rate.carrierName || '', lanes: new Set(), shipments: 0, spend: 0 };
+      byCarrier[scac] = { scac, name: row.rate.carrierName || '', lanes: new Set(), shipments: 0, spend: 0, minCount: 0, discCount: 0 };
     }
     byCarrier[scac].lanes.add(laneKey);
     byCarrier[scac].shipments++;
     byCarrier[scac].spend += row.rate.totalCharge ?? 0;
+    if (row.rate.isMinimumRated) {
+      byCarrier[scac].minCount++;
+    } else {
+      byCarrier[scac].discCount++;
+    }
   }
 
   const totalSpend = Object.values(byCarrier).reduce((sum, c) => sum + c.spend, 0);
@@ -104,6 +121,8 @@ export function computeSpendAward(flatRows) {
     carrierName: c.name,
     lanesAwarded: c.lanes.size,
     shipments: c.shipments,
+    minRatedCount: c.minCount,
+    discRatedCount: c.discCount,
     totalSpend: c.spend,
     pctOfSpend: totalSpend > 0 ? (c.spend / totalSpend) * 100 : 0,
   }));
@@ -114,11 +133,17 @@ export function computeSpendAward(flatRows) {
 
 // ============================================================
 // PANEL 3: Lane Comparison Table
+// filter: 'discount' | 'minimum' | 'all'
 // ============================================================
-export function computeLaneComparison(flatRows) {
-  const validRows = flatRows.filter(r => r.hasRate && r.rate.validRate !== 'false');
+export function computeLaneComparison(flatRows, filter = 'all') {
+  let validRows = flatRows.filter(r => r.hasRate && r.rate.validRate !== 'false');
 
-  // Group by laneKey + SCAC
+  if (filter === 'discount') {
+    validRows = validRows.filter(r => !r.rate.isMinimumRated);
+  } else if (filter === 'minimum') {
+    validRows = validRows.filter(r => r.rate.isMinimumRated);
+  }
+
   const groups = {};
   for (const row of validRows) {
     const laneKey = getLaneKey(row);
@@ -130,19 +155,36 @@ export function computeLaneComparison(flatRows) {
     groups[key].rows.push(row);
   }
 
-  const result = Object.values(groups).map(g => ({
-    laneKey: g.laneKey,
-    scac: g.scac,
-    carrierName: g.carrierName,
-    ratedShipments: g.rows.length,
-    avgWeight: mean(g.rows.map(r => parseFloat(r.inputNetWt) || 0)),
-    minTariffGross: Math.min(...g.rows.map(r => r.rate.tariffGross ?? Infinity)),
-    avgDiscountPct: mean(g.rows.map(r => r.rate.tariffDiscountPct ?? 0)),
-    avgTotalCharge: mean(g.rows.map(r => r.rate.totalCharge ?? 0)),
-    lowCostWinner: false, // computed below
-  }));
+  const result = Object.values(groups).map(g => {
+    const minRows = g.rows.filter(r => r.rate.isMinimumRated);
+    const discRows = g.rows.filter(r => !r.rate.isMinimumRated);
 
-  // Determine low-cost winner per lane (lowest avgTotalCharge)
+    const base = {
+      laneKey: g.laneKey,
+      scac: g.scac,
+      carrierName: g.carrierName,
+      shipments: g.rows.length,
+      avgWeight: mean(g.rows.map(r => parseFloat(r.inputNetWt) || 0)),
+      avgTotalCharge: mean(g.rows.map(r => r.rate.totalCharge ?? 0)),
+      lowCostWinner: false,
+    };
+
+    if (filter === 'discount') {
+      base.avgTariffGross = mean(g.rows.map(r => r.rate.tariffGross ?? 0));
+      base.avgDiscountPct = mean(g.rows.map(r => r.rate.tariffDiscountPct ?? 0));
+    } else if (filter === 'minimum') {
+      base.avgMinCharge = mean(g.rows.map(r => r.rate.netCharge ?? 0));
+    } else {
+      // 'all'
+      base.minCount = minRows.length;
+      base.discCount = discRows.length;
+      base.avgDiscPctDiscOnly = discRows.length > 0 ? mean(discRows.map(r => r.rate.tariffDiscountPct ?? 0)) : null;
+    }
+
+    return base;
+  });
+
+  // Determine low-cost winner per lane
   const byLane = {};
   for (const r of result) {
     if (!byLane[r.laneKey]) byLane[r.laneKey] = [];
@@ -155,7 +197,6 @@ export function computeLaneComparison(flatRows) {
     }
   }
 
-  // Sort: lane alpha, then avgTotalCharge asc
   result.sort((a, b) => {
     const laneCmp = a.laneKey.localeCompare(b.laneKey);
     if (laneCmp !== 0) return laneCmp;
@@ -167,11 +208,13 @@ export function computeLaneComparison(flatRows) {
 
 // ============================================================
 // PANEL 4: Discount Comparison Heatmap
+// ONLY discount-rated shipments (isMinimumRated === false)
 // ============================================================
 export function computeDiscountHeatmap(flatRows) {
-  const validRows = flatRows.filter(r => r.hasRate && r.rate.validRate !== 'false');
+  const validRows = flatRows.filter(
+    r => r.hasRate && r.rate.validRate !== 'false' && !r.rate.isMinimumRated
+  );
 
-  // Collect unique lanes and carriers
   const lanes = new Set();
   const carriers = new Set();
   const groups = {};
@@ -189,7 +232,6 @@ export function computeDiscountHeatmap(flatRows) {
   const sortedLanes = [...lanes].sort();
   const sortedCarriers = [...carriers].sort();
 
-  // Build cell data
   const cells = {};
   let minDisc = Infinity;
   let maxDisc = -Infinity;
@@ -201,7 +243,6 @@ export function computeDiscountHeatmap(flatRows) {
     if (avg > maxDisc) maxDisc = avg;
   }
 
-  // Lane averages (last column)
   const laneAvgs = {};
   for (const lane of sortedLanes) {
     const vals = sortedCarriers
@@ -210,7 +251,6 @@ export function computeDiscountHeatmap(flatRows) {
     laneAvgs[lane] = vals.length > 0 ? mean(vals) : null;
   }
 
-  // Carrier averages (last row)
   const carrierAvgs = {};
   for (const carrier of sortedCarriers) {
     const vals = sortedLanes
@@ -241,27 +281,43 @@ function escCsv(val) {
   return s;
 }
 
-export function buildAnalyticsCsv(laneData, heatmapData) {
+export function buildAnalyticsCsv(flatRows, heatmapData) {
   const lines = [];
 
-  // Section 1: Lane Comparison
-  lines.push('LANE COMPARISON');
-  lines.push(['Lane', 'SCAC', 'Carrier Name', '# Rated Shipments', 'Avg Weight',
-    'Min Charge (Tariff Gross)', 'Avg Discount %', 'Avg Total Charge', 'Low Cost Winner'].map(escCsv).join(','));
-  for (const r of laneData) {
+  // Section 1: Lane Comparison — Discount-Rated
+  const discData = computeLaneComparison(flatRows, 'discount');
+  lines.push('LANE COMPARISON — DISCOUNT-RATED');
+  lines.push(['Lane', 'SCAC', 'Carrier Name', '# Disc Rated Shipments', 'Avg Weight',
+    'Avg Tariff Gross', 'Avg Discount %', 'Avg Total Charge', 'Low Cost Winner'].map(escCsv).join(','));
+  for (const r of discData) {
     lines.push([
-      r.laneKey, r.scac, r.carrierName, r.ratedShipments,
-      r.avgWeight.toFixed(1), r.minTariffGross.toFixed(2),
-      r.avgDiscountPct.toFixed(1), r.avgTotalCharge.toFixed(2),
+      r.laneKey, r.scac, r.carrierName, r.shipments,
+      r.avgWeight.toFixed(1), (r.avgTariffGross ?? 0).toFixed(2),
+      (r.avgDiscountPct ?? 0).toFixed(1), r.avgTotalCharge.toFixed(2),
       r.lowCostWinner ? 'Y' : '',
     ].map(escCsv).join(','));
   }
 
-  // Blank separator
   lines.push('');
 
-  // Section 2: Discount Comparison
-  lines.push('DISCOUNT COMPARISON');
+  // Section 2: Lane Comparison — Minimum-Rated
+  const minData = computeLaneComparison(flatRows, 'minimum');
+  lines.push('LANE COMPARISON — MINIMUM-RATED');
+  lines.push(['Lane', 'SCAC', 'Carrier Name', '# Min Rated Shipments', 'Avg Weight',
+    'Avg Min Charge', 'Avg Total Charge', 'Low Cost Winner'].map(escCsv).join(','));
+  for (const r of minData) {
+    lines.push([
+      r.laneKey, r.scac, r.carrierName, r.shipments,
+      r.avgWeight.toFixed(1), (r.avgMinCharge ?? 0).toFixed(2),
+      r.avgTotalCharge.toFixed(2),
+      r.lowCostWinner ? 'Y' : '',
+    ].map(escCsv).join(','));
+  }
+
+  lines.push('');
+
+  // Section 3: Discount Comparison Heatmap
+  lines.push('DISCOUNT COMPARISON HEATMAP');
   lines.push(['Lane', ...heatmapData.carriers, 'Lane Avg'].map(escCsv).join(','));
   for (const lane of heatmapData.lanes) {
     const row = [lane];
@@ -272,7 +328,6 @@ export function buildAnalyticsCsv(laneData, heatmapData) {
     row.push(heatmapData.laneAvgs[lane] != null ? heatmapData.laneAvgs[lane].toFixed(1) : '');
     lines.push(row.map(escCsv).join(','));
   }
-  // Carrier average row
   const avgRow = ['Carrier Avg'];
   for (const carrier of heatmapData.carriers) {
     avgRow.push(heatmapData.carrierAvgs[carrier] != null ? heatmapData.carrierAvgs[carrier].toFixed(1) : '');
@@ -283,27 +338,40 @@ export function buildAnalyticsCsv(laneData, heatmapData) {
   return lines.join('\n');
 }
 
-export function buildAnalyticsXlsx(laneData, heatmapData) {
-  // Check if SheetJS is available
+export function buildAnalyticsXlsx(flatRows, heatmapData) {
   if (typeof window !== 'undefined' && window.XLSX) {
     const XLSX = window.XLSX;
     const wb = XLSX.utils.book_new();
 
-    // Sheet 1: Lane Comparison
-    const laneRows = [
-      ['Lane', 'SCAC', 'Carrier Name', '# Rated Shipments', 'Avg Weight',
-        'Min Charge (Tariff Gross)', 'Avg Discount %', 'Avg Total Charge', 'Low Cost Winner'],
-      ...laneData.map(r => [
-        r.laneKey, r.scac, r.carrierName, r.ratedShipments,
-        parseFloat(r.avgWeight.toFixed(1)), parseFloat(r.minTariffGross.toFixed(2)),
-        parseFloat(r.avgDiscountPct.toFixed(1)), parseFloat(r.avgTotalCharge.toFixed(2)),
+    // Sheet 1: Lane Comparison (Discount-Rated)
+    const discData = computeLaneComparison(flatRows, 'discount');
+    const discRows = [
+      ['Lane', 'SCAC', 'Carrier Name', '# Disc Rated Shipments', 'Avg Weight',
+        'Avg Tariff Gross', 'Avg Discount %', 'Avg Total Charge', 'Low Cost Winner'],
+      ...discData.map(r => [
+        r.laneKey, r.scac, r.carrierName, r.shipments,
+        parseFloat(r.avgWeight.toFixed(1)), parseFloat((r.avgTariffGross ?? 0).toFixed(2)),
+        parseFloat((r.avgDiscountPct ?? 0).toFixed(1)), parseFloat(r.avgTotalCharge.toFixed(2)),
         r.lowCostWinner ? 'Y' : '',
       ]),
     ];
-    const ws1 = XLSX.utils.aoa_to_sheet(laneRows);
-    XLSX.utils.book_append_sheet(wb, ws1, 'Lane Comparison');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(discRows), 'Lane Comparison (Disc)');
 
-    // Sheet 2: Discount Comparison
+    // Sheet 2: Lane Comparison (Minimum-Rated)
+    const minData = computeLaneComparison(flatRows, 'minimum');
+    const minRows = [
+      ['Lane', 'SCAC', 'Carrier Name', '# Min Rated Shipments', 'Avg Weight',
+        'Avg Min Charge', 'Avg Total Charge', 'Low Cost Winner'],
+      ...minData.map(r => [
+        r.laneKey, r.scac, r.carrierName, r.shipments,
+        parseFloat(r.avgWeight.toFixed(1)), parseFloat((r.avgMinCharge ?? 0).toFixed(2)),
+        parseFloat(r.avgTotalCharge.toFixed(2)),
+        r.lowCostWinner ? 'Y' : '',
+      ]),
+    ];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(minRows), 'Lane Comparison (Min)');
+
+    // Sheet 3: Discount Comparison Heatmap
     const heatRows = [
       ['Lane', ...heatmapData.carriers, 'Lane Avg'],
       ...heatmapData.lanes.map(lane => {
@@ -316,18 +384,15 @@ export function buildAnalyticsXlsx(laneData, heatmapData) {
         return row;
       }),
     ];
-    // Carrier avg row
-    const avgRow = ['Carrier Avg'];
+    const heatAvgRow = ['Carrier Avg'];
     for (const carrier of heatmapData.carriers) {
-      avgRow.push(heatmapData.carrierAvgs[carrier] != null ? parseFloat(heatmapData.carrierAvgs[carrier].toFixed(1)) : '');
+      heatAvgRow.push(heatmapData.carrierAvgs[carrier] != null ? parseFloat(heatmapData.carrierAvgs[carrier].toFixed(1)) : '');
     }
-    avgRow.push('');
-    heatRows.push(avgRow);
-    const ws2 = XLSX.utils.aoa_to_sheet(heatRows);
-    XLSX.utils.book_append_sheet(wb, ws2, 'Discount Comparison');
+    heatAvgRow.push('');
+    heatRows.push(heatAvgRow);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(heatRows), 'Discount Heatmap');
 
     return XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
   }
-  // SheetJS not available — return null so caller can fall back to CSV
   return null;
 }

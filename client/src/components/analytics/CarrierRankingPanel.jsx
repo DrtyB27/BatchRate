@@ -21,6 +21,8 @@ export default function CarrierRankingPanel({ data }) {
             <th className="px-3 py-2 text-right font-semibold">Avg Total Charge</th>
             <th className="px-3 py-2 text-right font-semibold">Avg Tariff Disc %</th>
             <th className="px-3 py-2 text-right font-semibold">Total Rated</th>
+            <th className="px-3 py-2 text-right font-semibold"># Min Rated</th>
+            <th className="px-3 py-2 text-right font-semibold"># Disc Rated</th>
           </tr>
         </thead>
         <tbody>
@@ -32,9 +34,7 @@ export default function CarrierRankingPanel({ data }) {
                 key={row.scac}
                 className={`border-b border-gray-100 hover:bg-gray-50 ${isFirst ? 'border-l-4 border-l-[#39b6e6]' : ''}`}
               >
-                <td className="px-3 py-2 font-bold text-[#002144]">
-                  {rank === 1 ? '\u{1F947}' : rank === 2 ? '\u{1F948}' : rank === 3 ? '\u{1F949}' : rank}
-                </td>
+                <td className="px-3 py-2 font-bold text-[#002144]">{rank}</td>
                 <td className="px-3 py-2 font-medium">{row.scac}</td>
                 <td className="px-3 py-2">{row.carrierName}</td>
                 <td className="px-3 py-2 text-right font-semibold">{row.lowCostWins}</td>
@@ -42,6 +42,10 @@ export default function CarrierRankingPanel({ data }) {
                 <td className="px-3 py-2 text-right">{fmtMoney(row.avgTotalCharge)}</td>
                 <td className="px-3 py-2 text-right">{fmtPct(row.avgTariffDiscPct)}</td>
                 <td className="px-3 py-2 text-right">{row.totalShipmentsRated}</td>
+                <td className={`px-3 py-2 text-right ${row.minRatedCount > 0 ? 'text-amber-600 font-medium' : ''}`}>
+                  {row.minRatedCount}
+                </td>
+                <td className="px-3 py-2 text-right">{row.discRatedCount}</td>
               </tr>
             );
           })}

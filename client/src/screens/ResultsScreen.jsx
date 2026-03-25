@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import ResultsTable, { flattenResults, computeLowCostFlags } from '../components/ResultsTable.jsx';
 import ExportWarningModal from '../components/ExportWarningModal.jsx';
 import AnalyticsDashboard from '../components/AnalyticsDashboard.jsx';
+import ScenarioBuilder from '../components/ScenarioBuilder.jsx';
 
 function downloadCsv(filename, csvContent) {
   const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -30,7 +31,8 @@ function timestamp() {
 // ============================================================
 function buildRawCsv(flatRows, lowCostFlags) {
   const headers = [
-    'Reference', 'Orig City', 'Org State', 'Org Postal Code', 'Orig Cntry',
+    'Reference', 'Historic Carrier', 'Historic Cost',
+    'Orig City', 'Org State', 'Org Postal Code', 'Orig Cntry',
     'Dst City', 'Dst State', 'Dst Postal Code', 'Dst Cntry',
     'Class', 'Net Wt Lb', 'Pcs', 'Ttl HUs', 'Pickup Date',
     'SCAC', 'Carrier Name', 'Contract Ref', 'Contract Description',
@@ -47,7 +49,8 @@ function buildRawCsv(flatRows, lowCostFlags) {
   const rows = flatRows.map(r => {
     const flags = lowCostFlags.get(r) || {};
     return [
-      r.reference, r.origCity, r.origState, r.origPostal, r.origCountry,
+      r.reference, r.historicCarrier || '', r.historicCost || '',
+      r.origCity, r.origState, r.origPostal, r.origCountry,
       r.destCity, r.destState, r.destPostal, r.destCountry,
       r.inputClass, r.inputNetWt, r.inputPcs, r.inputHUs, r.pickupDate,
       r.rate?.carrierSCAC || '', r.rate?.carrierName || '',
@@ -77,7 +80,8 @@ function buildRawCsv(flatRows, lowCostFlags) {
 // ============================================================
 function buildCustomerCsv(flatRows, lowCostFlags) {
   const headers = [
-    'Reference', 'Orig City', 'Org State', 'Org Postal Code', 'Orig Cntry',
+    'Reference', 'Historic Carrier', 'Historic Cost',
+    'Orig City', 'Org State', 'Org Postal Code', 'Orig Cntry',
     'Dst City', 'Dst State', 'Dst Postal Code', 'Dst Cntry',
     'Class', 'Net Wt Lb', 'Pcs', 'Ttl HUs', 'Pickup Date',
     'SCAC', 'Carrier Name', 'Contract Ref', 'Contract Description',
@@ -93,7 +97,8 @@ function buildCustomerCsv(flatRows, lowCostFlags) {
   const rows = flatRows.map(r => {
     const flags = lowCostFlags.get(r) || {};
     return [
-      r.reference, r.origCity, r.origState, r.origPostal, r.origCountry,
+      r.reference, r.historicCarrier || '', r.historicCost || '',
+      r.origCity, r.origState, r.origPostal, r.origCountry,
       r.destCity, r.destState, r.destPostal, r.destCountry,
       r.inputClass, r.inputNetWt, r.inputPcs, r.inputHUs, r.pickupDate,
       r.rate?.carrierSCAC || '', r.rate?.carrierName || '',
@@ -184,7 +189,7 @@ function buildCustomRateCsv(flatRows) {
 // RESULTS SCREEN
 // ============================================================
 export default function ResultsScreen({ results, totalRows, batchParams, onNewBatch }) {
-  const [viewMode, setViewMode] = useState('both'); // raw | customer | both | analytics
+  const [viewMode, setViewMode] = useState('both'); // raw | customer | both | analytics | scenarios
   const [modal, setModal] = useState(null); // null | 'customer' | 'customRate'
   const [xmlModal, setXmlModal] = useState(null); // row data for XML modal
 
@@ -295,11 +300,21 @@ export default function ResultsScreen({ results, totalRows, batchParams, onNewBa
         >
           Analytics
         </button>
+        <button
+          className={viewBtnCls('scenarios')}
+          onClick={() => setViewMode('scenarios')}
+          disabled={!isComplete}
+          title={!isComplete ? 'Available when batch is complete' : ''}
+        >
+          Scenarios
+        </button>
       </div>
 
-      {/* Results table or Analytics dashboard */}
+      {/* Results table, Analytics dashboard, or Scenario Builder */}
       {viewMode === 'analytics' ? (
         <AnalyticsDashboard flatRows={flatRows} />
+      ) : viewMode === 'scenarios' ? (
+        <ScenarioBuilder flatRows={flatRows} />
       ) : (
         <ResultsTable
           flatRows={flatRows}

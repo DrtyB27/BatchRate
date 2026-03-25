@@ -399,3 +399,310 @@ export function buildAnalyticsXlsx(flatRows, heatmapData) {
   }
   return null;
 }
+
+// ============================================================
+// SCENARIO BUILDER: Computation Engine
+// ============================================================
+
+/**
+ * Compute scenario awards given a set of eligible carrier SCACs.
+ * For each reference, award to lowest-cost eligible carrier.
+ */
+export function computeScenario(flatRows, eligibleSCACs) {
+  const eligibleSet = new Set(eligibleSCACs.map(s => s.toUpperCase()));
+  const refGroups = {};
+
+  for (const row of flatRows) {
+    if (!row.hasRate || row.rate.validRate === 'false') continue;
+    const scac = (row.rate.carrierSCAC || '').toUpperCase();
+    if (!eligibleSet.has(scac)) continue;
+    const ref = row.reference || '';
+    if (!refGroups[ref]) refGroups[ref] = [];
+    refGroups[ref].push(row);
+  }
+
+  const allRefs = new Set(flatRows.map(r => r.reference || ''));
+  const awards = {};
+  const unserviced = [];
+
+  for (const ref of allRefs) {
+    const candidates = refGroups[ref];
+    if (!candidates || candidates.length === 0) {
+      unserviced.push(ref);
+      continue;
+    }
+    let best = null;
+    for (const r of candidates) {
+      const tc = r.rate.totalCharge ?? Infinity;
+      if (!best || tc < (best.rate.totalCharge ?? Infinity)) best = r;
+    }
+    if (best) {
+      awards[ref] = {
+        scac: best.rate.carrierSCAC,
+        carrierName: best.rate.carrierName,
+        totalCharge: best.rate.totalCharge,
+        isMinimumRated: best.rate.isMinimumRated,
+        tariffDiscountPct: best.rate.tariffDiscountPct,
+        laneKey: getLaneKey(best),
+        row: best,
+      };
+    }
+  }
+
+  // Summary
+  const awardedList = Object.values(awards);
+  const discAwarded = awardedList.filter(a => !a.isMinimumRated);
+  const summary = {
+    totalSpend: awardedList.reduce((s, a) => s + (a.totalCharge ?? 0), 0),
+    carrierCount: new Set(awardedList.map(a => a.scac)).size,
+    shipmentsAwarded: awardedList.length,
+    unservicedCount: unserviced.length,
+    minRatedCount: awardedList.filter(a => a.isMinimumRated).length,
+    avgDiscountPct: discAwarded.length > 0 ? mean(discAwarded.map(a => a.tariffDiscountPct ?? 0)) : 0,
+  };
+
+  // Carrier breakdown
+  const carrierBreakdown = {};
+  for (const a of awardedList) {
+    const scac = a.scac;
+    if (!carrierBreakdown[scac]) {
+      carrierBreakdown[scac] = {
+        carrierName: a.carrierName, shipmentCount: 0,
+        lanes: new Set(), totalSpend: 0, minCount: 0, discCount: 0, discPcts: [],
+      };
+    }
+    const cb = carrierBreakdown[scac];
+    cb.shipmentCount++;
+    cb.lanes.add(a.laneKey);
+    cb.totalSpend += a.totalCharge ?? 0;
+    if (a.isMinimumRated) cb.minCount++;
+    else { cb.discCount++; cb.discPcts.push(a.tariffDiscountPct ?? 0); }
+  }
+
+  const carrierBreakdownResult = {};
+  for (const [scac, cb] of Object.entries(carrierBreakdown)) {
+    carrierBreakdownResult[scac] = {
+      carrierName: cb.carrierName,
+      shipmentCount: cb.shipmentCount,
+      laneCount: cb.lanes.size,
+      totalSpend: cb.totalSpend,
+      pctOfSpend: summary.totalSpend > 0 ? (cb.totalSpend / summary.totalSpend) * 100 : 0,
+      minCount: cb.minCount,
+      discCount: cb.discCount,
+      avgDiscount: cb.discPcts.length > 0 ? mean(cb.discPcts) : 0,
+    };
+  }
+
+  // Lane breakdown
+  const laneBreakdown = {};
+  for (const [ref, a] of Object.entries(awards)) {
+    const lk = a.laneKey;
+    if (!laneBreakdown[lk]) {
+      laneBreakdown[lk] = { shipmentCount: 0, weights: [], classes: [], totalCost: 0, detailAwards: [], scacCounts: {} };
+    }
+    const lb = laneBreakdown[lk];
+    lb.shipmentCount++;
+    const row = a.row;
+    lb.weights.push(parseFloat(row.inputNetWt) || 0);
+    lb.classes.push(row.inputClass || '');
+    lb.totalCost += a.totalCharge ?? 0;
+    lb.detailAwards.push({ reference: ref, scac: a.scac, totalCharge: a.totalCharge, isMinimumRated: a.isMinimumRated });
+    lb.scacCounts[a.scac] = (lb.scacCounts[a.scac] || 0) + 1;
+  }
+
+  const laneBreakdownResult = {};
+  for (const [lk, lb] of Object.entries(laneBreakdown)) {
+    // Plurality winner
+    let topScac = '', topCount = 0;
+    for (const [scac, cnt] of Object.entries(lb.scacCounts)) {
+      if (cnt > topCount) { topScac = scac; topCount = cnt; }
+    }
+    const isMin = lb.detailAwards.some(a => a.scac === topScac && a.isMinimumRated);
+    laneBreakdownResult[lk] = {
+      shipmentCount: lb.shipmentCount,
+      avgWeight: mean(lb.weights),
+      avgClass: lb.classes[0] || '',
+      awardedSCAC: topScac,
+      awardedSCACLabel: Object.keys(lb.scacCounts).length > 1 ? `${topScac} (${topCount}/${lb.shipmentCount})` : topScac,
+      awardedCost: lb.totalCost,
+      isMinRated: isMin,
+      detailAwards: lb.detailAwards,
+    };
+  }
+
+  return { awards, unserviced, summary, carrierBreakdown: carrierBreakdownResult, laneBreakdown: laneBreakdownResult };
+}
+
+/**
+ * Compute "Current State" scenario from historicCarrier + historicCost.
+ * Returns same shape as computeScenario for consistent rendering.
+ */
+export function computeCurrentState(flatRows) {
+  const allRefs = new Set(flatRows.map(r => r.reference || ''));
+  const refData = {};
+  for (const row of flatRows) {
+    const ref = row.reference || '';
+    if (!refData[ref]) refData[ref] = row;
+  }
+
+  const awards = {};
+  const unserviced = [];
+
+  for (const ref of allRefs) {
+    const row = refData[ref];
+    if (row && row.historicCarrier) {
+      awards[ref] = {
+        scac: row.historicCarrier,
+        carrierName: row.historicCarrier,
+        totalCharge: row.historicCost || 0,
+        isMinimumRated: false,
+        tariffDiscountPct: 0,
+        laneKey: getLaneKey(row),
+        row,
+      };
+    } else {
+      unserviced.push(ref);
+    }
+  }
+
+  const awardedList = Object.values(awards);
+  const summary = {
+    totalSpend: awardedList.reduce((s, a) => s + (a.totalCharge ?? 0), 0),
+    carrierCount: new Set(awardedList.map(a => a.scac)).size,
+    shipmentsAwarded: awardedList.length,
+    unservicedCount: unserviced.length,
+    minRatedCount: 0,
+    avgDiscountPct: 0,
+  };
+
+  const carrierBreakdown = {};
+  for (const a of awardedList) {
+    const scac = a.scac;
+    if (!carrierBreakdown[scac]) {
+      carrierBreakdown[scac] = { carrierName: scac, shipmentCount: 0, laneCount: 0, totalSpend: 0, pctOfSpend: 0, minCount: 0, discCount: 0, avgDiscount: 0, lanes: new Set() };
+    }
+    carrierBreakdown[scac].shipmentCount++;
+    carrierBreakdown[scac].lanes.add(a.laneKey);
+    carrierBreakdown[scac].totalSpend += a.totalCharge ?? 0;
+  }
+  for (const cb of Object.values(carrierBreakdown)) {
+    cb.laneCount = cb.lanes.size;
+    cb.pctOfSpend = summary.totalSpend > 0 ? (cb.totalSpend / summary.totalSpend) * 100 : 0;
+    delete cb.lanes;
+  }
+
+  const laneBreakdown = {};
+  for (const [ref, a] of Object.entries(awards)) {
+    const lk = a.laneKey;
+    if (!laneBreakdown[lk]) {
+      laneBreakdown[lk] = { shipmentCount: 0, weights: [], classes: [], totalCost: 0, detailAwards: [], scacCounts: {} };
+    }
+    const lb = laneBreakdown[lk];
+    lb.shipmentCount++;
+    lb.weights.push(parseFloat(a.row.inputNetWt) || 0);
+    lb.classes.push(a.row.inputClass || '');
+    lb.totalCost += a.totalCharge ?? 0;
+    lb.detailAwards.push({ reference: ref, scac: a.scac, totalCharge: a.totalCharge, isMinimumRated: false });
+    lb.scacCounts[a.scac] = (lb.scacCounts[a.scac] || 0) + 1;
+  }
+  const laneBreakdownResult = {};
+  for (const [lk, lb] of Object.entries(laneBreakdown)) {
+    let topScac = '', topCount = 0;
+    for (const [scac, cnt] of Object.entries(lb.scacCounts)) {
+      if (cnt > topCount) { topScac = scac; topCount = cnt; }
+    }
+    laneBreakdownResult[lk] = {
+      shipmentCount: lb.shipmentCount, avgWeight: mean(lb.weights), avgClass: lb.classes[0] || '',
+      awardedSCAC: topScac,
+      awardedSCACLabel: Object.keys(lb.scacCounts).length > 1 ? `${topScac} (${topCount}/${lb.shipmentCount})` : topScac,
+      awardedCost: lb.totalCost, isMinRated: false, detailAwards: lb.detailAwards,
+    };
+  }
+
+  return { awards, unserviced, summary, carrierBreakdown, laneBreakdown: laneBreakdownResult };
+}
+
+/**
+ * Compute deltas between two scenarios.
+ */
+export function computeScenarioDeltas(scenarioA, scenarioB) {
+  const spendDelta = scenarioA.summary.totalSpend - scenarioB.summary.totalSpend;
+  const spendPctDelta = scenarioB.summary.totalSpend > 0
+    ? (spendDelta / scenarioB.summary.totalSpend) * 100 : 0;
+
+  const laneDiffs = {};
+  const allLanes = new Set([...Object.keys(scenarioA.laneBreakdown), ...Object.keys(scenarioB.laneBreakdown)]);
+  for (const lk of allLanes) {
+    const a = scenarioA.laneBreakdown[lk];
+    const b = scenarioB.laneBreakdown[lk];
+    laneDiffs[lk] = {
+      costDelta: (a?.awardedCost ?? 0) - (b?.awardedCost ?? 0),
+      carrierChanged: (a?.awardedSCAC || '') !== (b?.awardedSCAC || ''),
+    };
+  }
+
+  return { spendDelta, spendPctDelta, laneDiffs };
+}
+
+/**
+ * Build scenario comparison CSV export.
+ */
+export function buildScenarioCsv(scenarios) {
+  const lines = [];
+
+  // Section 1: Scenario Summary
+  lines.push('SCENARIO SUMMARY');
+  lines.push(['Name', 'Total Spend', '# Carriers', '# Shipments', '# Unserviced',
+    '# Min Rated', 'Avg Disc %'].map(escCsv).join(','));
+  for (const s of scenarios) {
+    lines.push([
+      s.name, s.result.summary.totalSpend.toFixed(2), s.result.summary.carrierCount,
+      s.result.summary.shipmentsAwarded, s.result.summary.unservicedCount,
+      s.result.summary.minRatedCount, s.result.summary.avgDiscountPct.toFixed(1),
+    ].map(escCsv).join(','));
+  }
+  lines.push('');
+
+  // Section 2: Carrier Breakdown
+  lines.push('CARRIER BREAKDOWN');
+  lines.push(['Scenario', 'SCAC', 'Carrier Name', '# Shipments', '# Lanes',
+    'Total Spend', '% of Spend', '# Min Rated', '# Disc Rated', 'Avg Disc %'].map(escCsv).join(','));
+  for (const s of scenarios) {
+    for (const [scac, cb] of Object.entries(s.result.carrierBreakdown)) {
+      lines.push([
+        s.name, scac, cb.carrierName, cb.shipmentCount, cb.laneCount,
+        cb.totalSpend.toFixed(2), cb.pctOfSpend.toFixed(1),
+        cb.minCount, cb.discCount, cb.avgDiscount.toFixed(1),
+      ].map(escCsv).join(','));
+    }
+  }
+  lines.push('');
+
+  // Section 3: Lane Detail Comparison
+  lines.push('LANE DETAIL COMPARISON');
+  const allLanes = new Set();
+  for (const s of scenarios) {
+    for (const lk of Object.keys(s.result.laneBreakdown)) allLanes.add(lk);
+  }
+  const sortedLanes = [...allLanes].sort();
+
+  const detailHeaders = ['Lane', '# Shipments', 'Avg Weight'];
+  for (const s of scenarios) {
+    detailHeaders.push(`${s.name} SCAC`, `${s.name} Cost`);
+  }
+  lines.push(detailHeaders.map(escCsv).join(','));
+
+  for (const lk of sortedLanes) {
+    const row = [lk];
+    const first = scenarios.find(s => s.result.laneBreakdown[lk]);
+    const lb = first?.result.laneBreakdown[lk];
+    row.push(lb?.shipmentCount ?? '', lb ? lb.avgWeight.toFixed(1) : '');
+    for (const s of scenarios) {
+      const slb = s.result.laneBreakdown[lk];
+      row.push(slb?.awardedSCACLabel ?? '', slb ? slb.awardedCost.toFixed(2) : '');
+    }
+    lines.push(row.map(escCsv).join(','));
+  }
+
+  return lines.join('\n');
+}

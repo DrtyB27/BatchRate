@@ -140,7 +140,7 @@ const server = createServer((req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`\n  LTL Batch Rater running at:\n`);
+  console.log(`\n  B.R.A.T. — Batch Rate Analytics Tool\n`);
   console.log(`    http://localhost:${PORT}\n`);
   console.log(`  Press Ctrl+C to stop.\n`);
 });

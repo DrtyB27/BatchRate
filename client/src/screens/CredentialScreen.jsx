@@ -4,24 +4,6 @@ import { postToG3 } from '../services/ratingClient.js';
 
 const CONTRACT_STATUS_OPTIONS = ['BeingEntered', 'UnderReview', 'InProduction', 'OnHold'];
 
-const TEMPLATE_HEADERS = [
-  'Reference','Orig City','Org State','Org Postal Code','Orig Cntry',
-  'DstCity','Dst State','Dst Postal Code','Dst Cntry',
-  'Class','Net Wt Lb','Pcs','Ttl HUs','Pickup Date',
-  'Cont. Ref','Client TP Num','Historic Carrier','Historic Cost',
-];
-
-function downloadTemplate() {
-  const csv = TEMPLATE_HEADERS.join(',') + '\n';
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'BatchRater_Template.csv';
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
 const CONTRACT_USE_OPTIONS = [
   { key: 'BlanketCost', label: 'Blanket Cost', requiresClient: false },
   { key: 'ClientCost', label: 'Client Cost', requiresClient: true },
@@ -104,16 +86,6 @@ export default function CredentialScreen({ onConnected }) {
         <div className="text-center mb-2">
           <h2 className="text-2xl font-bold text-gray-800">3G TMS — Batch Rater</h2>
           <p className="text-sm text-gray-500 mt-1">Connect and configure your rating session</p>
-          <button
-            type="button"
-            onClick={downloadTemplate}
-            className="mt-2 inline-flex items-center gap-1.5 text-xs text-blue-600 hover:text-blue-800 font-medium transition-colors"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v12m0 0l-4-4m4 4l4-4M4 18h16" />
-            </svg>
-            Download Input Template (.csv)
-          </button>
         </div>
 
         {/* ── Connection ── */}

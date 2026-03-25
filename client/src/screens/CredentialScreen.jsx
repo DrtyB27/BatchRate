@@ -4,24 +4,6 @@ import { postToG3 } from '../services/ratingClient.js';
 
 const CONTRACT_STATUS_OPTIONS = ['BeingEntered', 'UnderReview', 'InProduction', 'OnHold'];
 
-const TEMPLATE_HEADERS = [
-  'Reference','Orig City','Org State','Org Postal Code','Orig Cntry',
-  'DstCity','Dst State','Dst Postal Code','Dst Cntry',
-  'Class','Net Wt Lb','Pcs','Ttl HUs','Pickup Date',
-  'Cont. Ref','Client TP Num','Historic Carrier','Historic Cost',
-];
-
-function downloadTemplate() {
-  const csv = TEMPLATE_HEADERS.join(',') + '\n';
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'BRAT_Input_Template.csv';
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
 const CONTRACT_USE_OPTIONS = [
   { key: 'BlanketCost', label: 'Blanket Cost', requiresClient: false },
   { key: 'ClientCost', label: 'Client Cost', requiresClient: true },

@@ -1,9 +1,9 @@
 import React, { useState, useCallback, useRef } from 'react';
 import ParametersSidebar from '../components/ParametersSidebar.jsx';
 import CsvDropzone from '../components/CsvDropzone.jsx';
-import { buildRatingRequest } from '../services/xmlBuilder.js';
-import { postToG3, applyMargin, sleep } from '../services/ratingClient.js';
-import { parseRatingResponse } from '../services/xmlParser.js';
+import ExecutionControls from '../components/ExecutionControls.jsx';
+import ExecutionProgress from '../components/ExecutionProgress.jsx';
+import { createBatchExecutor } from '../services/batchExecutor.js';
 
 export default function InputScreen({ credentials, onBatchStart, onResultRow, onBatchEnd, onLoadRun }) {
   const [params, setParams] = useState({
@@ -21,25 +21,35 @@ export default function InputScreen({ credentials, onBatchStart, onResultRow, on
     saveRequestXml: true,
     saveResponseXml: true,
   });
+
+  const [execSettings, setExecSettings] = useState({
+    concurrency: 4,
+    delayMs: 0,
+    retryAttempts: 1,
+    adaptiveBackoff: true,
+  });
+
   const [csvRows, setCsvRows] = useState(null);
   const [running, setRunning] = useState(false);
+  const [paused, setPaused] = useState(false);
+  const [progress, setProgress] = useState(null);
   const loadInputRef = useRef(null);
+  const executorRef = useRef(null);
 
   const handleDataLoaded = useCallback((rows) => setCsvRows(rows), []);
   const handleClear = useCallback(() => setCsvRows(null), []);
 
-  const handleRunBatch = async () => {
+  const handleRunBatch = () => {
     if (!csvRows || csvRows.length === 0) return;
-    setRunning(true);
 
     const batchId = crypto.randomUUID();
     const batchStartTime = new Date().toISOString();
-    const requestDelay = 150;
 
     onBatchStart(params, csvRows.length, {
       batchId,
       batchStartTime,
-      requestDelay,
+      requestDelay: execSettings.delayMs,
+      concurrency: execSettings.concurrency,
       numberOfRates: params.numberOfRates,
       contractUse: params.contractUse,
       contractStatus: params.contractStatus,
@@ -47,103 +57,61 @@ export default function InputScreen({ credentials, onBatchStart, onResultRow, on
       carrierTPNum: params.carrierTPNum,
     });
 
-    for (let i = 0; i < csvRows.length; i++) {
-      const row = csvRows[i];
-      const startTime = Date.now();
-      const batchTimestamp = new Date().toISOString();
-      let result;
+    setRunning(true);
+    setPaused(false);
 
-      try {
-        const xml = buildRatingRequest(row, params, credentials);
-        const responseXml = await postToG3(xml, credentials);
-        const parsed = parseRatingResponse(responseXml);
-        const elapsedMs = Date.now() - startTime;
+    const executor = createBatchExecutor({
+      concurrency: execSettings.concurrency,
+      delayMs: execSettings.delayMs,
+      retryAttempts: execSettings.retryAttempts,
+      retryDelayMs: 1000,
+      adaptiveBackoff: execSettings.adaptiveBackoff,
+      timeoutMs: 30000,
+      onResult: (result) => {
+        onResultRow(result);
+      },
+      onProgress: (snap) => {
+        setProgress(snap);
+        if (snap.state === 'PAUSED' || snap.state === 'AUTO_PAUSED') {
+          setPaused(true);
+          setRunning(false);
+        } else if (snap.state === 'RUNNING') {
+          setPaused(false);
+          setRunning(true);
+        }
+      },
+      onComplete: (summary) => {
+        setRunning(false);
+        setPaused(false);
+        if (onBatchEnd) {
+          onBatchEnd({
+            batchEndTime: new Date().toISOString(),
+            executionSummary: summary,
+          });
+        }
+      },
+    });
 
-        const ratesWithMargin = parsed.rates.map(rate => {
-          const { customerPrice, marginType, marginValue } = applyMargin(rate.totalCharge, rate.carrierSCAC, params.margins);
-          return { ...rate, marginType, marginValue, customerPrice };
-        });
+    executorRef.current = executor;
+    executor.start(csvRows, params, credentials);
+  };
 
-        result = {
-          rowIndex: i,
-          reference: row['Reference'] || '',
-          origCity: row['Orig City'] || '',
-          origState: row['Org State'] || '',
-          origPostal: row['Org Postal Code'] || '',
-          origCountry: row['Orig Cntry'] || 'US',
-          destCity: row['DstCity'] || '',
-          destState: row['Dst State'] || '',
-          destPostal: row['Dst Postal Code'] || '',
-          destCountry: row['Dst Cntry'] || 'US',
-          inputClass: row['Class'] || '',
-          inputNetWt: row['Net Wt Lb'] || '',
-          inputPcs: row['Pcs'] || '',
-          inputHUs: row['Ttl HUs'] || '',
-          pickupDate: row['Pickup Date'] || '',
-          contRef: row['Cont. Ref'] || params.contRef || '',
-          clientTPNum: row['Client TP Num'] || params.clientTPNum || '',
-          historicCarrier: row['Historic Carrier'] || '',
-          historicCost: parseFloat(row['Historic Cost']) || 0,
-          success: parsed.rates.length > 0,
-          ratingMessage: parsed.ratingMessage,
-          elapsedMs,
-          rateCount: parsed.rates.length,
-          xmlRequestSize: xml.length,
-          xmlResponseSize: responseXml.length,
-          batchPosition: i,
-          batchTimestamp,
-          rateRequestXml: params.saveRequestXml ? xml : '',
-          rateResponseXml: params.saveResponseXml ? responseXml : '',
-          rates: ratesWithMargin,
-        };
-      } catch (err) {
-        const elapsedMs = Date.now() - startTime;
-        result = {
-          rowIndex: i,
-          reference: row['Reference'] || '',
-          origCity: row['Orig City'] || '',
-          origState: row['Org State'] || '',
-          origPostal: row['Org Postal Code'] || '',
-          origCountry: row['Orig Cntry'] || 'US',
-          destCity: row['DstCity'] || '',
-          destState: row['Dst State'] || '',
-          destPostal: row['Dst Postal Code'] || '',
-          destCountry: row['Dst Cntry'] || 'US',
-          inputClass: row['Class'] || '',
-          inputNetWt: row['Net Wt Lb'] || '',
-          inputPcs: row['Pcs'] || '',
-          inputHUs: row['Ttl HUs'] || '',
-          pickupDate: row['Pickup Date'] || '',
-          contRef: row['Cont. Ref'] || params.contRef || '',
-          clientTPNum: row['Client TP Num'] || params.clientTPNum || '',
-          historicCarrier: row['Historic Carrier'] || '',
-          historicCost: parseFloat(row['Historic Cost']) || 0,
-          success: false,
-          ratingMessage: err.message,
-          elapsedMs,
-          rateCount: 0,
-          xmlRequestSize: 0,
-          xmlResponseSize: 0,
-          batchPosition: i,
-          batchTimestamp,
-          rateRequestXml: '',
-          rateResponseXml: '',
-          rates: [],
-        };
-      }
+  const handlePause = () => {
+    executorRef.current?.pause();
+  };
 
-      onResultRow(result);
+  const handleResume = () => {
+    executorRef.current?.resume();
+  };
 
-      if (i < csvRows.length - 1) {
-        await sleep(requestDelay);
-      }
-    }
+  const handleResumeSlow = () => {
+    executorRef.current?.resumeSlow();
+  };
 
-    if (onBatchEnd) {
-      onBatchEnd({ batchEndTime: new Date().toISOString() });
-    }
-
+  const handleCancel = () => {
+    executorRef.current?.cancel();
     setRunning(false);
+    setPaused(false);
   };
 
   const handleLoadFile = (e) => {
@@ -151,6 +119,8 @@ export default function InputScreen({ credentials, onBatchStart, onResultRow, on
     if (file) onLoadRun(file);
     e.target.value = '';
   };
+
+  const isExecuting = running || paused;
 
   return (
     <div className="flex-1 flex overflow-hidden">
@@ -162,27 +132,42 @@ export default function InputScreen({ credentials, onBatchStart, onResultRow, on
           <div className="flex items-center gap-2">
             <button
               onClick={() => loadInputRef.current?.click()}
-              className="text-xs bg-gray-200 hover:bg-gray-300 text-gray-700 font-medium px-3 py-2 rounded-md transition-colors"
+              disabled={isExecuting}
+              className="text-xs bg-gray-200 hover:bg-gray-300 disabled:opacity-50 text-gray-700 font-medium px-3 py-2 rounded-md transition-colors"
             >
               Load Previous Run
             </button>
             <input ref={loadInputRef} type="file" accept=".json" onChange={handleLoadFile} className="hidden" />
-            <button
-              onClick={handleRunBatch}
-              disabled={!csvRows || csvRows.length === 0 || running}
-              className="bg-[#39b6e6] hover:bg-[#2d9bc4] disabled:bg-gray-300 text-white font-semibold px-5 py-2 rounded-md transition-colors text-sm"
-            >
-              {running ? (
-                <span className="flex items-center gap-2">
-                  <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
-                  Running...
-                </span>
-              ) : 'Run Batch'}
-            </button>
           </div>
         </div>
 
-        <CsvDropzone onDataLoaded={handleDataLoaded} onClear={handleClear} />
+        {/* Execution controls */}
+        <ExecutionControls
+          settings={execSettings}
+          onChange={setExecSettings}
+          onRun={handleRunBatch}
+          onPause={handlePause}
+          onResume={handleResume}
+          onCancel={handleCancel}
+          running={running}
+          paused={paused}
+          csvLoaded={csvRows && csvRows.length > 0}
+          rowCount={csvRows?.length || 0}
+        />
+
+        {/* Live progress during execution */}
+        {isExecuting && progress && (
+          <ExecutionProgress
+            progress={progress}
+            onResumeSlow={handleResumeSlow}
+            onCancel={handleCancel}
+          />
+        )}
+
+        {/* CSV dropzone (hidden during execution to save space) */}
+        {!isExecuting && (
+          <CsvDropzone onDataLoaded={handleDataLoaded} onClear={handleClear} />
+        )}
       </main>
     </div>
   );

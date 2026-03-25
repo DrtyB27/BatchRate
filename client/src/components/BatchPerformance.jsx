@@ -58,7 +58,7 @@ export default function BatchPerformance({ results, batchMeta }) {
       )}
 
       {/* Section 1: Executive Summary */}
-      <PerformanceSummary summary={summary} />
+      <PerformanceSummary summary={summary} batchMeta={batchMeta} />
 
       {/* Per-batch breakdown for combined runs */}
       {batchBreakdown && (

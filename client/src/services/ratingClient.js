@@ -15,7 +15,7 @@ const PROXY_URL = isLocalhost ? '/api/rate' : WORKER_URL;
  * Posts XML to the 3G TMS Rating API (via proxy).
  * @returns {Promise<string>} Raw XML response string.
  */
-export async function postToG3(xmlBody, credentials) {
+export async function postToG3(xmlBody, credentials, timeoutMs = 30000) {
   const { baseURL, username, password } = credentials;
 
   const encodedUsername = encodeURIComponent(username);
@@ -23,7 +23,7 @@ export async function postToG3(xmlBody, credentials) {
   const targetUrl = `${baseURL}/web/services/rating/findRates?username=${encodedUsername}&password=${encodedPassword}`;
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const res = await fetch(PROXY_URL, {
@@ -41,7 +41,7 @@ export async function postToG3(xmlBody, credentials) {
     return await res.text();
   } catch (err) {
     if (err.name === 'AbortError') {
-      throw new Error('Request timed out after 30s');
+      throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s`);
     }
     if (err.message === 'Failed to fetch' || err.message.includes('NetworkError')) {
       throw new Error(

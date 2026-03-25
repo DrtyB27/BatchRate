@@ -223,6 +223,28 @@ export function computeCorrelations(results) {
       : 'Response times are relatively uniform across origin states.',
   });
 
+  // E) Response Time vs Worker Index (concurrency distribution)
+  if (results.some(r => r.workerIndex !== undefined)) {
+    const workerMap = {};
+    for (const r of results) {
+      const wi = r.workerIndex ?? 0;
+      if (!workerMap[wi]) workerMap[wi] = [];
+      workerMap[wi].push(r.elapsedMs || 0);
+    }
+    const workerData = Object.entries(workerMap)
+      .map(([worker, times]) => ({ state: `W${worker}`, avg: Math.round(times.reduce((a, b) => a + b, 0) / times.length), count: times.length }))
+      .sort((a, b) => parseInt(a.state.slice(1)) - parseInt(b.state.slice(1)));
+    correlations.push({
+      id: 'worker',
+      title: 'Response Time by Worker',
+      type: 'bar',
+      data: workerData,
+      guidance: workerData.length > 1
+        ? `Work distributed across ${workerData.length} concurrent workers.`
+        : 'Single worker (sequential execution).',
+    });
+  }
+
   return correlations;
 }
 
@@ -364,6 +386,18 @@ export function generateRecommendations(summary, degradation, correlations, erro
     const chunk = Math.floor(degradation.degradationPoint * 0.8);
     const batches = Math.ceil(summary.total / chunk);
     recs.push({ severity: 'WARNING', title: 'Split Guidance', message: `Recommended: Split into ${batches} batches of ~${chunk} rows each. Run with a 30-60 second pause between batches.` });
+  }
+
+  // Rule 7 — Concurrency
+  const usedConcurrency = batchMeta?.concurrency || batchMeta?.executionSummary?.concurrencyUsed || 1;
+  const backoffTriggered = batchMeta?.executionSummary?.adaptiveBackoffTriggered || false;
+  if (backoffTriggered) {
+    recs.push({ severity: 'WARNING', title: 'Concurrency', message: `Server showed stress at concurrency ${usedConcurrency}. Adaptive backoff was triggered. Recommended max concurrency: ${Math.max(1, usedConcurrency - 1)}.` });
+  } else if (usedConcurrency > 1) {
+    const rowsPerSec = summary.throughput / 60;
+    const est500 = rowsPerSec > 0 ? Math.round(500 / rowsPerSec) : 0;
+    const est1000 = rowsPerSec > 0 ? Math.round(1000 / rowsPerSec) : 0;
+    recs.push({ severity: 'INFO', title: 'Concurrency', message: `At concurrency ${usedConcurrency}, effective throughput is ${Math.round(rowsPerSec * 10) / 10} rows/sec. A 500-row file: ~${est500}s. A 1000-row file: ~${est1000}s.` });
   }
 
   return recs;

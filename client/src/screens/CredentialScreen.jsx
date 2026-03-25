@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { buildTestRequest } from '../services/xmlBuilder.js';
 import { postToG3 } from '../services/ratingClient.js';
 
@@ -17,7 +17,7 @@ function downloadTemplate() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'BatchRater_Template.csv';
+  a.download = 'BRAT_Input_Template.csv';
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -30,19 +30,16 @@ const CONTRACT_USE_OPTIONS = [
   { key: 'BlanketBenchmark', label: 'Blanket Benchmark', requiresClient: false },
 ];
 
-export default function CredentialScreen({ onConnected }) {
+export default function CredentialScreen({ onConnected, onLoadRun }) {
   const [form, setForm] = useState({
-    // Connection
     baseURL: 'https://shipdlx.3gtms.com',
     username: '',
     password: '',
-    // Session context
     clientTPNum: '',
     carrierTPNum: '',
     contRef: '',
     contractStatus: 'BeingEntered',
     contractUse: ['ClientCost'],
-    // Defaults
     utcOffset: '05:00',
     weightUOM: 'Lb',
     volumeUOM: 'CuFt',
@@ -52,6 +49,7 @@ export default function CredentialScreen({ onConnected }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const loadInputRef = useRef(null);
 
   const update = (field) => (e) => setForm(prev => ({ ...prev, [field]: e.target.value }));
 
@@ -65,7 +63,6 @@ export default function CredentialScreen({ onConnected }) {
     });
   };
 
-  // Client TP Num is required if any client variant is selected
   const clientVariantSelected = (form.contractUse || []).some(
     key => CONTRACT_USE_OPTIONS.find(o => o.key === key)?.requiresClient
   );
@@ -73,15 +70,12 @@ export default function CredentialScreen({ onConnected }) {
 
   const handleConnect = async (e) => {
     e.preventDefault();
-
     if (clientTPMissing) {
       setError('Client Trading Partner Number is required when Client Cost or Client Billing is selected.');
       return;
     }
-
     setLoading(true);
     setError('');
-
     try {
       const testXml = buildTestRequest(form);
       await postToG3(testXml, form);
@@ -93,7 +87,13 @@ export default function CredentialScreen({ onConnected }) {
     }
   };
 
-  const inputCls = 'w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent';
+  const handleLoadFile = (e) => {
+    const file = e.target.files?.[0];
+    if (file) onLoadRun(file);
+    e.target.value = '';
+  };
+
+  const inputCls = 'w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#39b6e6] focus:border-transparent';
   const inputErrCls = 'w-full border border-red-400 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent';
   const labelCls = 'block text-sm font-medium text-gray-700 mb-1';
   const sectionTitle = 'text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3';
@@ -102,18 +102,31 @@ export default function CredentialScreen({ onConnected }) {
     <div className="flex-1 flex items-center justify-center p-6 bg-gray-100">
       <form onSubmit={handleConnect} className="bg-white rounded-xl shadow-lg p-8 w-full max-w-lg space-y-6">
         <div className="text-center mb-2">
-          <h2 className="text-2xl font-bold text-gray-800">3G TMS — Batch Rater</h2>
-          <p className="text-sm text-gray-500 mt-1">Connect and configure your rating session</p>
-          <button
-            type="button"
-            onClick={downloadTemplate}
-            className="mt-2 inline-flex items-center gap-1.5 text-xs text-blue-600 hover:text-blue-800 font-medium transition-colors"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v12m0 0l-4-4m4 4l4-4M4 18h16" />
-            </svg>
-            Download Input Template (.csv)
-          </button>
+          <h2 className="text-2xl font-bold text-[#002144]" style={{ fontFamily: "'Montserrat', Arial, sans-serif" }}>Connect to 3G TMS</h2>
+          <p className="text-sm text-gray-500 mt-1">Configure your rating session</p>
+          <div className="flex items-center justify-center gap-4 mt-3">
+            <button
+              type="button"
+              onClick={downloadTemplate}
+              className="inline-flex items-center gap-1.5 text-xs text-[#39b6e6] hover:text-[#2d9bc4] font-medium transition-colors"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v12m0 0l-4-4m4 4l4-4M4 18h16" />
+              </svg>
+              Download Template (.csv)
+            </button>
+            <button
+              type="button"
+              onClick={() => loadInputRef.current?.click()}
+              className="inline-flex items-center gap-1.5 text-xs text-[#39b6e6] hover:text-[#2d9bc4] font-medium transition-colors"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5-5m0 0l5 5m-5-5v12" />
+              </svg>
+              Load Previous Run (.json)
+            </button>
+            <input ref={loadInputRef} type="file" accept=".json" onChange={handleLoadFile} className="hidden" />
+          </div>
         </div>
 
         {/* ── Connection ── */}
@@ -137,10 +150,9 @@ export default function CredentialScreen({ onConnected }) {
 
         <hr className="border-gray-200" />
 
-        {/* ── Session Context (primary) ── */}
+        {/* ── Session Context ── */}
         <div className="space-y-3">
           <h3 className={sectionTitle}>Trading Partner &amp; Contract</h3>
-
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className={labelCls}>
@@ -199,7 +211,7 @@ export default function CredentialScreen({ onConnected }) {
 
         <hr className="border-gray-200" />
 
-        {/* ── Advanced Defaults (collapsible) ── */}
+        {/* ── Advanced Defaults ── */}
         <div>
           <button
             type="button"
@@ -247,7 +259,7 @@ export default function CredentialScreen({ onConnected }) {
         <button
           type="submit"
           disabled={loading || !form.username || !form.password || clientTPMissing}
-          className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white font-semibold py-2.5 rounded-md transition-colors text-sm"
+          className="w-full bg-[#39b6e6] hover:bg-[#2d9bc4] disabled:bg-gray-300 text-white font-semibold py-2.5 rounded-md transition-colors text-sm"
         >
           {loading ? (
             <span className="flex items-center justify-center gap-2">
@@ -256,6 +268,8 @@ export default function CredentialScreen({ onConnected }) {
             </span>
           ) : 'Connect'}
         </button>
+
+        <p className="text-center text-[10px] text-gray-400 mt-2">Powered by Dynamic Logistix</p>
       </form>
     </div>
   );

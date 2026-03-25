@@ -1,10 +1,22 @@
-# LTL Batch Rating Tool
+# B.R.A.T. — Batch Rate Analytics Tool
 
 Browser-based app that batch-rates LTL shipments using the 3G TMS Rating API.
 Replaces the legacy Excel/VBA/.NET batch rating tool.
 
 **Fully client-side** — no backend server required. Can be hosted on SharePoint,
 a file share, or any static web host.
+
+Powered by Dynamic Logistix.
+
+## Features
+
+- Batch rate LTL shipments against 3G TMS contracts
+- Analytics dashboard with carrier comparison and bid analysis
+- Scenario builder for what-if margin/discount modeling
+- Network optimization with pool point consolidation analysis
+- Batch performance diagnostics with degradation detection
+- Save/load/combine batch runs (file-based, no credentials stored)
+- Export: Raw CSV, Customer CSV, Custom Rate Template CSV
 
 ## Quick Start (Local)
 
@@ -39,7 +51,7 @@ Opens at **http://localhost:5173**.
    - `assets/` (JS, CSS bundles)
 
 3. Upload the **contents** of `dist/` to a SharePoint document library or site page:
-   - Create a folder in SharePoint (e.g. "BatchRater")
+   - Create a folder in SharePoint (e.g. "BRAT")
    - Upload `index.html` and the `assets/` folder
    - Open `index.html` from SharePoint in your browser
 
@@ -53,11 +65,12 @@ your SharePoint URL to the 3G server's allowed origins.
 
 ## Architecture
 
-- **100% client-side** — React + Vite + Tailwind CSS
+- **100% client-side** — React + Vite + Tailwind CSS + Recharts
 - **XML build** — string templates (no dependencies)
 - **XML parse** — browser's built-in DOMParser
 - **CSV parse** — papaparse
 - **CSV export** — manual string builder
+- **Run persistence** — file-based JSON (no localStorage)
 - **Credentials** — held in browser memory only, never saved to disk
 
 ## Workflow
@@ -65,4 +78,6 @@ your SharePoint URL to the 3G server's allowed origins.
 1. Enter 3G TMS credentials (Screen 1) — validated with a test request
 2. Configure batch parameters, carrier margins, upload CSV (Screen 2)
 3. View live streaming results with carrier comparison (Screen 3)
-4. Export: Raw CSV, Customer CSV (with margin), Custom Rate Template CSV (65 columns)
+4. Analyze: Analytics, Scenarios, Optimization, Performance tabs
+5. Export: Raw CSV, Customer CSV, Custom Rate Template CSV
+6. Save/Load/Combine batch runs for later analysis

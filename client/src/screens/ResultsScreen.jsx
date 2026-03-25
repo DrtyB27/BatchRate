@@ -1,9 +1,12 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import ResultsTable, { flattenResults, computeLowCostFlags } from '../components/ResultsTable.jsx';
 import ExportWarningModal from '../components/ExportWarningModal.jsx';
 import AnalyticsDashboard from '../components/AnalyticsDashboard.jsx';
 import ScenarioBuilder from '../components/ScenarioBuilder.jsx';
 import OptimizationDashboard from '../components/OptimizationDashboard.jsx';
+import BatchPerformance from '../components/BatchPerformance.jsx';
+import CombineRunsDialog from '../components/CombineRunsDialog.jsx';
+import { serializeRun, downloadRunFile } from '../services/runPersistence.js';
 
 function downloadCsv(filename, csvContent) {
   const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -158,26 +161,24 @@ function buildCustomRateCsv(flatRows) {
       const rate = r.rate || {};
       const row = new Array(CUSTOM_RATE_HEADERS.length).fill('');
 
-      row[0] = '';                                              // customRate.name — blank, required
-      row[1] = String(detailNum++);                             // customRateDetailNum
-      row[4] = r.origCountry || 'US';                           // countryOrig
-      row[5] = r.origPostal || '';                               // postalCodeMinOrig
-      row[6] = r.origPostal || '';                               // postalCodeMaxOrig
-      row[11] = r.destCountry || 'US';                          // countryDest
-      row[12] = r.destPostal || '';                              // postalCodeMinDest
-      row[13] = r.destPostal || '';                              // postalCodeMaxDest
-      row[16] = '0';                                            // weightTierMin
-      row[17] = 'Lb';                                           // weightTierMinUOM
-      row[18] = r.inputNetWt || '';                              // weightTierMax
-      row[19] = 'Lb';                                           // weightTierMaxUOM
-      row[48] = 'TRUE';                                         // useDirect
-      // tariffDiscountPct is a percent (69.00) → divide by 100 → 0.690
-      row[49] = rate.tariffDiscountPct ? (rate.tariffDiscountPct / 100).toFixed(3) : '';  // directDiscount
-      row[50] = rate.tariffNet != null ? String(rate.tariffNet) : '';  // directAbsMin
-      row[64] = rate.tariffNet != null ? String(rate.tariffNet) : '';  // minCharge
-      row[67] = rate.firstFAK || '';                             // freightClassValues
+      row[0] = '';
+      row[1] = String(detailNum++);
+      row[4] = r.origCountry || 'US';
+      row[5] = r.origPostal || '';
+      row[6] = r.origPostal || '';
+      row[11] = r.destCountry || 'US';
+      row[12] = r.destPostal || '';
+      row[13] = r.destPostal || '';
+      row[16] = '0';
+      row[17] = 'Lb';
+      row[18] = r.inputNetWt || '';
+      row[19] = 'Lb';
+      row[48] = 'TRUE';
+      row[49] = rate.tariffDiscountPct ? (rate.tariffDiscountPct / 100).toFixed(3) : '';
+      row[50] = rate.tariffNet != null ? String(rate.tariffNet) : '';
+      row[64] = rate.tariffNet != null ? String(rate.tariffNet) : '';
+      row[67] = rate.firstFAK || '';
 
-      // Append _minRatedFlag as metadata column after all 3G import columns
       row.push(rate.isMinimumRated ? 'MIN' : '');
 
       return row.map(escCsv);
@@ -189,10 +190,12 @@ function buildCustomRateCsv(flatRows) {
 // ============================================================
 // RESULTS SCREEN
 // ============================================================
-export default function ResultsScreen({ results, totalRows, batchParams, onNewBatch }) {
-  const [viewMode, setViewMode] = useState('both'); // raw | customer | both | analytics | scenarios | optimize
-  const [modal, setModal] = useState(null); // null | 'customer' | 'customRate'
-  const [xmlModal, setXmlModal] = useState(null); // row data for XML modal
+export default function ResultsScreen({ results, totalRows, batchParams, batchMeta, onNewBatch, onLoadRun, onReplaceResults, loadedFromFile }) {
+  const [viewMode, setViewMode] = useState('both');
+  const [modal, setModal] = useState(null);
+  const [xmlModal, setXmlModal] = useState(null);
+  const [showCombine, setShowCombine] = useState(false);
+  const loadInputRef = useRef(null);
 
   const isComplete = results.length >= totalRows;
 
@@ -231,48 +234,90 @@ export default function ResultsScreen({ results, totalRows, batchParams, onNewBa
     }
   };
 
+  const handleSaveRun = () => {
+    const jsonStr = serializeRun(results, batchParams, batchMeta);
+    const filename = downloadRunFile(jsonStr, batchMeta?.batchId);
+  };
+
+  const handleLoadFile = (e) => {
+    const file = e.target.files?.[0];
+    if (file) onLoadRun(file);
+    e.target.value = '';
+  };
+
+  const handleCombine = (combinedResults, combinedMeta) => {
+    onReplaceResults(combinedResults, combinedMeta);
+  };
+
   const viewBtnCls = (mode) =>
     `px-3 py-1.5 text-xs font-medium rounded transition-colors ${
       viewMode === mode
-        ? 'bg-blue-600 text-white'
+        ? 'bg-[#39b6e6] text-white'
         : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
     }`;
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       {/* Header bar */}
-      <div className="bg-white border-b border-gray-200 px-6 py-3 flex items-center gap-4 flex-wrap shrink-0">
-        <h2 className="text-lg font-bold text-gray-800">Batch Results</h2>
+      <div className="bg-white border-b border-gray-200 px-6 py-3 flex items-center gap-3 flex-wrap shrink-0">
+        <h2 className="text-lg font-bold text-[#002144]">Batch Results</h2>
         <span className={`text-xs font-medium px-2.5 py-1 rounded-full ${
           isComplete ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'
         }`}>
           {results.length} / {totalRows} complete
         </span>
         <div className="flex-1" />
+
+        {/* Save/Load/Combine */}
+        <button
+          onClick={handleSaveRun}
+          disabled={!isComplete}
+          className="text-xs bg-[#002144] hover:bg-[#003366] disabled:bg-gray-300 text-white px-3 py-1.5 rounded font-medium transition-colors"
+        >
+          Save Run
+        </button>
+        <button
+          onClick={() => loadInputRef.current?.click()}
+          className="text-xs bg-gray-200 hover:bg-gray-300 text-gray-700 px-3 py-1.5 rounded font-medium transition-colors"
+        >
+          Load Run
+        </button>
+        <input ref={loadInputRef} type="file" accept=".json" onChange={handleLoadFile} className="hidden" />
+        <button
+          onClick={() => setShowCombine(true)}
+          disabled={!isComplete}
+          className="text-xs bg-gray-200 hover:bg-gray-300 disabled:bg-gray-100 disabled:text-gray-400 text-gray-700 px-3 py-1.5 rounded font-medium transition-colors"
+        >
+          Combine Runs
+        </button>
+
+        <div className="w-px h-6 bg-gray-300" />
+
+        {/* Exports */}
         <button
           onClick={() => handleExport('raw')}
           disabled={!isComplete}
           className="text-xs bg-gray-700 hover:bg-gray-800 disabled:bg-gray-300 text-white px-3 py-1.5 rounded"
         >
-          Export Raw CSV
+          Export Raw
         </button>
         <button
           onClick={() => handleExport('customer')}
           disabled={!isComplete}
-          className="text-xs bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white px-3 py-1.5 rounded"
+          className="text-xs bg-[#39b6e6] hover:bg-[#2d9bc4] disabled:bg-gray-300 text-white px-3 py-1.5 rounded"
         >
-          Export Customer CSV
+          Export Customer
         </button>
         <button
           onClick={() => handleExport('customRate')}
           disabled={!isComplete}
           className="text-xs bg-amber-600 hover:bg-amber-700 disabled:bg-gray-300 text-white px-3 py-1.5 rounded"
         >
-          Export Custom Rate CSV
+          Export Custom Rate
         </button>
         <button
           onClick={onNewBatch}
-          className="text-xs bg-slate-600 hover:bg-slate-700 text-white px-3 py-1.5 rounded"
+          className="text-xs bg-[#002144] hover:bg-[#003366] text-white px-3 py-1.5 rounded"
         >
           New Batch
         </button>
@@ -317,15 +362,24 @@ export default function ResultsScreen({ results, totalRows, batchParams, onNewBa
         >
           Optimize
         </button>
+        <button
+          className={viewBtnCls('performance')}
+          onClick={() => setViewMode('performance')}
+          title="Batch performance diagnostics"
+        >
+          Performance
+        </button>
       </div>
 
-      {/* Results table, Analytics dashboard, or Scenario Builder */}
+      {/* Content */}
       {viewMode === 'analytics' ? (
         <AnalyticsDashboard flatRows={flatRows} />
       ) : viewMode === 'scenarios' ? (
         <ScenarioBuilder flatRows={flatRows} />
       ) : viewMode === 'optimize' ? (
         <OptimizationDashboard flatRows={flatRows} />
+      ) : viewMode === 'performance' ? (
+        <BatchPerformance results={results} batchMeta={batchMeta} />
       ) : (
         <ResultsTable
           flatRows={flatRows}
@@ -341,6 +395,16 @@ export default function ResultsScreen({ results, totalRows, batchParams, onNewBa
           type={modal}
           onConfirm={handleModalConfirm}
           onCancel={() => setModal(null)}
+        />
+      )}
+
+      {/* Combine Runs dialog */}
+      {showCombine && (
+        <CombineRunsDialog
+          currentResults={results}
+          currentMeta={batchMeta}
+          onCombine={handleCombine}
+          onClose={() => setShowCombine(false)}
         />
       )}
 

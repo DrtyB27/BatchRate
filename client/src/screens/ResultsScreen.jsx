@@ -3,6 +3,7 @@ import ResultsTable, { flattenResults, computeLowCostFlags } from '../components
 import ExportWarningModal from '../components/ExportWarningModal.jsx';
 import AnalyticsDashboard from '../components/AnalyticsDashboard.jsx';
 import ScenarioBuilder from '../components/ScenarioBuilder.jsx';
+import OptimizationDashboard from '../components/OptimizationDashboard.jsx';
 
 function downloadCsv(filename, csvContent) {
   const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -189,7 +190,7 @@ function buildCustomRateCsv(flatRows) {
 // RESULTS SCREEN
 // ============================================================
 export default function ResultsScreen({ results, totalRows, batchParams, onNewBatch }) {
-  const [viewMode, setViewMode] = useState('both'); // raw | customer | both | analytics | scenarios
+  const [viewMode, setViewMode] = useState('both'); // raw | customer | both | analytics | scenarios | optimize
   const [modal, setModal] = useState(null); // null | 'customer' | 'customRate'
   const [xmlModal, setXmlModal] = useState(null); // row data for XML modal
 
@@ -308,6 +309,14 @@ export default function ResultsScreen({ results, totalRows, batchParams, onNewBa
         >
           Scenarios
         </button>
+        <button
+          className={viewBtnCls('optimize')}
+          onClick={() => setViewMode('optimize')}
+          disabled={!isComplete}
+          title={!isComplete ? 'Available when batch is complete' : ''}
+        >
+          Optimize
+        </button>
       </div>
 
       {/* Results table, Analytics dashboard, or Scenario Builder */}
@@ -315,6 +324,8 @@ export default function ResultsScreen({ results, totalRows, batchParams, onNewBa
         <AnalyticsDashboard flatRows={flatRows} />
       ) : viewMode === 'scenarios' ? (
         <ScenarioBuilder flatRows={flatRows} />
+      ) : viewMode === 'optimize' ? (
+        <OptimizationDashboard flatRows={flatRows} />
       ) : (
         <ResultsTable
           flatRows={flatRows}

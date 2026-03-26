@@ -26,9 +26,15 @@ export function createBatchExecutor(config) {
     retryDelayMs = 1000,
     adaptiveBackoff = true,
     timeoutMs = 30000,
+    stallSoftMs = 60000,
+    stallHardMs = 120000,
+    circuitBreakerThreshold = 5,
     onResult,
     onProgress,
     onComplete,
+    onStall,
+    onCircuitBreak,
+    onAutoSave,
   } = config;
 
   // ── State ──
@@ -53,6 +59,15 @@ export function createBatchExecutor(config) {
 
   // Throughput tracking (rolling 10s window)
   const completionTimestamps = [];
+
+  // Stall detection
+  let lastResultTimestamp = 0;
+  let stallCheckTimer = null;
+  let stallWarningFired = false;
+
+  // Circuit breaker
+  let consecutiveFailures = 0;
+  let circuitBreakerTripped = false;
 
   // References for pause/cancel
   let csvRows = null;
@@ -95,6 +110,10 @@ export function createBatchExecutor(config) {
       currentConcurrency,
       state,
       adaptiveBackoffActive: currentDelay > delayMs || currentConcurrency < concurrency,
+      stallWarning: stallWarningFired,
+      circuitBreakerTripped,
+      consecutiveFailures,
+      timeSinceLastResult: lastResultTimestamp > 0 ? Date.now() - lastResultTimestamp : 0,
     };
   }
 
@@ -144,6 +163,55 @@ export function createBatchExecutor(config) {
       currentDelay = Math.max(delayMs, Math.floor(currentDelay / 2));
       currentConcurrency = Math.min(concurrency, currentConcurrency + 1);
     }
+  }
+
+  // ── Stall detection watchdog ──
+  function startStallWatchdog() {
+    lastResultTimestamp = Date.now();
+    stallWarningFired = false;
+    if (stallCheckTimer) clearInterval(stallCheckTimer);
+    stallCheckTimer = setInterval(() => {
+      if (state !== 'RUNNING') return;
+      const elapsed = Date.now() - lastResultTimestamp;
+      if (elapsed >= stallHardMs && activeCount > 0) {
+        // Hard stall — auto-pause
+        state = 'AUTO_PAUSED';
+        if (onStall) onStall({ type: 'hard', elapsedMs: elapsed, resultsCompleted: results.length });
+        if (onAutoSave) onAutoSave(results);
+        if (onProgress) onProgress(buildProgress());
+      } else if (elapsed >= stallSoftMs && !stallWarningFired) {
+        stallWarningFired = true;
+        if (onStall) onStall({ type: 'soft', elapsedMs: elapsed, resultsCompleted: results.length });
+        if (onAutoSave) onAutoSave(results);
+        if (onProgress) onProgress(buildProgress());
+      }
+    }, 5000);
+  }
+
+  function stopStallWatchdog() {
+    if (stallCheckTimer) {
+      clearInterval(stallCheckTimer);
+      stallCheckTimer = null;
+    }
+  }
+
+  // ── Circuit breaker ──
+  function checkCircuitBreaker(success) {
+    if (success) {
+      consecutiveFailures = 0;
+      circuitBreakerTripped = false;
+      return false;
+    }
+    consecutiveFailures++;
+    if (consecutiveFailures >= circuitBreakerThreshold && !circuitBreakerTripped) {
+      circuitBreakerTripped = true;
+      state = 'AUTO_PAUSED';
+      if (onCircuitBreak) onCircuitBreak({ consecutiveFailures, resultsCompleted: results.length });
+      if (onAutoSave) onAutoSave(results);
+      if (onProgress) onProgress(buildProgress());
+      return true;
+    }
+    return false;
   }
 
   // ── Build result object (same shape as current InputScreen) ──
@@ -249,14 +317,17 @@ export function createBatchExecutor(config) {
       const result = buildResult(row, rowIndex, parsed, xml, responseXml, elapsedMs, workerIdx, error);
       results.push(result);
       completionTimestamps.push(Date.now());
+      lastResultTimestamp = Date.now();
+      stallWarningFired = false;
 
       updateAdaptiveBackoff(result.success);
+      const tripped = checkCircuitBreaker(result.success);
 
       if (onResult) onResult(result);
       if (onProgress) onProgress(buildProgress());
 
-      // Check if auto-paused
-      if (state === 'AUTO_PAUSED') break;
+      // Check if auto-paused (by adaptive backoff or circuit breaker)
+      if (state === 'AUTO_PAUSED' || tripped) break;
     }
   }
 
@@ -269,6 +340,7 @@ export function createBatchExecutor(config) {
     Promise.all(workerPromises).then(() => {
       if (state === 'RUNNING' && queue.length === 0 && activeCount === 0) {
         state = 'COMPLETE';
+        stopStallWatchdog();
         if (onComplete) onComplete(buildCompletionSummary());
         if (onProgress) onProgress(buildProgress());
       }
@@ -334,6 +406,9 @@ export function createBatchExecutor(config) {
 
       startTimeMs = Date.now();
       state = 'RUNNING';
+      consecutiveFailures = 0;
+      circuitBreakerTripped = false;
+      startStallWatchdog();
       if (onProgress) onProgress(buildProgress());
       launchWorkers();
     },
@@ -348,6 +423,9 @@ export function createBatchExecutor(config) {
     resume() {
       if (state === 'PAUSED' || state === 'AUTO_PAUSED') {
         state = 'RUNNING';
+        consecutiveFailures = 0;
+        circuitBreakerTripped = false;
+        startStallWatchdog();
         if (onProgress) onProgress(buildProgress());
         launchWorkers();
       }
@@ -357,7 +435,10 @@ export function createBatchExecutor(config) {
       if (state === 'AUTO_PAUSED' || state === 'PAUSED') {
         currentConcurrency = 1;
         currentDelay = 500;
+        consecutiveFailures = 0;
+        circuitBreakerTripped = false;
         state = 'RUNNING';
+        startStallWatchdog();
         if (onProgress) onProgress(buildProgress());
         launchWorkers();
       }
@@ -366,6 +447,7 @@ export function createBatchExecutor(config) {
     cancel() {
       state = 'CANCELLED';
       queue.length = 0;
+      stopStallWatchdog();
       // Abort any active requests
       for (const [, ctrl] of abortControllers) {
         try { ctrl.abort(); } catch {}
@@ -377,6 +459,22 @@ export function createBatchExecutor(config) {
 
     getStatus() {
       return buildProgress();
+    },
+
+    getResults() {
+      return results;
+    },
+
+    getFailedRows() {
+      return results.filter(r => !r.success);
+    },
+
+    getMissingRows() {
+      if (!csvRows) return [];
+      const completedIndices = new Set(results.map(r => r.rowIndex));
+      return csvRows
+        .map((row, i) => ({ rowIndex: i, row }))
+        .filter(({ rowIndex }) => !completedIndices.has(rowIndex));
     },
   };
 }

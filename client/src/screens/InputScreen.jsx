@@ -4,6 +4,8 @@ import CsvDropzone from '../components/CsvDropzone.jsx';
 import ExecutionControls from '../components/ExecutionControls.jsx';
 import ExecutionProgress from '../components/ExecutionProgress.jsx';
 import { createBatchExecutor } from '../services/batchExecutor.js';
+import { createAutoSaver } from '../services/autoSave.js';
+import { createKeepAlive } from '../services/keepAlive.js';
 
 export default function InputScreen({ credentials, onBatchStart, onResultRow, onBatchEnd, onLoadRun }) {
   const [params, setParams] = useState({
@@ -33,8 +35,16 @@ export default function InputScreen({ credentials, onBatchStart, onResultRow, on
   const [running, setRunning] = useState(false);
   const [paused, setPaused] = useState(false);
   const [progress, setProgress] = useState(null);
+  const [autoSaveStatus, setAutoSaveStatus] = useState(null);
+  const [stallWarning, setStallWarning] = useState(null);
+  const [circuitBreak, setCircuitBreak] = useState(null);
   const loadInputRef = useRef(null);
   const executorRef = useRef(null);
+  const autoSaverRef = useRef(null);
+  const keepAliveRef = useRef(null);
+  const resultsRef = useRef([]);
+  const paramsRef = useRef(null);
+  const metaRef = useRef(null);
 
   const handleDataLoaded = useCallback((rows) => setCsvRows(rows), []);
   const handleClear = useCallback(() => setCsvRows(null), []);
@@ -44,8 +54,7 @@ export default function InputScreen({ credentials, onBatchStart, onResultRow, on
 
     const batchId = crypto.randomUUID();
     const batchStartTime = new Date().toISOString();
-
-    onBatchStart(params, csvRows.length, {
+    const batchMetaLocal = {
       batchId,
       batchStartTime,
       requestDelay: execSettings.delayMs,
@@ -55,10 +64,35 @@ export default function InputScreen({ credentials, onBatchStart, onResultRow, on
       contractStatus: params.contractStatus,
       clientTPNum: params.clientTPNum,
       carrierTPNum: params.carrierTPNum,
-    });
+    };
+
+    paramsRef.current = params;
+    metaRef.current = batchMetaLocal;
+    resultsRef.current = [];
+
+    onBatchStart(params, csvRows.length, batchMetaLocal);
 
     setRunning(true);
     setPaused(false);
+    setStallWarning(null);
+    setCircuitBreak(null);
+
+    // Start auto-saver
+    const autoSaver = createAutoSaver({
+      onSaveStatus: (status) => setAutoSaveStatus(status),
+    });
+    autoSaverRef.current = autoSaver;
+    autoSaver.start(
+      batchId,
+      () => resultsRef.current,
+      () => paramsRef.current,
+      () => metaRef.current,
+    );
+
+    // Start keep-alive
+    const keepAlive = createKeepAlive();
+    keepAliveRef.current = keepAlive;
+    keepAlive.start();
 
     const executor = createBatchExecutor({
       concurrency: execSettings.concurrency,
@@ -68,6 +102,7 @@ export default function InputScreen({ credentials, onBatchStart, onResultRow, on
       adaptiveBackoff: execSettings.adaptiveBackoff,
       timeoutMs: 30000,
       onResult: (result) => {
+        resultsRef.current = [...resultsRef.current, result];
         onResultRow(result);
       },
       onProgress: (snap) => {
@@ -83,12 +118,25 @@ export default function InputScreen({ credentials, onBatchStart, onResultRow, on
       onComplete: (summary) => {
         setRunning(false);
         setPaused(false);
+        autoSaverRef.current?.stop(resultsRef.current, paramsRef.current, metaRef.current);
+        keepAliveRef.current?.stop();
         if (onBatchEnd) {
           onBatchEnd({
             batchEndTime: new Date().toISOString(),
             executionSummary: summary,
           });
         }
+      },
+      onStall: (stallInfo) => {
+        setStallWarning(stallInfo);
+        autoSaverRef.current?.saveNow(resultsRef.current, paramsRef.current, metaRef.current);
+      },
+      onCircuitBreak: (cbInfo) => {
+        setCircuitBreak(cbInfo);
+        autoSaverRef.current?.saveNow(resultsRef.current, paramsRef.current, metaRef.current);
+      },
+      onAutoSave: () => {
+        autoSaverRef.current?.saveNow(resultsRef.current, paramsRef.current, metaRef.current);
       },
     });
 
@@ -110,6 +158,8 @@ export default function InputScreen({ credentials, onBatchStart, onResultRow, on
 
   const handleCancel = () => {
     executorRef.current?.cancel();
+    autoSaverRef.current?.stop(resultsRef.current, paramsRef.current, metaRef.current);
+    keepAliveRef.current?.stop();
     setRunning(false);
     setPaused(false);
   };
@@ -161,6 +211,11 @@ export default function InputScreen({ credentials, onBatchStart, onResultRow, on
             progress={progress}
             onResumeSlow={handleResumeSlow}
             onCancel={handleCancel}
+            onResume={handleResume}
+            autoSaveStatus={autoSaveStatus}
+            stallWarning={stallWarning}
+            circuitBreak={circuitBreak}
+            recoveryUrl={autoSaverRef.current?.getRecoveryUrl?.()}
           />
         )}
 

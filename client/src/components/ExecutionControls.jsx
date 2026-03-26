@@ -3,6 +3,11 @@ import React, { useState } from 'react';
 const CONCURRENCY_OPTIONS = [1, 2, 3, 4, 5, 6, 8];
 const DELAY_OPTIONS = [0, 50, 100, 150, 200, 300, 500];
 const RETRY_OPTIONS = [0, 1, 2, 3];
+const CHUNK_SIZE_OPTIONS = [200, 300, 400, 500, 700, 1000];
+const MAX_AGENTS_OPTIONS = [2, 3, 4, 5, 6, 8];
+const PER_AGENT_CONC_OPTIONS = [1, 2, 3, 4];
+const TOTAL_CONC_OPTIONS = [4, 6, 8, 10, 12];
+const STAGGER_OPTIONS = [250, 500, 1000, 1500, 2000];
 
 function StepperControl({ label, value, options, onChange, tooltip }) {
   const idx = options.indexOf(value);
@@ -31,7 +36,12 @@ export default function ExecutionControls({ settings, onChange, onRun, onPause, 
 
   const update = (key, val) => onChange({ ...settings, [key]: val });
 
-  const summaryText = `${settings.concurrency} concurrent \u2022 ${settings.delayMs}ms delay \u2022 ${settings.retryAttempts} retry${settings.adaptiveBackoff ? ' \u2022 auto-throttle' : ''}`;
+  const isMulti = settings.executionMode === 'multi';
+  const showMultiRecommendation = rowCount > 400 && !isMulti && csvLoaded;
+
+  const summaryText = isMulti
+    ? `Multi-Agent \u2022 ${settings.chunkSize || 400} rows/agent \u2022 ${settings.maxAgents || 5} agents \u2022 ${settings.totalMaxConcurrency || 8} total conc`
+    : `${settings.concurrency} concurrent \u2022 ${settings.delayMs}ms delay \u2022 ${settings.retryAttempts} retry${settings.adaptiveBackoff ? ' \u2022 auto-throttle' : ''}`;
 
   // XML memory warning
   const showXmlWarning = settings.concurrency > 2 && rowCount > 500;
@@ -55,39 +65,155 @@ export default function ExecutionControls({ settings, onChange, onRun, onPause, 
 
       {/* Expanded controls */}
       {expanded && (
-        <div className="px-4 pb-3 border-t border-gray-100 pt-3 space-y-2">
-          <div className="flex flex-wrap gap-x-6 gap-y-2">
-            <StepperControl
-              label="Concurrency"
-              value={settings.concurrency}
-              options={CONCURRENCY_OPTIONS}
-              onChange={v => update('concurrency', v)}
-              tooltip="Number of simultaneous API calls. Higher = faster but uses more server capacity."
-            />
-            <StepperControl
-              label="Delay"
-              value={settings.delayMs}
-              options={DELAY_OPTIONS}
-              onChange={v => update('delayMs', v)}
-              tooltip="Milliseconds between dispatches. Set to 0 for maximum speed."
-            />
-            <StepperControl
-              label="Retries"
-              value={settings.retryAttempts}
-              options={RETRY_OPTIONS}
-              onChange={v => update('retryAttempts', v)}
-              tooltip="Number of retry attempts for failed requests."
-            />
-            <label className="flex items-center gap-1.5 text-[11px] text-gray-600 font-medium cursor-pointer" title="Automatically reduce speed on errors">
-              <input
-                type="checkbox"
-                checked={settings.adaptiveBackoff}
-                onChange={e => update('adaptiveBackoff', e.target.checked)}
-                className="rounded border-gray-300"
-              />
-              Auto-throttle
-            </label>
+        <div className="px-4 pb-3 border-t border-gray-100 pt-3 space-y-3">
+          {/* Mode toggle */}
+          <div className="flex items-center gap-3 pb-2 border-b border-gray-100">
+            <span className="text-[11px] text-gray-600 font-medium">Execution Mode:</span>
+            <button
+              type="button"
+              onClick={() => update('executionMode', 'single')}
+              className={`text-[11px] px-2.5 py-1 rounded font-medium transition-colors ${!isMulti ? 'bg-[#39b6e6] text-white' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}
+            >Single Agent</button>
+            <button
+              type="button"
+              onClick={() => update('executionMode', 'multi')}
+              className={`text-[11px] px-2.5 py-1 rounded font-medium transition-colors ${isMulti ? 'bg-[#39b6e6] text-white' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}
+            >Multi-Agent</button>
           </div>
+
+          {/* Single agent settings */}
+          {!isMulti && (
+            <div className="flex flex-wrap gap-x-6 gap-y-2">
+              <StepperControl
+                label="Concurrency"
+                value={settings.concurrency}
+                options={CONCURRENCY_OPTIONS}
+                onChange={v => update('concurrency', v)}
+                tooltip="Number of simultaneous API calls. Higher = faster but uses more server capacity."
+              />
+              <StepperControl
+                label="Delay"
+                value={settings.delayMs}
+                options={DELAY_OPTIONS}
+                onChange={v => update('delayMs', v)}
+                tooltip="Milliseconds between dispatches. Set to 0 for maximum speed."
+              />
+              <StepperControl
+                label="Retries"
+                value={settings.retryAttempts}
+                options={RETRY_OPTIONS}
+                onChange={v => update('retryAttempts', v)}
+                tooltip="Number of retry attempts for failed requests."
+              />
+              <label className="flex items-center gap-1.5 text-[11px] text-gray-600 font-medium cursor-pointer" title="Automatically reduce speed on errors">
+                <input
+                  type="checkbox"
+                  checked={settings.adaptiveBackoff}
+                  onChange={e => update('adaptiveBackoff', e.target.checked)}
+                  className="rounded border-gray-300"
+                />
+                Auto-throttle
+              </label>
+            </div>
+          )}
+
+          {/* Multi-agent settings */}
+          {isMulti && (
+            <div className="space-y-2">
+              <div className="flex flex-wrap gap-x-6 gap-y-2">
+                <StepperControl
+                  label="Chunk Size"
+                  value={settings.chunkSize || 400}
+                  options={CHUNK_SIZE_OPTIONS}
+                  onChange={v => update('chunkSize', v)}
+                  tooltip="Rows per agent. Each agent processes this many rows independently."
+                />
+                <StepperControl
+                  label="Max Agents"
+                  value={settings.maxAgents || 5}
+                  options={MAX_AGENTS_OPTIONS}
+                  onChange={v => update('maxAgents', v)}
+                  tooltip="Maximum number of simultaneous agents."
+                />
+                <StepperControl
+                  label="Per-Agent Conc"
+                  value={settings.concurrencyPerAgent || 2}
+                  options={PER_AGENT_CONC_OPTIONS}
+                  onChange={v => update('concurrencyPerAgent', v)}
+                  tooltip="Concurrent requests per agent."
+                />
+                <StepperControl
+                  label="Total Max Conc"
+                  value={settings.totalMaxConcurrency || 8}
+                  options={TOTAL_CONC_OPTIONS}
+                  onChange={v => update('totalMaxConcurrency', v)}
+                  tooltip="Hard cap on total in-flight API requests across all agents."
+                />
+              </div>
+              <div className="flex flex-wrap gap-x-6 gap-y-2">
+                <StepperControl
+                  label="Delay"
+                  value={settings.delayMs}
+                  options={DELAY_OPTIONS}
+                  onChange={v => update('delayMs', v)}
+                  tooltip="Per-request delay within each agent."
+                />
+                <StepperControl
+                  label="Stagger"
+                  value={settings.staggerStartMs || 500}
+                  options={STAGGER_OPTIONS}
+                  onChange={v => update('staggerStartMs', v)}
+                  tooltip="Delay between agent launches to avoid burst connections."
+                />
+                <StepperControl
+                  label="Retries"
+                  value={settings.retryAttempts}
+                  options={RETRY_OPTIONS}
+                  onChange={v => update('retryAttempts', v)}
+                  tooltip="Per-agent retry attempts."
+                />
+                <label className="flex items-center gap-1.5 text-[11px] text-gray-600 font-medium cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={settings.adaptiveBackoff}
+                    onChange={e => update('adaptiveBackoff', e.target.checked)}
+                    className="rounded border-gray-300"
+                  />
+                  Auto-throttle (per agent)
+                </label>
+              </div>
+              {rowCount > 0 && (
+                <p className="text-[10px] text-gray-500 bg-gray-50 rounded px-2 py-1">
+                  {rowCount} rows \u00F7 {settings.chunkSize || 400} = {Math.ceil(rowCount / (settings.chunkSize || 400))} agents.
+                  Up to {Math.min(settings.maxAgents || 5, Math.floor((settings.totalMaxConcurrency || 8) / (settings.concurrencyPerAgent || 2)))} active simultaneously.
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Multi-agent recommendation */}
+          {showMultiRecommendation && (
+            <div className="bg-blue-50 border border-blue-200 rounded px-3 py-2 text-[11px] text-blue-700 flex items-center justify-between">
+              <span>
+                Large batch ({rowCount} rows). Multi-Agent mode splits into {Math.ceil(rowCount / 400)} independent agents for resilience.
+              </span>
+              <button
+                type="button"
+                onClick={() => onChange({
+                  ...settings,
+                  executionMode: 'multi',
+                  chunkSize: 400,
+                  maxAgents: 5,
+                  concurrencyPerAgent: 2,
+                  totalMaxConcurrency: 8,
+                  staggerStartMs: 500,
+                })}
+                className="bg-blue-500 text-white px-2 py-0.5 rounded text-[10px] font-medium hover:bg-blue-600 ml-2 whitespace-nowrap"
+              >
+                Use Multi-Agent
+              </button>
+            </div>
+          )}
 
           {showXmlWarning && (
             <p className="text-[10px] text-amber-600 bg-amber-50 rounded px-2 py-1">

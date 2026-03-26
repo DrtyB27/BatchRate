@@ -3,7 +3,9 @@ import ParametersSidebar from '../components/ParametersSidebar.jsx';
 import CsvDropzone from '../components/CsvDropzone.jsx';
 import ExecutionControls from '../components/ExecutionControls.jsx';
 import ExecutionProgress from '../components/ExecutionProgress.jsx';
+import MultiAgentProgress from '../components/MultiAgentProgress.jsx';
 import { createBatchExecutor } from '../services/batchExecutor.js';
+import { createBatchOrchestrator } from '../services/batchOrchestrator.js';
 
 export default function InputScreen({ credentials, onBatchStart, onResultRow, onBatchEnd, onLoadRun }) {
   const [params, setParams] = useState({
@@ -33,75 +35,128 @@ export default function InputScreen({ credentials, onBatchStart, onResultRow, on
   const [running, setRunning] = useState(false);
   const [paused, setPaused] = useState(false);
   const [progress, setProgress] = useState(null);
+  const [multiProgress, setMultiProgress] = useState(null);
   const loadInputRef = useRef(null);
   const executorRef = useRef(null);
+  const orchestratorRef = useRef(null);
 
   const handleDataLoaded = useCallback((rows) => setCsvRows(rows), []);
   const handleClear = useCallback(() => setCsvRows(null), []);
+
+  const isMultiMode = execSettings.executionMode === 'multi';
 
   const handleRunBatch = () => {
     if (!csvRows || csvRows.length === 0) return;
 
     const batchId = crypto.randomUUID();
     const batchStartTime = new Date().toISOString();
-
-    onBatchStart(params, csvRows.length, {
+    const batchMeta = {
       batchId,
       batchStartTime,
       requestDelay: execSettings.delayMs,
-      concurrency: execSettings.concurrency,
+      concurrency: isMultiMode ? execSettings.totalMaxConcurrency || 8 : execSettings.concurrency,
       numberOfRates: params.numberOfRates,
       contractUse: params.contractUse,
       contractStatus: params.contractStatus,
       clientTPNum: params.clientTPNum,
       carrierTPNum: params.carrierTPNum,
-    });
+      executionMode: isMultiMode ? 'multi' : 'single',
+    };
 
+    onBatchStart(params, csvRows.length, batchMeta);
     setRunning(true);
     setPaused(false);
+    setMultiProgress(null);
 
-    const executor = createBatchExecutor({
-      concurrency: execSettings.concurrency,
-      delayMs: execSettings.delayMs,
-      retryAttempts: execSettings.retryAttempts,
-      retryDelayMs: 1000,
-      adaptiveBackoff: execSettings.adaptiveBackoff,
-      timeoutMs: 30000,
-      onResult: (result) => {
-        onResultRow(result);
-      },
-      onProgress: (snap) => {
-        setProgress(snap);
-        if (snap.state === 'PAUSED' || snap.state === 'AUTO_PAUSED') {
-          setPaused(true);
+    if (isMultiMode) {
+      // ── Multi-Agent Mode ──
+      const orchestrator = createBatchOrchestrator({
+        chunkSize: execSettings.chunkSize || 400,
+        maxAgents: execSettings.maxAgents || 5,
+        concurrencyPerAgent: execSettings.concurrencyPerAgent || 2,
+        totalMaxConcurrency: execSettings.totalMaxConcurrency || 8,
+        delayMs: execSettings.delayMs,
+        retryAttempts: execSettings.retryAttempts,
+        adaptiveBackoff: execSettings.adaptiveBackoff,
+        timeoutMs: 30000,
+        staggerStartMs: execSettings.staggerStartMs || 500,
+        autoSavePerAgent: true,
+        onResult: (result) => onResultRow(result),
+        onAgentProgress: () => {},
+        onProgress: (overall) => {
+          setMultiProgress(overall);
+          if (overall.state === 'PAUSED') {
+            setPaused(true);
+            setRunning(false);
+          } else if (overall.state === 'RUNNING') {
+            setPaused(false);
+            setRunning(true);
+          }
+        },
+        onAgentComplete: () => {},
+        onComplete: (summary) => {
           setRunning(false);
-        } else if (snap.state === 'RUNNING') {
           setPaused(false);
-          setRunning(true);
-        }
-      },
-      onComplete: (summary) => {
-        setRunning(false);
-        setPaused(false);
-        if (onBatchEnd) {
-          onBatchEnd({
-            batchEndTime: new Date().toISOString(),
-            executionSummary: summary,
-          });
-        }
-      },
-    });
-
-    executorRef.current = executor;
-    executor.start(csvRows, params, credentials);
+          if (onBatchEnd) {
+            onBatchEnd({
+              batchEndTime: new Date().toISOString(),
+              executionSummary: summary,
+            });
+          }
+        },
+      });
+      orchestratorRef.current = orchestrator;
+      orchestrator.start(csvRows, params, credentials);
+    } else {
+      // ── Single Agent Mode ──
+      const executor = createBatchExecutor({
+        concurrency: execSettings.concurrency,
+        delayMs: execSettings.delayMs,
+        retryAttempts: execSettings.retryAttempts,
+        retryDelayMs: 1000,
+        adaptiveBackoff: execSettings.adaptiveBackoff,
+        timeoutMs: 30000,
+        onResult: (result) => onResultRow(result),
+        onProgress: (snap) => {
+          setProgress(snap);
+          if (snap.state === 'PAUSED' || snap.state === 'AUTO_PAUSED') {
+            setPaused(true);
+            setRunning(false);
+          } else if (snap.state === 'RUNNING') {
+            setPaused(false);
+            setRunning(true);
+          }
+        },
+        onComplete: (summary) => {
+          setRunning(false);
+          setPaused(false);
+          if (onBatchEnd) {
+            onBatchEnd({
+              batchEndTime: new Date().toISOString(),
+              executionSummary: summary,
+            });
+          }
+        },
+      });
+      executorRef.current = executor;
+      executor.start(csvRows, params, credentials);
+    }
   };
 
   const handlePause = () => {
-    executorRef.current?.pause();
+    if (isMultiMode && orchestratorRef.current) {
+      orchestratorRef.current.pause();
+    } else {
+      executorRef.current?.pause();
+    }
   };
 
   const handleResume = () => {
-    executorRef.current?.resume();
+    if (isMultiMode && orchestratorRef.current) {
+      orchestratorRef.current.resume();
+    } else {
+      executorRef.current?.resume();
+    }
   };
 
   const handleResumeSlow = () => {
@@ -109,7 +164,11 @@ export default function InputScreen({ credentials, onBatchStart, onResultRow, on
   };
 
   const handleCancel = () => {
-    executorRef.current?.cancel();
+    if (isMultiMode && orchestratorRef.current) {
+      orchestratorRef.current.cancel();
+    } else {
+      executorRef.current?.cancel();
+    }
     setRunning(false);
     setPaused(false);
   };
@@ -156,7 +215,20 @@ export default function InputScreen({ credentials, onBatchStart, onResultRow, on
         />
 
         {/* Live progress during execution */}
-        {isExecuting && progress && (
+        {isExecuting && isMultiMode && multiProgress && (
+          <MultiAgentProgress
+            progress={multiProgress}
+            onPauseAll={handlePause}
+            onResumeAll={handleResume}
+            onCancelAll={handleCancel}
+            onPauseAgent={(id) => orchestratorRef.current?.pauseAgent(id)}
+            onResumeAgent={(id) => orchestratorRef.current?.resumeAgent(id)}
+            onCancelAgent={(id) => orchestratorRef.current?.cancelAgent(id)}
+            onRetryAgent={(id) => orchestratorRef.current?.retryAgent(id)}
+            onRetryAllFailed={() => orchestratorRef.current?.retryAllFailed()}
+          />
+        )}
+        {isExecuting && !isMultiMode && progress && (
           <ExecutionProgress
             progress={progress}
             onResumeSlow={handleResumeSlow}

@@ -26,12 +26,12 @@ function MiniScatter({ data, xLabel, yLabel, guidance, significant }) {
   );
 }
 
-function MiniBar({ data, guidance }) {
+function MiniBar({ data, guidance, title }) {
   if (!data || data.length === 0) return null;
-  const displayData = data.slice(0, 15); // top 15 states
+  const displayData = data.slice(0, 15);
   return (
     <div className="bg-white border border-gray-200 rounded-lg p-3">
-      <div className="text-xs font-medium text-gray-500 mb-1">Response Time by Origin State</div>
+      <div className="text-xs font-medium text-gray-500 mb-1">{title || 'Response Time by Origin State'}</div>
       <ResponsiveContainer width="100%" height={180}>
         <BarChart data={displayData} margin={{ top: 5, right: 10, bottom: 5, left: 5 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
@@ -55,10 +55,10 @@ export default function CorrelationCharts({ correlations }) {
   return (
     <div className="space-y-3">
       <h4 className="text-sm font-semibold text-[#002144]">Performance Correlation Analysis</h4>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
         {correlations.map((c) => {
           if (c.type === 'bar') {
-            return <MiniBar key={c.id} data={c.data} guidance={c.guidance} />;
+            return <MiniBar key={c.id} data={c.data} guidance={c.guidance} title={c.title} />;
           }
           return (
             <MiniScatter

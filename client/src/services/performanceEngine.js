@@ -53,8 +53,24 @@ export function computePerformanceSummary(results, batchMeta) {
   const ratesCounts = results.map(r => r.rateCount ?? r.rates?.length ?? 0);
   const avgRatesPerRow = successful.length > 0 ? ratesCounts.filter((_, i) => results[i].success).reduce((a, b) => a + b, 0) / successful.length : 0;
 
-  const requestDelay = batchMeta?.requestDelay ?? 150;
-  const totalBatchTime = totalTime + (total - 1) * requestDelay;
+  // Use wall-clock elapsed time when available (works for both single and multi-agent)
+  let totalBatchTime;
+  const startTime = batchMeta?.batchStartTime ? new Date(batchMeta.batchStartTime).getTime() : null;
+  const endTime = batchMeta?.batchEndTime ? new Date(batchMeta.batchEndTime).getTime() : null;
+  if (startTime && endTime && endTime > startTime) {
+    totalBatchTime = endTime - startTime;
+  } else if (results.length > 0 && results.some(r => r.completedAt)) {
+    // Derive from result timestamps
+    const timestamps = results.filter(r => r.completedAt).map(r => new Date(r.completedAt).getTime());
+    const startTs = results.filter(r => r.startedAt).map(r => new Date(r.startedAt).getTime());
+    const earliest = startTs.length > 0 ? Math.min(...startTs) : (startTime || Math.min(...timestamps));
+    totalBatchTime = Math.max(...timestamps) - earliest;
+  } else {
+    // Fallback: estimate from sum of response times / concurrency
+    const concurrency = batchMeta?.concurrency || 1;
+    const requestDelay = batchMeta?.requestDelay ?? 150;
+    totalBatchTime = (totalTime / concurrency) + (total - 1) * requestDelay / concurrency;
+  }
   const throughput = totalBatchTime > 0 ? (total / (totalBatchTime / 60000)) : 0;
 
   const xmlReqSizes = results.map(r => r.xmlRequestSize || 0).filter(s => s > 0);
@@ -96,13 +112,13 @@ export function computeRollingAverage(results, windowSize = 10) {
 // ============================================================
 // Degradation Detection
 // ============================================================
-export function detectDegradation(results) {
-  if (results.length < 10) return { detected: false, deciles: [], degradationPoint: null, ratio: 1 };
+function analyzeDeciles(rows) {
+  if (rows.length < 10) return { detected: false, deciles: [], degradationPoint: null, ratio: 1 };
 
-  const decileSize = Math.ceil(results.length / 10);
+  const decileSize = Math.ceil(rows.length / 10);
   const deciles = [];
   for (let d = 0; d < 10; d++) {
-    const slice = results.slice(d * decileSize, (d + 1) * decileSize);
+    const slice = rows.slice(d * decileSize, (d + 1) * decileSize);
     const mean = slice.reduce((s, r) => s + (r.elapsedMs || 0), 0) / slice.length;
     deciles.push({ decile: d + 1, startRow: d * decileSize, mean: Math.round(mean), count: slice.length });
   }
@@ -130,6 +146,31 @@ export function detectDegradation(results) {
     deciles,
     baseMean: deciles[0].mean,
   };
+}
+
+export function detectDegradation(results) {
+  // Overall analysis (sort by completion order for accurate time-series)
+  const sorted = [...results].sort((a, b) => (a.completionOrder ?? a.rowIndex ?? 0) - (b.completionOrder ?? b.rowIndex ?? 0));
+  const overall = analyzeDeciles(sorted);
+
+  // Per-agent analysis for multi-agent runs
+  const hasAgents = results.some(r => r.agentId !== undefined);
+  let perAgent = null;
+  if (hasAgents) {
+    const agentGroups = {};
+    for (const r of results) {
+      const aid = r.agentId ?? 'default';
+      if (!agentGroups[aid]) agentGroups[aid] = [];
+      agentGroups[aid].push(r);
+    }
+    perAgent = {};
+    for (const [agentId, rows] of Object.entries(agentGroups)) {
+      const agentSorted = [...rows].sort((a, b) => (a.completionOrder ?? a.rowIndex ?? 0) - (b.completionOrder ?? b.rowIndex ?? 0));
+      perAgent[agentId] = analyzeDeciles(agentSorted);
+    }
+  }
+
+  return { ...overall, perAgent };
 }
 
 // ============================================================
@@ -171,19 +212,23 @@ export function computeCorrelations(results) {
       : 'Carrier count does not significantly affect response time.',
   });
 
-  // B) Response Time vs Batch Position
-  const posPoints = results.map(r => ({ x: r.rowIndex ?? r.batchPosition ?? 0, y: r.elapsedMs || 0 }));
+  // B) Response Time vs Batch Position (use per-agent local index for multi-agent)
+  const hasAgents = results.some(r => r.agentId !== undefined);
+  const posPoints = results.map(r => ({
+    x: hasAgents ? (r.agentRowIndex ?? r.rowIndex ?? 0) : (r.rowIndex ?? r.batchPosition ?? 0),
+    y: r.elapsedMs || 0,
+  }));
   const posReg = linearRegression(posPoints);
   correlations.push({
     id: 'position',
-    title: 'Response Time vs. Batch Position',
-    xLabel: 'Row Index',
+    title: hasAgents ? 'Response Time vs. Agent-Local Position' : 'Response Time vs. Batch Position',
+    xLabel: hasAgents ? 'Position Within Agent' : 'Row Index',
     yLabel: 'Response Time (ms)',
     data: posPoints,
     regression: posReg,
     significant: posReg.slope > 0.5 && posReg.r2 > 0.05,
     guidance: posReg.slope > 0.5 && posReg.r2 > 0.05
-      ? `Server degrades over sustained load (~${Math.round(posReg.slope)}ms/row). Split batches with pauses.`
+      ? `Server degrades over sustained load (~${Math.round(posReg.slope)}ms/row). ${hasAgents ? 'Consider smaller chunks.' : 'Split batches with pauses.'}`
       : 'No significant degradation over batch duration.',
   });
 
@@ -242,6 +287,35 @@ export function computeCorrelations(results) {
       guidance: workerData.length > 1
         ? `Work distributed across ${workerData.length} concurrent workers.`
         : 'Single worker (sequential execution).',
+    });
+  }
+
+  // F) Response Time by Agent (multi-agent runs)
+  if (hasAgents) {
+    const agentMap = {};
+    for (const r of results) {
+      const aid = r.agentId ?? 'default';
+      if (!agentMap[aid]) agentMap[aid] = [];
+      agentMap[aid].push(r.elapsedMs || 0);
+    }
+    const agentData = Object.entries(agentMap)
+      .map(([agent, times]) => ({
+        state: `A${agent.slice(0, 4)}`,
+        fullId: agent,
+        avg: Math.round(times.reduce((a, b) => a + b, 0) / times.length),
+        count: times.length,
+      }))
+      .sort((a, b) => a.avg - b.avg);
+    const slowest = agentData[agentData.length - 1];
+    const fastest = agentData[0];
+    correlations.push({
+      id: 'agent',
+      title: 'Response Time by Agent',
+      type: 'bar',
+      data: agentData,
+      guidance: agentData.length > 1 && slowest.avg > fastest.avg * 1.3
+        ? `Agent ${slowest.state} is ${Math.round(slowest.avg / fastest.avg * 10) / 10}x slower than ${fastest.state}. Check chunk composition.`
+        : `Performance is balanced across ${agentData.length} agents.`,
     });
   }
 
@@ -398,6 +472,28 @@ export function generateRecommendations(summary, degradation, correlations, erro
     const est500 = rowsPerSec > 0 ? Math.round(500 / rowsPerSec) : 0;
     const est1000 = rowsPerSec > 0 ? Math.round(1000 / rowsPerSec) : 0;
     recs.push({ severity: 'INFO', title: 'Concurrency', message: `At concurrency ${usedConcurrency}, effective throughput is ${Math.round(rowsPerSec * 10) / 10} rows/sec. A 500-row file: ~${est500}s. A 1000-row file: ~${est1000}s.` });
+  }
+
+  // Rule 8 — Multi-Agent Balance
+  const agentCorr = correlations.find(c => c.id === 'agent');
+  if (agentCorr && agentCorr.data?.length > 1) {
+    const fastest = agentCorr.data[0];
+    const slowest = agentCorr.data[agentCorr.data.length - 1];
+    const imbalance = slowest.avg / (fastest.avg || 1);
+    if (imbalance > 1.5) {
+      recs.push({ severity: 'WARNING', title: 'Agent Imbalance', message: `Agent ${slowest.state} averaged ${slowest.avg}ms vs ${fastest.state} at ${fastest.avg}ms (${Math.round(imbalance * 10) / 10}x slower). Check if slow agent chunks have heavier lanes or more carriers.` });
+    } else {
+      recs.push({ severity: 'INFO', title: 'Agent Balance', message: `All ${agentCorr.data.length} agents performed within ${Math.round(imbalance * 100 - 100)}% of each other. Multi-agent load is well balanced.` });
+    }
+  }
+
+  // Rule 9 — Multi-Agent Per-Agent Degradation
+  if (degradation.perAgent) {
+    const degradedAgents = Object.entries(degradation.perAgent).filter(([, d]) => d.detected);
+    if (degradedAgents.length > 0) {
+      const agentNames = degradedAgents.map(([id]) => id.slice(0, 8)).join(', ');
+      recs.push({ severity: 'WARNING', title: 'Agent Degradation', message: `${degradedAgents.length} agent(s) showed internal degradation (${agentNames}). Consider reducing chunk size so each agent finishes before server fatigue.` });
+    }
   }
 
   return recs;

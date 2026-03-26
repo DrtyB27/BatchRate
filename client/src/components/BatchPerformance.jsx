@@ -13,6 +13,7 @@ import {
 
 export default function BatchPerformance({ results, batchMeta }) {
   const isCombined = batchMeta?.isCombined || false;
+  const isMultiAgent = batchMeta?.executionMode === 'multi' || results.some(r => r.agentId !== undefined);
 
   const summary = useMemo(() => computePerformanceSummary(results, batchMeta), [results, batchMeta]);
   const rollingAvg = useMemo(() => computeRollingAverage(results, 10), [results]);
@@ -40,6 +41,22 @@ export default function BatchPerformance({ results, batchMeta }) {
     });
   }, [results, isCombined, batchMeta]);
 
+  // Per-agent breakdown for multi-agent runs
+  const agentBreakdown = useMemo(() => {
+    if (!isMultiAgent || isCombined) return null;
+    const groups = {};
+    for (const r of results) {
+      const aid = r.agentId ?? 'default';
+      if (!groups[aid]) groups[aid] = [];
+      groups[aid].push(r);
+    }
+    if (Object.keys(groups).length <= 1) return null;
+    return Object.entries(groups).map(([agentId, rows]) => {
+      const s = computePerformanceSummary(rows, batchMeta);
+      return { agentId: agentId.slice(0, 8), ...s };
+    });
+  }, [results, isMultiAgent, isCombined, batchMeta]);
+
   if (results.length === 0) {
     return (
       <div className="flex-1 flex items-center justify-center">
@@ -54,6 +71,12 @@ export default function BatchPerformance({ results, batchMeta }) {
         <div className="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2 text-xs text-blue-700 flex items-center gap-2">
           <span className="font-semibold">Combined Run</span>
           <span>({batchMeta?.sourceBatches?.length || '?'} batches, {results.length} total rows)</span>
+        </div>
+      )}
+      {isMultiAgent && !isCombined && (
+        <div className="bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2 text-xs text-indigo-700 flex items-center gap-2">
+          <span className="font-semibold">Multi-Agent Run</span>
+          <span>({agentBreakdown?.length || '?'} agents, {results.length} total rows)</span>
         </div>
       )}
 
@@ -93,11 +116,44 @@ export default function BatchPerformance({ results, batchMeta }) {
         </div>
       )}
 
+      {/* Per-agent breakdown for multi-agent runs */}
+      {agentBreakdown && (
+        <div className="bg-white border border-gray-200 rounded-lg p-4">
+          <h4 className="text-sm font-semibold text-[#002144] mb-2">Per-Agent Breakdown</h4>
+          <div className="overflow-auto">
+            <table className="w-full text-xs border-collapse">
+              <thead>
+                <tr className="border-b border-gray-200 text-left">
+                  <th className="py-1.5 px-2 font-semibold text-gray-600">Agent</th>
+                  <th className="py-1.5 px-2 text-right font-semibold text-gray-600">Rows</th>
+                  <th className="py-1.5 px-2 text-right font-semibold text-gray-600">Success%</th>
+                  <th className="py-1.5 px-2 text-right font-semibold text-gray-600">Avg Time</th>
+                  <th className="py-1.5 px-2 text-right font-semibold text-gray-600">P95</th>
+                  <th className="py-1.5 px-2 text-right font-semibold text-gray-600">Throughput</th>
+                </tr>
+              </thead>
+              <tbody>
+                {agentBreakdown.map((a) => (
+                  <tr key={a.agentId} className="border-b border-gray-100">
+                    <td className="py-1.5 px-2 font-mono">{a.agentId}</td>
+                    <td className="py-1.5 px-2 text-right">{a.total}</td>
+                    <td className="py-1.5 px-2 text-right">{a.successRate.toFixed(1)}%</td>
+                    <td className="py-1.5 px-2 text-right">{a.avgTime}ms</td>
+                    <td className="py-1.5 px-2 text-right">{a.p95}ms</td>
+                    <td className="py-1.5 px-2 text-right">{a.throughput}/min</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {/* Section 2: Response Time Timeline */}
       <ResponseTimeline results={results} rollingAvg={rollingAvg} degradation={degradation} />
 
       {/* Section 3 & 4: Two-column layout */}
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 2xl:grid-cols-2 gap-4">
         <ErrorAnalysis errorAnalysis={errorAnalysis} errorPatterns={errorPatterns} />
         <SizingRecommendations recommendations={recommendations} isCombined={isCombined} />
       </div>

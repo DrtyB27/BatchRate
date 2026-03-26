@@ -5,6 +5,7 @@ import AnalyticsDashboard from '../components/AnalyticsDashboard.jsx';
 import ScenarioBuilder from '../components/ScenarioBuilder.jsx';
 import OptimizationDashboard from '../components/OptimizationDashboard.jsx';
 import BatchPerformance from '../components/BatchPerformance.jsx';
+import ConsolidationDashboard from '../components/ConsolidationDashboard.jsx';
 import CombineRunsDialog from '../components/CombineRunsDialog.jsx';
 import { serializeRun, downloadRunFile } from '../services/runPersistence.js';
 
@@ -209,9 +210,11 @@ export default function ResultsScreen({ results, totalRows, batchParams, batchMe
   const totalElapsed = results.reduce((sum, r) => sum + (r.elapsedMs || 0), 0);
   const avgTime = results.length > 0 ? Math.round(totalElapsed / results.length) : 0;
 
+  const partialTag = !isComplete && results.length > 0 ? `_PARTIAL_${results.length}of${totalRows}` : '';
+
   const handleExport = (type) => {
     if (type === 'raw') {
-      downloadCsv(`BidAnalysis_Raw_${timestamp()}.csv`, buildRawCsv(flatRows, lowCostFlags));
+      downloadCsv(`BidAnalysis_Raw${partialTag}_${timestamp()}.csv`, buildRawCsv(flatRows, lowCostFlags));
     } else if (type === 'customer') {
       setModal('customer');
     } else if (type === 'customRate') {
@@ -221,9 +224,9 @@ export default function ResultsScreen({ results, totalRows, batchParams, batchMe
 
   const handleModalConfirm = () => {
     if (modal === 'customer') {
-      downloadCsv(`BidAnalysis_Customer_${timestamp()}.csv`, buildCustomerCsv(flatRows, lowCostFlags));
+      downloadCsv(`BidAnalysis_Customer${partialTag}_${timestamp()}.csv`, buildCustomerCsv(flatRows, lowCostFlags));
     } else if (modal === 'customRate') {
-      downloadCsv(`CustomRateTemplate_${timestamp()}.csv`, buildCustomRateCsv(flatRows));
+      downloadCsv(`CustomRateTemplate${partialTag}_${timestamp()}.csv`, buildCustomRateCsv(flatRows));
     }
     setModal(null);
   };
@@ -271,10 +274,10 @@ export default function ResultsScreen({ results, totalRows, batchParams, batchMe
         {/* Save/Load/Combine */}
         <button
           onClick={handleSaveRun}
-          disabled={!isComplete}
+          disabled={results.length === 0}
           className="text-xs bg-[#002144] hover:bg-[#003366] disabled:bg-gray-300 text-white px-3 py-1.5 rounded font-medium transition-colors"
         >
-          Save Run
+          Save Run{!isComplete && results.length > 0 ? ` (${results.length})` : ''}
         </button>
         <button
           onClick={() => loadInputRef.current?.click()}
@@ -285,7 +288,7 @@ export default function ResultsScreen({ results, totalRows, batchParams, batchMe
         <input ref={loadInputRef} type="file" accept=".json" onChange={handleLoadFile} className="hidden" />
         <button
           onClick={() => setShowCombine(true)}
-          disabled={!isComplete}
+          disabled={results.length === 0}
           className="text-xs bg-gray-200 hover:bg-gray-300 disabled:bg-gray-100 disabled:text-gray-400 text-gray-700 px-3 py-1.5 rounded font-medium transition-colors"
         >
           Combine Runs
@@ -296,24 +299,24 @@ export default function ResultsScreen({ results, totalRows, batchParams, batchMe
         {/* Exports */}
         <button
           onClick={() => handleExport('raw')}
-          disabled={!isComplete}
+          disabled={results.length === 0}
           className="text-xs bg-gray-700 hover:bg-gray-800 disabled:bg-gray-300 text-white px-3 py-1.5 rounded"
         >
-          Export Raw
+          Export Raw{!isComplete && results.length > 0 ? ` (${results.length})` : ''}
         </button>
         <button
           onClick={() => handleExport('customer')}
-          disabled={!isComplete}
+          disabled={results.length === 0}
           className="text-xs bg-[#39b6e6] hover:bg-[#2d9bc4] disabled:bg-gray-300 text-white px-3 py-1.5 rounded"
         >
-          Export Customer
+          Export Customer{!isComplete && results.length > 0 ? ` (${results.length})` : ''}
         </button>
         <button
           onClick={() => handleExport('customRate')}
-          disabled={!isComplete}
+          disabled={results.length === 0}
           className="text-xs bg-amber-600 hover:bg-amber-700 disabled:bg-gray-300 text-white px-3 py-1.5 rounded"
         >
-          Export Custom Rate
+          Export Custom Rate{!isComplete && results.length > 0 ? ` (${results.length})` : ''}
         </button>
         <button
           onClick={onNewBatch}
@@ -341,26 +344,34 @@ export default function ResultsScreen({ results, totalRows, batchParams, batchMe
         <button
           className={viewBtnCls('analytics')}
           onClick={() => setViewMode('analytics')}
-          disabled={!isComplete}
-          title={!isComplete ? 'Available when batch is complete' : ''}
+          disabled={results.length === 0}
+          title={results.length === 0 ? 'Available when results exist' : ''}
         >
           Analytics
         </button>
         <button
           className={viewBtnCls('scenarios')}
           onClick={() => setViewMode('scenarios')}
-          disabled={!isComplete}
-          title={!isComplete ? 'Available when batch is complete' : ''}
+          disabled={results.length === 0}
+          title={results.length === 0 ? 'Available when results exist' : ''}
         >
           Scenarios
         </button>
         <button
           className={viewBtnCls('optimize')}
           onClick={() => setViewMode('optimize')}
-          disabled={!isComplete}
-          title={!isComplete ? 'Available when batch is complete' : ''}
+          disabled={results.length === 0}
+          title={results.length === 0 ? 'Available when results exist' : ''}
         >
           Optimize
+        </button>
+        <button
+          className={viewBtnCls('consolidate')}
+          onClick={() => setViewMode('consolidate')}
+          disabled={results.length === 0}
+          title="Freight consolidation optimizer"
+        >
+          Consolidate
         </button>
         <button
           className={viewBtnCls('performance')}
@@ -378,6 +389,8 @@ export default function ResultsScreen({ results, totalRows, batchParams, batchMe
         <ScenarioBuilder flatRows={flatRows} />
       ) : viewMode === 'optimize' ? (
         <OptimizationDashboard flatRows={flatRows} />
+      ) : viewMode === 'consolidate' ? (
+        <ConsolidationDashboard results={results} />
       ) : viewMode === 'performance' ? (
         <BatchPerformance results={results} batchMeta={batchMeta} />
       ) : (

@@ -2,11 +2,12 @@ import React, { useState, useMemo } from 'react';
 
 const fmtMoney = (v) => `$${Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-const SCENARIO_COLORS = ['#6B7280', '#10B981', '#3B82F6', '#F59E0B', '#8B5CF6'];
+const SCENARIO_COLORS = ['#6B7280', '#0EA5E9', '#10B981', '#3B82F6', '#F59E0B', '#8B5CF6'];
 
 function getColor(idx, scenario) {
   if (scenario.isCurrentState) return SCENARIO_COLORS[0];
-  if (scenario.isLowCost) return SCENARIO_COLORS[1];
+  if (scenario.isHistoricMatch) return SCENARIO_COLORS[1];
+  if (scenario.isLowCost) return SCENARIO_COLORS[2];
   return SCENARIO_COLORS[Math.min(idx, SCENARIO_COLORS.length - 1)];
 }
 
@@ -15,6 +16,8 @@ export default function ScenarioDetailTable({ scenarios, currentStateResult }) {
   const [sortCol, setSortCol] = useState('lane');
   const [sortDir, setSortDir] = useState('asc');
   const [showDiffsOnly, setShowDiffsOnly] = useState(false);
+
+  const hasHistoricMatch = scenarios.some(s => s.isHistoricMatch);
 
   // Collect all lanes across all scenarios
   const allLanes = useMemo(() => {
@@ -89,6 +92,14 @@ export default function ScenarioDetailTable({ scenarios, currentStateResult }) {
     return sortDir === 'asc' ? ' \u25B2' : ' \u25BC';
   };
 
+  // Determine column span per scenario
+  const getColSpan = (s) => {
+    const baseCols = 3; // SCAC, Cost, Min
+    const savingsCol = currentStateResult && !s.isCurrentState ? 1 : 0;
+    const rateDeltaCol = s.isHistoricMatch ? 1 : 0;
+    return baseCols + savingsCol + rateDeltaCol;
+  };
+
   return (
     <div className="flex flex-col overflow-hidden">
       {/* Filters */}
@@ -131,7 +142,7 @@ export default function ScenarioDetailTable({ scenarios, currentStateResult }) {
                 return (
                   <th
                     key={s.id}
-                    colSpan={currentStateResult && !s.isCurrentState ? 4 : 3}
+                    colSpan={getColSpan(s)}
                     className="px-1 py-2 text-center font-semibold whitespace-nowrap"
                     style={{ borderBottom: `3px solid ${color}` }}
                   >
@@ -154,6 +165,9 @@ export default function ScenarioDetailTable({ scenarios, currentStateResult }) {
                   {currentStateResult && !s.isCurrentState && (
                     <th className="px-2 py-1 text-right text-[10px] font-medium text-gray-500">Savings</th>
                   )}
+                  {s.isHistoricMatch && (
+                    <th className="px-2 py-1 text-right text-[10px] font-medium text-gray-500">Rate Delta</th>
+                  )}
                 </React.Fragment>
               ))}
             </tr>
@@ -168,10 +182,24 @@ export default function ScenarioDetailTable({ scenarios, currentStateResult }) {
                 <td className="px-3 py-1.5 text-right">{row.avgWeight.toFixed(0)}</td>
                 {scenarios.map((s, idx) => {
                   const lb = row.scenarioData[idx];
-                  if (!lb) {
-                    const colSpan = currentStateResult && !s.isCurrentState ? 4 : 3;
+
+                  // Check for unserviced lanes on historic match
+                  if (!lb && s.isHistoricMatch) {
+                    // Check unserviced reasons
+                    const reasons = s.result?.unservicedReasons || {};
+                    const laneRefs = Object.entries(s.result?.awards || {})
+                      .filter(([, a]) => a.laneKey === row.laneKey);
+                    const hasUnserviced = laneRefs.length === 0;
                     return (
-                      <td key={s.id} colSpan={colSpan} className="px-2 py-1.5 text-center text-gray-300 text-[10px]">
+                      <td key={s.id} colSpan={getColSpan(s)} className="px-2 py-1.5 text-center text-amber-600 text-[10px]">
+                        No rate
+                      </td>
+                    );
+                  }
+
+                  if (!lb) {
+                    return (
+                      <td key={s.id} colSpan={getColSpan(s)} className="px-2 py-1.5 text-center text-gray-300 text-[10px]">
                         No eligible carrier
                       </td>
                     );
@@ -185,6 +213,9 @@ export default function ScenarioDetailTable({ scenarios, currentStateResult }) {
                       savings = csLane.awardedCost - lb.awardedCost;
                     }
                   }
+
+                  // Rate delta for historic match
+                  const rateDelta = s.isHistoricMatch ? lb.rateDelta : null;
 
                   return (
                     <React.Fragment key={s.id}>
@@ -206,6 +237,13 @@ export default function ScenarioDetailTable({ scenarios, currentStateResult }) {
                           savings != null ? (savings > 0 ? 'text-green-600' : savings < 0 ? 'text-red-600' : 'text-gray-400') : 'text-gray-300'
                         }`}>
                           {savings != null ? `${savings >= 0 ? '+' : ''}${fmtMoney(savings)}` : '-'}
+                        </td>
+                      )}
+                      {s.isHistoricMatch && (
+                        <td className={`px-2 py-1.5 text-right font-medium ${
+                          rateDelta != null ? (rateDelta < 0 ? 'text-green-600' : rateDelta > 0 ? 'text-red-600' : 'text-gray-400') : 'text-gray-300'
+                        }`}>
+                          {rateDelta != null ? `${rateDelta >= 0 ? '+' : ''}${fmtMoney(rateDelta)}` : '-'}
                         </td>
                       )}
                     </React.Fragment>

@@ -20,7 +20,7 @@ export default function InputScreen({ credentials, onBatchStart, onResultRow, on
     forceRoutingGuideName: '',
     numberOfRates: 4,
     showTMSMarkup: false,
-    margins: [],
+    margins: { default: { type: '%', value: 0 }, overrides: [] },
     saveRequestXml: true,
     saveResponseXml: true,
   });

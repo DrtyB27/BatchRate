@@ -2,6 +2,7 @@ import React, { useState, useMemo, useCallback } from 'react';
 import {
   computeScenario,
   computeCurrentState,
+  computeHistoricCarrierMatch,
   buildScenarioCsv,
   getLaneKey,
 } from '../services/analyticsEngine.js';
@@ -53,6 +54,18 @@ export default function ScenarioBuilder({ flatRows }) {
         locked: true,
         isCurrentState: true,
         isLowCost: false,
+        isHistoricMatch: false,
+      });
+
+      // Historic Carrier Match
+      initial.push({
+        id: `hm_${nextId++}`,
+        name: 'Historic Carrier \u2014 New Rate',
+        eligibleSCACs: [],
+        locked: true,
+        isCurrentState: false,
+        isLowCost: false,
+        isHistoricMatch: true,
       });
     }
 
@@ -75,6 +88,8 @@ export default function ScenarioBuilder({ flatRows }) {
       let result;
       if (s.isCurrentState) {
         result = computeCurrentState(flatRows);
+      } else if (s.isHistoricMatch) {
+        result = computeHistoricCarrierMatch(flatRows);
       } else {
         result = computeScenario(flatRows, s.eligibleSCACs);
       }
@@ -85,6 +100,11 @@ export default function ScenarioBuilder({ flatRows }) {
   const currentStateResult = useMemo(() => {
     const cs = computedScenarios.find(s => s.isCurrentState);
     return cs?.result || null;
+  }, [computedScenarios]);
+
+  const historicMatchResult = useMemo(() => {
+    const hm = computedScenarios.find(s => s.isHistoricMatch);
+    return hm?.result || null;
   }, [computedScenarios]);
 
   const lowCostResult = useMemo(() => {
@@ -154,7 +174,7 @@ export default function ScenarioBuilder({ flatRows }) {
               allSCACs={allSCACs}
               colorIndex={idx}
               onChange={handleUpdateScenario}
-              onDelete={!s.isCurrentState && !s.isLowCost ? () => handleDeleteScenario(s.id) : null}
+              onDelete={!s.isCurrentState && !s.isLowCost && !s.isHistoricMatch ? () => handleDeleteScenario(s.id) : null}
             />
           ))}
         </div>
@@ -165,6 +185,7 @@ export default function ScenarioBuilder({ flatRows }) {
         <ScenarioSummary
           scenarios={computedScenarios}
           currentStateResult={currentStateResult}
+          historicMatchResult={historicMatchResult}
           lowCostResult={lowCostResult}
         />
       </div>

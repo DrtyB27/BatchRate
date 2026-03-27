@@ -128,10 +128,10 @@ export default function ParametersSidebar({ params, setParams }) {
         )}
       </div>
 
-      {/* Carrier Margin */}
+      {/* Customer Markup */}
       <div className={sectionCls}>
-        <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Carrier Margin</h3>
-        <MarginTable margins={params.margins} setMargins={(m) => update('margins', m)} />
+        <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Customer Markup</h3>
+        <MarginTable margins={params.margins} setMargins={(m) => update('margins', m)} allSCACs={params._allSCACs} />
       </div>
 
       {/* Debugging */}

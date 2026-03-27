@@ -204,8 +204,8 @@ export function createBatchExecutor(config) {
     const success = !err && parsed && parsed.rates.length > 0;
     const ratesWithMargin = success
       ? parsed.rates.map(rate => {
-          const { customerPrice, marginType, marginValue } = applyMargin(rate.totalCharge, rate.carrierSCAC, params.margins);
-          return { ...rate, marginType, marginValue, customerPrice };
+          const { customerPrice, marginType, marginValue, isOverride } = applyMargin(rate.totalCharge, rate.carrierSCAC, params.margins);
+          return { ...rate, marginType, marginValue, customerPrice, isOverride };
         })
       : [];
 

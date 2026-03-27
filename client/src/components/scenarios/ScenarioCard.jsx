@@ -2,22 +2,24 @@ import React from 'react';
 
 const SCENARIO_COLORS = {
   currentState: '#6B7280',
+  historicMatch: '#0EA5E9',
   lowCost: '#10B981',
   a: '#3B82F6',
   b: '#F59E0B',
   c: '#8B5CF6',
 };
 
-function getScenarioColor(index, isCurrentState, isLowCost) {
+function getScenarioColor(index, isCurrentState, isLowCost, isHistoricMatch) {
   if (isCurrentState) return SCENARIO_COLORS.currentState;
+  if (isHistoricMatch) return SCENARIO_COLORS.historicMatch;
   if (isLowCost) return SCENARIO_COLORS.lowCost;
   const keys = ['a', 'b', 'c'];
   return keys[index % keys.length] ? SCENARIO_COLORS[keys[index % keys.length]] : '#6B7280';
 }
 
 export default function ScenarioCard({ scenario, allSCACs, onChange, onDelete, colorIndex }) {
-  const { name, eligibleSCACs, locked, isCurrentState, isLowCost } = scenario;
-  const color = getScenarioColor(colorIndex, isCurrentState, isLowCost);
+  const { name, eligibleSCACs, locked, isCurrentState, isLowCost, isHistoricMatch } = scenario;
+  const color = getScenarioColor(colorIndex, isCurrentState, isLowCost, isHistoricMatch);
 
   const toggleScac = (scac) => {
     if (locked) return;

@@ -93,7 +93,7 @@ function buildCustomerCsv(flatRows, lowCostFlags) {
     'Class', 'Net Wt Lb', 'Pcs', 'Ttl HUs', 'Pickup Date',
     'SCAC', 'Carrier Name', 'Contract Ref', 'Contract Description',
     'Strategy Description', 'Tier ID', 'Rating Type',
-    'Margin Type', 'Margin Value', 'Customer Price',
+    'Margin Type', 'Margin Value', 'Markup Source', 'Customer Price',
     'Min Rated',
     'Low Cost Carrier (customer)',
     'Service Days', 'Service Description', 'Est. Delivery', 'Distance', 'Distance UOM',
@@ -115,6 +115,9 @@ function buildCustomerCsv(flatRows, lowCostFlags) {
       r.rate?.strategyDescription || '', r.rate?.tierId || '',
       r.rate?.ratingType || '',
       r.rate?.marginType || '', r.rate?.marginValue ?? '',
+      r.rate?.marginType && r.rate?.marginType !== 'none'
+        ? (r.rate?.isOverride === true ? 'Override' : r.rate?.isOverride === false ? 'Default' : 'Override')
+        : 'None',
       r.rate?.customerPrice != null ? Number(r.rate.customerPrice).toFixed(2) : '',
       r.rate?.isMinimumRated ? 'MIN' : '',
       flags.lowCostCustomer ? 'Y' : '',

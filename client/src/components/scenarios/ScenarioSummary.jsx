@@ -4,11 +4,12 @@ const fmtMoney = (v) => `$${Number(v).toLocaleString('en-US', { minimumFractionD
 const fmtPct = (v) => `${Number(v).toFixed(1)}%`;
 const fmtDelta = (v) => `${v >= 0 ? '+' : ''}${fmtMoney(v)}`;
 
-const SCENARIO_COLORS = ['#6B7280', '#10B981', '#3B82F6', '#F59E0B', '#8B5CF6'];
+const SCENARIO_COLORS = ['#6B7280', '#0EA5E9', '#10B981', '#3B82F6', '#F59E0B', '#8B5CF6'];
 
 function getColor(idx, scenario) {
   if (scenario.isCurrentState) return SCENARIO_COLORS[0];
-  if (scenario.isLowCost) return SCENARIO_COLORS[1];
+  if (scenario.isHistoricMatch) return SCENARIO_COLORS[1];
+  if (scenario.isLowCost) return SCENARIO_COLORS[2];
   return SCENARIO_COLORS[Math.min(idx, SCENARIO_COLORS.length - 1)];
 }
 
@@ -28,7 +29,7 @@ function MetricRow({ label, value, delta, deltaLabel }) {
   );
 }
 
-export default function ScenarioSummary({ scenarios, currentStateResult, lowCostResult }) {
+export default function ScenarioSummary({ scenarios, currentStateResult, historicMatchResult, lowCostResult }) {
   return (
     <div className="flex gap-3 overflow-x-auto pb-2">
       {scenarios.map((s, idx) => {
@@ -49,6 +50,19 @@ export default function ScenarioSummary({ scenarios, currentStateResult, lowCost
         let savingsVsLowCost = null;
         if (lowCostResult && !s.isLowCost) {
           savingsVsLowCost = r.summary.totalSpend - lowCostResult.summary.totalSpend;
+        }
+
+        // Historic Match specific: rate change savings and carrier optimization delta
+        const isHM = s.isHistoricMatch;
+        let rateChangeSavings = null;
+        let rateChangePct = null;
+        let carrierOptSavings = null;
+        if (isHM && r.summary.rateChangeSavings != null) {
+          rateChangeSavings = r.summary.rateChangeSavings;
+          rateChangePct = r.summary.rateChangePct;
+          if (lowCostResult) {
+            carrierOptSavings = r.summary.totalSpend - lowCostResult.summary.totalSpend;
+          }
         }
 
         return (
@@ -74,7 +88,22 @@ export default function ScenarioSummary({ scenarios, currentStateResult, lowCost
                   deltaLabel={`${savingsVsCurrentPct >= 0 ? '+' : ''}${savingsVsCurrentPct.toFixed(1)}%`}
                 />
               )}
-              {savingsVsLowCost != null && (
+              {isHM && rateChangeSavings != null && (
+                <MetricRow
+                  label="Rate Change vs Historic"
+                  value={fmtDelta(rateChangeSavings)}
+                  delta={rateChangeSavings}
+                  deltaLabel={`${rateChangePct >= 0 ? '+' : ''}${rateChangePct.toFixed(1)}%`}
+                />
+              )}
+              {isHM && carrierOptSavings != null && (
+                <MetricRow
+                  label="Savings vs Low Cost"
+                  value={fmtDelta(-carrierOptSavings)}
+                  delta={-carrierOptSavings}
+                />
+              )}
+              {!isHM && savingsVsLowCost != null && (
                 <MetricRow
                   label="vs. Low Cost Award"
                   value={fmtDelta(-savingsVsLowCost)}

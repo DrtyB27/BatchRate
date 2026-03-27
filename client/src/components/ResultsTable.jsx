@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { isMinimumRated } from '../services/analyticsEngine.js';
+import { applyMargin } from '../services/ratingClient.js';
 
 /**
  * Flatten results into one row per carrier per shipment.
@@ -115,7 +116,14 @@ const COLUMNS = [
   // Margin & customer
   { key: 'marginType', label: 'Margin Type', get: r => r.rate?.marginType || '', view: 'customer' },
   { key: 'marginValue', label: 'Margin Value', get: r => r.rate?.marginValue, view: 'customer' },
-  { key: 'customerPrice', label: 'CUSTOMER PRICE', get: r => r.rate?.customerPrice, fmt: 'money', view: 'customer' },
+  { key: 'customerPrice', label: 'CUSTOMER PRICE', get: (r, markups) => {
+    if (!r.rate?.totalCharge) return '';
+    if (markups) {
+      const { customerPrice } = applyMargin(r.rate.totalCharge, r.rate.carrierSCAC, markups);
+      return customerPrice;
+    }
+    return r.rate?.customerPrice;
+  }, fmt: 'money', view: 'customer' },
   // Low cost flags
   { key: 'lowCostRaw', label: 'Low Cost (raw)', get: () => '', view: 'raw', special: 'lowCostRaw' },
   { key: 'lowCostCustomer', label: 'Low Cost (cust)', get: () => '', view: 'customer', special: 'lowCostCustomer' },
@@ -130,7 +138,7 @@ function fmtVal(val, fmt) {
   return String(val);
 }
 
-export default function ResultsTable({ flatRows, lowCostFlags, viewMode, onRowClick }) {
+export default function ResultsTable({ flatRows, lowCostFlags, viewMode, onRowClick, activeMarkups }) {
   const [sortCol, setSortCol] = useState('reference');
   const [sortDir, setSortDir] = useState('asc');
   const [filters, setFilters] = useState({});
@@ -153,7 +161,7 @@ export default function ResultsTable({ flatRows, lowCostFlags, viewMode, onRowCl
       if (!col) continue;
       const lowerFilter = filterVal.toLowerCase();
       rows = rows.filter(r => {
-        const cellVal = String(col.get(r) ?? '').toLowerCase();
+        const cellVal = String(col.get(r, activeMarkups) ?? '').toLowerCase();
         return cellVal.includes(lowerFilter);
       });
     }
@@ -162,8 +170,8 @@ export default function ResultsTable({ flatRows, lowCostFlags, viewMode, onRowCl
     const col = COLUMNS.find(c => c.key === sortCol);
     if (col) {
       rows.sort((a, b) => {
-        let va = col.get(a) ?? '';
-        let vb = col.get(b) ?? '';
+        let va = col.get(a, activeMarkups) ?? '';
+        let vb = col.get(b, activeMarkups) ?? '';
         if (col.fmt === 'money' || col.fmt === 'pct') {
           va = Number(va) || 0;
           vb = Number(vb) || 0;
@@ -178,7 +186,7 @@ export default function ResultsTable({ flatRows, lowCostFlags, viewMode, onRowCl
     }
 
     return rows;
-  }, [flatRows, filters, sortCol, sortDir]);
+  }, [flatRows, filters, sortCol, sortDir, activeMarkups]);
 
   const handleSort = (key) => {
     if (sortCol === key) {
@@ -258,7 +266,7 @@ export default function ResultsTable({ flatRows, lowCostFlags, viewMode, onRowCl
                     cellVal = row.ratingMessage || 'No rates';
                     bgClass = 'text-red-600 font-medium';
                   } else {
-                    cellVal = fmtVal(col.get(row), col.fmt);
+                    cellVal = fmtVal(col.get(row, activeMarkups), col.fmt);
                   }
 
                   const inlineStyle = col.special === 'minRated' && row.rate?.isMinimumRated

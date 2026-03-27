@@ -11,6 +11,7 @@ import CarrierRankingPanel from './analytics/CarrierRankingPanel.jsx';
 import SpendAwardPanel from './analytics/SpendAwardPanel.jsx';
 import LaneComparisonPanel from './analytics/LaneComparisonPanel.jsx';
 import DiscountHeatmapPanel from './analytics/DiscountHeatmapPanel.jsx';
+import YieldOptimizer from './analytics/YieldOptimizer.jsx';
 
 function downloadBlob(filename, blob) {
   const url = URL.createObjectURL(blob);
@@ -42,7 +43,7 @@ function PanelCard({ title, count, accentColor, children }) {
   );
 }
 
-export default function AnalyticsDashboard({ flatRows }) {
+export default function AnalyticsDashboard({ flatRows, activeMarkups, onMarkupsChange }) {
   const ranking = useMemo(() => computeCarrierRanking(flatRows), [flatRows]);
   const spend = useMemo(() => computeSpendAward(flatRows), [flatRows]);
   const heatmap = useMemo(() => computeDiscountHeatmap(flatRows), [flatRows]);
@@ -82,6 +83,15 @@ export default function AnalyticsDashboard({ flatRows }) {
           Export Analytics XLSX
         </button>
       </div>
+
+      {/* Yield Optimizer — full width above the 2x2 grid */}
+      {activeMarkups && onMarkupsChange && (
+        <YieldOptimizer
+          flatRows={flatRows}
+          activeMarkups={activeMarkups}
+          onMarkupsChange={onMarkupsChange}
+        />
+      )}
 
       {/* 2x2 Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 flex-1">

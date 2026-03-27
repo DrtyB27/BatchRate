@@ -30,7 +30,7 @@ export function stripXmlBodies(results) {
 // ============================================================
 // Serialize a run to JSON
 // ============================================================
-export function serializeRun(results, batchParams, batchMeta) {
+export function serializeRun(results, batchParams, batchMeta, yieldConfig) {
   const strippedResults = stripXmlBodies(results);
   const safeMeta = stripCredentials({
     ...(batchMeta || {}),
@@ -54,6 +54,11 @@ export function serializeRun(results, batchParams, batchMeta) {
     },
     results: strippedResults,
   };
+
+  // Include yield optimizer config if set
+  if (yieldConfig) {
+    run.yieldConfig = yieldConfig;
+  }
 
   return JSON.stringify(run, null, 2);
 }
@@ -108,6 +113,7 @@ export function deserializeRun(json) {
     results: json.results || [],
     version: json.version,
     appVersion: json.appVersion,
+    yieldConfig: json.yieldConfig || null,
   };
 }
 

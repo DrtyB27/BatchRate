@@ -7,6 +7,7 @@ import OptimizationDashboard from '../components/OptimizationDashboard.jsx';
 import BatchPerformance from '../components/BatchPerformance.jsx';
 import CombineRunsDialog from '../components/CombineRunsDialog.jsx';
 import { serializeRun, downloadRunFile } from '../services/runPersistence.js';
+import { applyMargin } from '../services/ratingClient.js';
 
 function downloadCsv(filename, csvContent) {
   const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -85,7 +86,7 @@ function buildRawCsv(flatRows, lowCostFlags) {
 // ============================================================
 // CUSTOMER CSV EXPORT
 // ============================================================
-function buildCustomerCsv(flatRows, lowCostFlags) {
+function buildCustomerCsv(flatRows, lowCostFlags, markups) {
   const headers = [
     'Reference', 'Historic Carrier', 'Historic Cost',
     'Orig City', 'Org State', 'Org Postal Code', 'Orig Cntry',
@@ -105,6 +106,27 @@ function buildCustomerCsv(flatRows, lowCostFlags) {
   const rows = flatRows.map(r => {
     const flags = lowCostFlags.get(r) || {};
     const dedupStatus = r.isDeduped ? `Cloned from ${r.representativeRef || 'rep'}` : (r.rateKeyGroup ? 'Rated' : '');
+
+    // Compute customer price on-the-fly from yield optimizer markups if available
+    let mType = r.rate?.marginType || '';
+    let mValue = r.rate?.marginValue ?? '';
+    let mSource = 'None';
+    let custPrice = r.rate?.customerPrice;
+
+    if (markups && r.rate?.totalCharge != null) {
+      const m = applyMargin(r.rate.totalCharge, r.rate.carrierSCAC, markups);
+      mType = m.marginType;
+      mValue = m.marginValue;
+      custPrice = m.customerPrice;
+      mSource = m.marginType && m.marginType !== 'none'
+        ? (m.isOverride ? 'Override' : 'Default')
+        : 'None';
+    } else {
+      mSource = mType && mType !== 'none'
+        ? (r.rate?.isOverride === true ? 'Override' : r.rate?.isOverride === false ? 'Default' : 'Override')
+        : 'None';
+    }
+
     return [
       r.reference, r.historicCarrier || '', r.historicCost || '',
       r.origCity, r.origState, r.origPostal, r.origCountry,
@@ -114,11 +136,9 @@ function buildCustomerCsv(flatRows, lowCostFlags) {
       r.rate?.contractRef || '', r.rate?.contractDescription || '',
       r.rate?.strategyDescription || '', r.rate?.tierId || '',
       r.rate?.ratingType || '',
-      r.rate?.marginType || '', r.rate?.marginValue ?? '',
-      r.rate?.marginType && r.rate?.marginType !== 'none'
-        ? (r.rate?.isOverride === true ? 'Override' : r.rate?.isOverride === false ? 'Default' : 'Override')
-        : 'None',
-      r.rate?.customerPrice != null ? Number(r.rate.customerPrice).toFixed(2) : '',
+      mType, mValue,
+      mSource,
+      custPrice != null ? Number(custPrice).toFixed(2) : '',
       r.rate?.isMinimumRated ? 'MIN' : '',
       flags.lowCostCustomer ? 'Y' : '',
       r.rate?.serviceDays ?? '', r.rate?.serviceDescription || '',
@@ -199,12 +219,18 @@ function buildCustomRateCsv(flatRows) {
 // ============================================================
 // RESULTS SCREEN
 // ============================================================
-export default function ResultsScreen({ results, totalRows, batchParams, batchMeta, onNewBatch, onLoadRun, onReplaceResults, loadedFromFile }) {
+export default function ResultsScreen({ results, totalRows, batchParams, batchMeta, onNewBatch, onLoadRun, onReplaceResults, loadedFromFile, initialYieldConfig }) {
   const [viewMode, setViewMode] = useState('both');
   const [modal, setModal] = useState(null);
   const [xmlModal, setXmlModal] = useState(null);
   const [showCombine, setShowCombine] = useState(false);
   const loadInputRef = useRef(null);
+
+  // Yield Optimizer markup state — lifted here so it's shared between
+  // AnalyticsDashboard and Customer CSV export
+  const [activeMarkups, setActiveMarkups] = useState(
+    initialYieldConfig || batchParams?.margins || { default: { type: '%', value: 15 }, overrides: [] }
+  );
 
   const isComplete = results.length >= totalRows;
 
@@ -230,7 +256,7 @@ export default function ResultsScreen({ results, totalRows, batchParams, batchMe
 
   const handleModalConfirm = () => {
     if (modal === 'customer') {
-      downloadCsv(`BidAnalysis_Customer_${timestamp()}.csv`, buildCustomerCsv(flatRows, lowCostFlags));
+      downloadCsv(`BidAnalysis_Customer_${timestamp()}.csv`, buildCustomerCsv(flatRows, lowCostFlags, activeMarkups));
     } else if (modal === 'customRate') {
       downloadCsv(`CustomRateTemplate_${timestamp()}.csv`, buildCustomRateCsv(flatRows));
     }
@@ -244,7 +270,7 @@ export default function ResultsScreen({ results, totalRows, batchParams, batchMe
   };
 
   const handleSaveRun = () => {
-    const jsonStr = serializeRun(results, batchParams, batchMeta);
+    const jsonStr = serializeRun(results, batchParams, batchMeta, activeMarkups);
     const filename = downloadRunFile(jsonStr, batchMeta?.batchId);
   };
 
@@ -382,7 +408,7 @@ export default function ResultsScreen({ results, totalRows, batchParams, batchMe
 
       {/* Content */}
       {viewMode === 'analytics' ? (
-        <AnalyticsDashboard flatRows={flatRows} />
+        <AnalyticsDashboard flatRows={flatRows} activeMarkups={activeMarkups} onMarkupsChange={setActiveMarkups} />
       ) : viewMode === 'scenarios' ? (
         <ScenarioBuilder flatRows={flatRows} />
       ) : viewMode === 'optimize' ? (
@@ -395,6 +421,7 @@ export default function ResultsScreen({ results, totalRows, batchParams, batchMe
           lowCostFlags={lowCostFlags}
           viewMode={viewMode}
           onRowClick={handleRowClick}
+          activeMarkups={activeMarkups}
         />
       )}
 

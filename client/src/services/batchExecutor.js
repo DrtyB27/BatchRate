@@ -200,7 +200,7 @@ export function createBatchExecutor(config) {
   }
 
   // ── Build result object (same shape as current InputScreen) ──
-  function buildResult(row, rowIndex, parsed, xml, responseXml, elapsedMs, workerIdx, err) {
+  function buildResult(row, rowIndex, parsed, xml, responseXml, elapsedMs, workerIdx, err, callStartTime) {
     const success = !err && parsed && parsed.rates.length > 0;
     const ratesWithMargin = success
       ? parsed.rates.map(rate => {
@@ -236,7 +236,7 @@ export function createBatchExecutor(config) {
       xmlRequestSize: xml ? xml.length : 0,
       xmlResponseSize: responseXml ? responseXml.length : 0,
       batchPosition: rowIndex,
-      startedAt: new Date(startTime).toISOString(),
+      startedAt: new Date(callStartTime).toISOString(),
       completedAt: new Date().toISOString(),
       batchTimestamp: new Date().toISOString(),
       completionOrder: completionCounter++,
@@ -301,7 +301,7 @@ export function createBatchExecutor(config) {
       }
 
       // Final result
-      const result = buildResult(row, rowIndex, parsed, xml, responseXml, elapsedMs, workerIdx, error);
+      const result = buildResult(row, rowIndex, parsed, xml, responseXml, elapsedMs, workerIdx, error, startTime);
       results.push(result);
       completionTimestamps.push(Date.now());
 

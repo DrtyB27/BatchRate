@@ -102,6 +102,7 @@ const COLUMNS = [
   { key: 'accTotal', label: 'Acc Total', get: r => r.rate?.accTotal, fmt: 'money', view: 'raw' },
   { key: 'totalCharge', label: 'TOTAL CHARGE', get: r => r.rate?.totalCharge, fmt: 'money', view: 'raw' },
   { key: 'minRated', label: 'Min Rated', get: r => r.rate?.isMinimumRated ? 'MIN' : '', special: 'minRated' },
+  { key: 'dedup', label: 'Dedup', get: r => r.isDeduped ? 'Clone' : (r.rateKeyGroup ? '\u2713' : ''), special: 'dedup' },
   // Service
   { key: 'serviceDays', label: 'Service Days', get: r => r.rate?.serviceDays, group: 'carrier' },
   { key: 'serviceDesc', label: 'Service Desc', get: r => r.rate?.serviceDescription || '', group: 'carrier' },
@@ -237,6 +238,16 @@ export default function ResultsTable({ flatRows, lowCostFlags, viewMode, onRowCl
                   if (col.special === 'minRated') {
                     cellVal = row.rate?.isMinimumRated ? 'MIN' : '';
                     if (row.rate?.isMinimumRated) bgClass = 'font-bold';
+                  } else if (col.special === 'dedup') {
+                    if (row.isDeduped) {
+                      cellVal = 'Clone';
+                      bgClass = 'text-indigo-600 text-[10px]';
+                    } else if (row.rateKeyGroup) {
+                      cellVal = '\u2713';
+                      bgClass = 'text-green-600 font-bold';
+                    } else {
+                      cellVal = '';
+                    }
                   } else if (col.special === 'lowCostRaw') {
                     cellVal = flags.lowCostRaw ? '\u2713' : '';
                     if (flags.lowCostRaw) bgClass = 'bg-green-100';

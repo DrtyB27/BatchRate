@@ -15,6 +15,52 @@ function isRetryable(errorMessage) {
   return RETRYABLE_PATTERNS.some(p => msg.includes(p));
 }
 
+// ── Concurrency Auto-Tuner ──
+class ConcurrencyAutoTuner {
+  constructor(maxConcurrency, targetResponseMs = 2000) {
+    this.max = maxConcurrency;
+    this.target = targetResponseMs;
+    this.current = Math.min(2, maxConcurrency);
+    this.window = [];
+    this.windowSize = 20;
+    this.adjustInterval = 20;
+    this.resultCount = 0;
+    this.lastAdjustAt = 0;
+    this.history = []; // track adjustments for UI
+  }
+
+  recordResult(elapsedMs) {
+    this.window.push(elapsedMs);
+    if (this.window.length > this.windowSize) this.window.shift();
+    this.resultCount++;
+  }
+
+  getOptimalConcurrency() {
+    if (this.resultCount - this.lastAdjustAt < this.adjustInterval) return this.current;
+    if (this.window.length < this.windowSize) return this.current;
+    this.lastAdjustAt = this.resultCount;
+
+    const avgMs = this.window.reduce((a, b) => a + b, 0) / this.window.length;
+    const sorted = [...this.window].sort((a, b) => a - b);
+    const p95 = sorted[Math.floor(sorted.length * 0.95)];
+    const prev = this.current;
+
+    if (avgMs < this.target * 0.5 && p95 < this.target) {
+      this.current = Math.min(this.max, this.current + 1);
+    } else if (avgMs > this.target * 1.5 || p95 > this.target * 3) {
+      this.current = Math.max(1, this.current - 2);
+    } else if (avgMs > this.target) {
+      this.current = Math.max(1, this.current - 1);
+    }
+
+    if (this.current !== prev) {
+      this.history.push({ at: this.resultCount, from: prev, to: this.current, avgMs: Math.round(avgMs) });
+    }
+
+    return this.current;
+  }
+}
+
 /**
  * Create a batch executor with concurrent worker pool.
  */
@@ -25,6 +71,8 @@ export function createBatchExecutor(config) {
     retryAttempts = 1,
     retryDelayMs = 1000,
     adaptiveBackoff = true,
+    autoTune = false,
+    autoTuneTarget = 2000,
     timeoutMs = 30000,
     onResult,
     onProgress,
@@ -46,6 +94,9 @@ export function createBatchExecutor(config) {
   let backoffTriggered = false;
   const recentWindow = []; // last 10 results success/fail
   let consecutiveSuccesses = 0;
+
+  // Auto-tuner (optional)
+  const tuner = autoTune ? new ConcurrencyAutoTuner(concurrency, autoTuneTarget) : null;
 
   // Retry tracking
   const retryMap = new Map(); // rowIndex -> { attemptsLeft }
@@ -95,6 +146,8 @@ export function createBatchExecutor(config) {
       currentConcurrency,
       state,
       adaptiveBackoffActive: currentDelay > delayMs || currentConcurrency < concurrency,
+      autoTuneActive: !!tuner,
+      autoTuneHistory: tuner?.history || [],
     };
   }
 
@@ -183,6 +236,8 @@ export function createBatchExecutor(config) {
       xmlRequestSize: xml ? xml.length : 0,
       xmlResponseSize: responseXml ? responseXml.length : 0,
       batchPosition: rowIndex,
+      startedAt: new Date(startTime).toISOString(),
+      completedAt: new Date().toISOString(),
       batchTimestamp: new Date().toISOString(),
       completionOrder: completionCounter++,
       workerIndex: workerIdx,
@@ -251,6 +306,15 @@ export function createBatchExecutor(config) {
       completionTimestamps.push(Date.now());
 
       updateAdaptiveBackoff(result.success);
+
+      // Auto-tuner: adjust concurrency based on response times
+      if (tuner && result.success) {
+        tuner.recordResult(elapsedMs);
+        const optimal = tuner.getOptimalConcurrency();
+        if (optimal !== currentConcurrency && !backoffTriggered) {
+          currentConcurrency = optimal;
+        }
+      }
 
       if (onResult) onResult(result);
       if (onProgress) onProgress(buildProgress());

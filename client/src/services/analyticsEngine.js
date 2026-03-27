@@ -274,6 +274,175 @@ export function computeDiscountHeatmap(flatRows) {
 }
 
 // ============================================================
+// YIELD OPTIMIZER: Computation Engine
+// ============================================================
+
+/**
+ * Compute yield analysis for the current markup configuration.
+ * Uses low-cost winners per reference and applies markups on-the-fly.
+ */
+export function computeYieldAnalysis(flatRows, markups, applyMarginFn) {
+  const winners = getLowCostByReference(flatRows);
+  const rows = [];
+  let totalCost = 0, totalRevenue = 0, totalHistoric = 0;
+
+  for (const [ref, row] of Object.entries(winners)) {
+    const cost = row.rate.totalCharge ?? 0;
+    const scac = row.rate.carrierSCAC || '';
+    const { customerPrice, marginType, marginValue, isOverride } =
+      applyMarginFn(cost, scac, markups);
+    const historic = row.historicCost || 0;
+
+    totalCost += cost;
+    totalRevenue += customerPrice;
+    totalHistoric += historic;
+
+    rows.push({
+      reference: ref,
+      laneKey: getLaneKey(row),
+      scac,
+      carrierName: row.rate.carrierName || '',
+      cost,
+      markupType: marginType,
+      markupValue: marginValue,
+      isOverride: !!isOverride,
+      revenue: customerPrice,
+      margin: customerPrice - cost,
+      marginPct: customerPrice > 0 ? ((customerPrice - cost) / customerPrice) * 100 : 0,
+      historicCost: historic,
+      customerSaves: historic > 0 ? historic - customerPrice : null,
+      customerSavesPct: historic > 0 ? ((historic - customerPrice) / historic) * 100 : null,
+    });
+  }
+
+  // Per-carrier breakdown
+  const carrierYield = {};
+  for (const r of rows) {
+    if (!carrierYield[r.scac]) {
+      carrierYield[r.scac] = {
+        scac: r.scac, carrierName: r.carrierName,
+        shipments: 0, cost: 0, revenue: 0, margin: 0,
+        markupType: r.markupType, markupValue: r.markupValue, isOverride: r.isOverride,
+      };
+    }
+    const c = carrierYield[r.scac];
+    c.shipments++;
+    c.cost += r.cost;
+    c.revenue += r.revenue;
+    c.margin += r.margin;
+  }
+  const carrierRows = Object.values(carrierYield).map(c => ({
+    ...c,
+    marginPct: c.revenue > 0 ? (c.margin / c.revenue) * 100 : 0,
+  })).sort((a, b) => b.cost - a.cost);
+
+  return {
+    rows,
+    carrierRows,
+    totals: {
+      cost: totalCost,
+      revenue: totalRevenue,
+      margin: totalRevenue - totalCost,
+      marginPct: totalRevenue > 0 ? ((totalRevenue - totalCost) / totalRevenue) * 100 : 0,
+      historicSpend: totalHistoric,
+      customerSaves: totalHistoric > 0 ? totalHistoric - totalRevenue : null,
+      customerSavesPct: totalHistoric > 0 ? ((totalHistoric - totalRevenue) / totalHistoric) * 100 : null,
+    },
+  };
+}
+
+/**
+ * Solve for a target markup given constraints.
+ */
+export function solveForTarget(totalCost, historicSpend, target) {
+  if (target.type === 'savings') {
+    const customerPrice = historicSpend * (1 - target.savingsPct / 100);
+    const markup = ((customerPrice / totalCost) - 1) * 100;
+    const margin = customerPrice - totalCost;
+    const marginPct = customerPrice > 0 ? (margin / customerPrice) * 100 : 0;
+    return { feasible: markup >= 0, markup: Math.max(0, markup), customerPrice, margin, marginPct, customerSaves: target.savingsPct };
+  }
+
+  if (target.type === 'margin') {
+    const markup = (1 / (1 - target.marginPct / 100) - 1) * 100;
+    const customerPrice = totalCost * (1 + markup / 100);
+    const customerSaves = historicSpend > 0 ? ((historicSpend - customerPrice) / historicSpend) * 100 : 0;
+    return { feasible: true, markup, customerPrice, margin: customerPrice - totalCost, marginPct: target.marginPct, customerSaves };
+  }
+
+  if (target.type === 'dual') {
+    const minPriceForSavings = historicSpend * (1 - target.savingsPct / 100);
+    const markupForMargin = (1 / (1 - target.marginPct / 100) - 1) * 100;
+    const priceAtMarginMarkup = totalCost * (1 + markupForMargin / 100);
+    const feasible = priceAtMarginMarkup <= minPriceForSavings;
+
+    if (feasible) {
+      const actualSaves = ((historicSpend - priceAtMarginMarkup) / historicSpend) * 100;
+      return {
+        feasible: true, markup: markupForMargin,
+        customerPrice: priceAtMarginMarkup,
+        margin: priceAtMarginMarkup - totalCost,
+        marginPct: target.marginPct,
+        customerSaves: actualSaves,
+      };
+    } else {
+      const maxSavingsAtMargin = ((historicSpend - priceAtMarginMarkup) / historicSpend) * 100;
+      const maxMarginAtSavings = minPriceForSavings > 0
+        ? ((minPriceForSavings - totalCost) / minPriceForSavings) * 100 : 0;
+      return {
+        feasible: false, markup: markupForMargin,
+        maxSavingsAtTargetMargin: maxSavingsAtMargin,
+        maxMarginAtTargetSavings: maxMarginAtSavings,
+      };
+    }
+  }
+
+  return { feasible: false, markup: 0 };
+}
+
+/**
+ * Generate sensitivity curve data for the markup/savings/margin tradeoff.
+ */
+export function generateSensitivityCurve(totalCost, historicSpend, steps = 30) {
+  const points = [];
+  for (let i = 0; i <= steps; i++) {
+    const markup = (i / steps) * 30; // 0% to 30%
+    const revenue = totalCost * (1 + markup / 100);
+    const margin = revenue - totalCost;
+    const marginPct = revenue > 0 ? (margin / revenue) * 100 : 0;
+    const customerSaves = historicSpend > 0 ? ((historicSpend - revenue) / historicSpend) * 100 : 0;
+    points.push({ markup, revenue, margin, marginPct, customerSaves });
+  }
+  const breakeven = historicSpend > 0 ? ((historicSpend / totalCost) - 1) * 100 : null;
+  return { points, breakeven };
+}
+
+/**
+ * Auto-tune per-SCAC overrides to maximize customer savings
+ * while keeping every carrier above marginFloor.
+ */
+export function optimizePerScac(flatRows, markups, marginFloor, applyMarginFn) {
+  const yield0 = computeYieldAnalysis(flatRows, markups, applyMarginFn);
+  const overrides = [];
+
+  for (const carrier of yield0.carrierRows) {
+    if (carrier.marginPct > marginFloor + 2) {
+      const headroom = carrier.marginPct - marginFloor;
+      const reduction = Math.min(headroom - 1, 3);
+      const currentMarkup = carrier.markupValue || markups.default?.value || 0;
+      const newMarkup = Math.max(0, currentMarkup - reduction);
+      overrides.push({
+        scac: carrier.scac,
+        type: markups.default?.type || '%',
+        value: Math.round(newMarkup * 10) / 10,
+      });
+    }
+  }
+
+  return overrides;
+}
+
+// ============================================================
 // CSV / XLSX Export helpers
 // ============================================================
 function escCsv(val) {

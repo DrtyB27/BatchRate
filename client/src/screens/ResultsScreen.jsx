@@ -48,10 +48,12 @@ function buildRawCsv(flatRows, lowCostFlags) {
     'Service Days', 'Service Description', 'Est. Delivery', 'Distance', 'Distance UOM',
     'Rating Description', 'Orig Terminal', 'Dest Terminal',
     'Valid Rate', 'Rating Message',
+    'Dedup Status', 'Rate Key',
   ];
 
   const rows = flatRows.map(r => {
     const flags = lowCostFlags.get(r) || {};
+    const dedupStatus = r.isDeduped ? `Cloned from ${r.representativeRef || 'rep'}` : (r.rateKeyGroup ? 'Rated' : '');
     return [
       r.reference, r.historicCarrier || '', r.historicCost || '',
       r.origCity, r.origState, r.origPostal, r.origCountry,
@@ -73,6 +75,7 @@ function buildRawCsv(flatRows, lowCostFlags) {
       r.rate?.origTerminalCity ? `${r.rate.origTerminalCode} - ${r.rate.origTerminalCity}` : '',
       r.rate?.destTerminalCity ? `${r.rate.destTerminalCode} - ${r.rate.destTerminalCity}` : '',
       r.rate?.validRate || '', r.ratingMessage || '',
+      dedupStatus, r.rateKeyGroup || '',
     ].map(escCsv);
   });
 
@@ -96,10 +99,12 @@ function buildCustomerCsv(flatRows, lowCostFlags) {
     'Service Days', 'Service Description', 'Est. Delivery', 'Distance', 'Distance UOM',
     'Rating Description', 'Orig Terminal', 'Dest Terminal',
     'Valid Rate', 'Rating Message',
+    'Dedup Status', 'Rate Key',
   ];
 
   const rows = flatRows.map(r => {
     const flags = lowCostFlags.get(r) || {};
+    const dedupStatus = r.isDeduped ? `Cloned from ${r.representativeRef || 'rep'}` : (r.rateKeyGroup ? 'Rated' : '');
     return [
       r.reference, r.historicCarrier || '', r.historicCost || '',
       r.origCity, r.origState, r.origPostal, r.origCountry,
@@ -119,6 +124,7 @@ function buildCustomerCsv(flatRows, lowCostFlags) {
       r.rate?.origTerminalCity ? `${r.rate.origTerminalCode} - ${r.rate.origTerminalCity}` : '',
       r.rate?.destTerminalCity ? `${r.rate.destTerminalCode} - ${r.rate.destTerminalCity}` : '',
       r.rate?.validRate || '', r.ratingMessage || '',
+      dedupStatus, r.rateKeyGroup || '',
     ].map(escCsv);
   });
 

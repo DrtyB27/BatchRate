@@ -4,11 +4,13 @@ import ResponseTimeline from './performance/ResponseTimeline.jsx';
 import ErrorAnalysis from './performance/ErrorAnalysis.jsx';
 import CorrelationCharts from './performance/CorrelationCharts.jsx';
 import SizingRecommendations from './performance/SizingRecommendations.jsx';
+import InflectionAnalysis from './performance/InflectionAnalysis.jsx';
+import TelemetryExport from './performance/TelemetryExport.jsx';
 import {
   computePerformanceSummary, computeRollingAverage,
   detectDegradation, computeCorrelations,
   computeErrorAnalysis, detectErrorPatterns,
-  generateRecommendations,
+  generateRecommendations, detectInflectionPoint,
 } from '../services/performanceEngine.js';
 
 export default function BatchPerformance({ results, batchMeta }) {
@@ -21,10 +23,12 @@ export default function BatchPerformance({ results, batchMeta }) {
   const correlations = useMemo(() => computeCorrelations(results), [results]);
   const errorAnalysis = useMemo(() => computeErrorAnalysis(results), [results]);
   const errorPatterns = useMemo(() => detectErrorPatterns(results), [results]);
+  const inflection = useMemo(() => detectInflectionPoint(results), [results]);
   const recommendations = useMemo(
     () => generateRecommendations(summary, degradation, correlations, errorAnalysis, batchMeta),
     [summary, degradation, correlations, errorAnalysis, batchMeta]
   );
+  const tunerState = batchMeta?.executionSummary?.tunerState || null;
 
   // Per-batch breakdown for combined runs
   const batchBreakdown = useMemo(() => {
@@ -150,16 +154,22 @@ export default function BatchPerformance({ results, batchMeta }) {
       )}
 
       {/* Section 2: Response Time Timeline */}
-      <ResponseTimeline results={results} rollingAvg={rollingAvg} degradation={degradation} />
+      <ResponseTimeline results={results} rollingAvg={rollingAvg} degradation={degradation} inflection={inflection} />
+
+      {/* Section 2b: CUSUM Inflection Analysis */}
+      <InflectionAnalysis inflection={inflection} />
 
       {/* Section 3 & 4: Two-column layout */}
       <div className="grid grid-cols-1 2xl:grid-cols-2 gap-4">
         <ErrorAnalysis errorAnalysis={errorAnalysis} errorPatterns={errorPatterns} />
-        <SizingRecommendations recommendations={recommendations} isCombined={isCombined} />
+        <SizingRecommendations recommendations={recommendations} inflection={inflection} isCombined={isCombined} />
       </div>
 
       {/* Section 4: Correlation Charts */}
       <CorrelationCharts correlations={correlations} />
+
+      {/* Section 5: Telemetry Export & Tuning Profiles */}
+      <TelemetryExport results={results} batchMeta={batchMeta} tunerState={tunerState} />
     </div>
   );
 }

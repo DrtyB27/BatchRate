@@ -33,8 +33,40 @@ function RecCard({ rec, index }) {
   );
 }
 
-export default function SizingRecommendations({ recommendations, isCombined }) {
+export default function SizingRecommendations({ recommendations, inflection, isCombined }) {
   if (!recommendations || recommendations.length === 0) return null;
+
+  // Build inflection-based recommendations
+  const inflectionRecs = [];
+  if (inflection?.detected && inflection.points?.length > 0) {
+    const degradations = inflection.points.filter(p => p.type === 'DEGRADATION');
+    if (degradations.length > 0) {
+      const first = degradations[0];
+      const safeBatch = Math.max(10, Math.floor(first.rowIndex * 0.8));
+      inflectionRecs.push({
+        severity: first.ratio > 2 ? 'CRITICAL' : 'WARNING',
+        title: 'CUSUM Inflection',
+        message: `Statistical change-point detected at row ${first.rowIndex}: response times shifted from ~${first.preAvgMs}ms to ~${first.postAvgMs}ms (${Math.round(first.ratio * 10) / 10}x). Recommended safe batch size: ${safeBatch} rows.`,
+      });
+    }
+    if (degradations.length > 1) {
+      inflectionRecs.push({
+        severity: 'WARNING',
+        title: 'Multiple Shifts',
+        message: `${degradations.length} performance shifts detected across the batch. The server shows instability under sustained load. Consider smaller batches with cooling pauses.`,
+      });
+    }
+    const recoveries = inflection.points.filter(p => p.type === 'RECOVERY');
+    if (recoveries.length > 0) {
+      inflectionRecs.push({
+        severity: 'INFO',
+        title: 'Recovery Detected',
+        message: `${recoveries.length} recovery point${recoveries.length !== 1 ? 's' : ''} detected where performance improved. The server may benefit from brief pauses to reset.`,
+      });
+    }
+  }
+
+  const allRecs = [...inflectionRecs, ...recommendations];
 
   return (
     <div className="bg-white border border-gray-200 rounded-lg p-4 space-y-2">
@@ -43,7 +75,7 @@ export default function SizingRecommendations({ recommendations, isCombined }) {
         <p className="text-[10px] text-amber-600">Combined from multiple batches. Recommendations based on the slowest batch for conservative sizing.</p>
       )}
       <div className="space-y-1.5">
-        {recommendations.map((r, i) => <RecCard key={i} rec={r} index={i} />)}
+        {allRecs.map((r, i) => <RecCard key={i} rec={r} index={i} />)}
       </div>
     </div>
   );

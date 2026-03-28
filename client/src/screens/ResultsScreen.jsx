@@ -9,14 +9,18 @@ import CombineRunsDialog from '../components/CombineRunsDialog.jsx';
 import { serializeRun, downloadRunFile } from '../services/runPersistence.js';
 import { applyMargin } from '../services/ratingClient.js';
 
-function downloadCsv(filename, csvContent) {
-  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+function downloadBlob(filename, blob) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
   a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+function downloadCsv(filename, csvContent) {
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  downloadBlob(filename, blob);
 }
 
 function escCsv(val) {
@@ -155,6 +159,26 @@ function buildCustomerCsv(flatRows, lowCostFlags, markups) {
 }
 
 // ============================================================
+// RETRY CSV BUILDER
+// ============================================================
+function buildRetryCsv(csvRows, results) {
+  if (!csvRows || csvRows.length === 0) return null;
+  const succeededRefs = new Set(
+    results.filter(r => r.success).map(r => r.reference)
+  );
+  const retryRows = csvRows.filter(row =>
+    !succeededRefs.has(row['Reference'] || '')
+  );
+  if (retryRows.length === 0) return null;
+  const headers = Object.keys(csvRows[0]);
+  const lines = [headers.map(escCsv).join(',')];
+  for (const row of retryRows) {
+    lines.push(headers.map(h => escCsv(row[h] || '')).join(','));
+  }
+  return lines.join('\n');
+}
+
+// ============================================================
 // CUSTOM RATE TEMPLATE CSV EXPORT
 // ============================================================
 const CUSTOM_RATE_HEADERS = [
@@ -219,7 +243,11 @@ function buildCustomRateCsv(flatRows) {
 // ============================================================
 // RESULTS SCREEN
 // ============================================================
-export default function ResultsScreen({ results, totalRows, batchParams, batchMeta, onNewBatch, onLoadRun, onReplaceResults, loadedFromFile, initialYieldConfig }) {
+export default function ResultsScreen({
+  results, totalRows, batchParams, batchMeta, onNewBatch, onLoadRun, onReplaceResults,
+  loadedFromFile, initialYieldConfig, csvRows, onRetryFailed, onResumeExecution,
+  onCancelExecution, orchestratorRef, executorRef,
+}) {
   const [viewMode, setViewMode] = useState('both');
   const [modal, setModal] = useState(null);
   const [xmlModal, setXmlModal] = useState(null);
@@ -239,10 +267,17 @@ export default function ResultsScreen({ results, totalRows, batchParams, batchMe
 
   // Summary stats
   const successCount = results.filter(r => r.success).length;
-  const noRateCount = results.filter(r => !r.success && !r.ratingMessage?.includes('failed') && !r.ratingMessage?.includes('timed out')).length;
-  const failedCount = results.filter(r => !r.success && (r.ratingMessage?.includes('failed') || r.ratingMessage?.includes('timed out'))).length;
+  const failedResults = results.filter(r => !r.success);
+  const noRateCount = failedResults.filter(r => !r.ratingMessage?.includes('failed') && !r.ratingMessage?.includes('timed out')).length;
+  const failedCount = failedResults.filter(r => r.ratingMessage?.includes('failed') || r.ratingMessage?.includes('timed out')).length;
   const totalElapsed = results.reduce((sum, r) => sum + (r.elapsedMs || 0), 0);
   const avgTime = results.length > 0 ? Math.round(totalElapsed / results.length) : 0;
+
+  // Retry counts
+  const missingCount = totalRows - results.length;
+  const retryableFailedCount = failedResults.length;
+  const retryCount = missingCount + retryableFailedCount;
+  const hasCsvRows = csvRows && csvRows.length > 0;
 
   const handleExport = (type) => {
     if (type === 'raw') {
@@ -271,7 +306,26 @@ export default function ResultsScreen({ results, totalRows, batchParams, batchMe
 
   const handleSaveRun = () => {
     const jsonStr = serializeRun(results, batchParams, batchMeta, activeMarkups);
-    const filename = downloadRunFile(jsonStr, batchMeta?.batchId);
+    downloadRunFile(jsonStr, batchMeta?.batchId);
+  };
+
+  const handleSaveAndRetry = () => {
+    // Download 1: Save run JSON (partial)
+    const jsonStr = serializeRun(results, batchParams, batchMeta, activeMarkups);
+    const batchIdShort = (batchMeta?.batchId || 'unknown').slice(0, 8);
+    const ts = timestamp();
+
+    const jsonBlob = new Blob([jsonStr], { type: 'application/json' });
+    downloadBlob(`BRAT_Run_${batchIdShort}_partial_${results.length}of${totalRows}_${ts}.json`, jsonBlob);
+
+    // Download 2: Retry CSV
+    if (hasCsvRows) {
+      const retryCsv = buildRetryCsv(csvRows, results);
+      if (retryCsv) {
+        const retryRowCount = totalRows - successCount;
+        downloadCsv(`BRAT_Retry_${batchIdShort}_${retryRowCount}rows_${ts}.csv`, retryCsv);
+      }
+    }
   };
 
   const handleLoadFile = (e) => {
@@ -293,6 +347,50 @@ export default function ResultsScreen({ results, totalRows, batchParams, batchMe
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
+      {/* Incomplete batch banner */}
+      {!isComplete && results.length > 0 && (
+        <div className="bg-amber-50 border-b border-amber-200 px-6 py-2.5 flex items-center gap-3 flex-wrap shrink-0">
+          <span className="text-amber-800 text-xs font-medium">
+            Batch incomplete: {results.length}/{totalRows} rows.
+            {missingCount > 0 && ` ${missingCount} rows not attempted.`}
+            {retryableFailedCount > 0 && ` ${retryableFailedCount} failed.`}
+          </span>
+          <div className="flex-1" />
+          <div className="flex gap-2">
+            {onResumeExecution && (orchestratorRef?.current || executorRef?.current) && (
+              <button
+                onClick={onResumeExecution}
+                className="text-xs bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded font-medium transition-colors"
+              >
+                Resume Stalled
+              </button>
+            )}
+            {retryCount > 0 && hasCsvRows && onRetryFailed && (
+              <button
+                onClick={onRetryFailed}
+                className="text-xs bg-amber-500 hover:bg-amber-600 text-white px-3 py-1 rounded font-medium transition-colors"
+              >
+                Retry {retryCount} Failed Rows
+              </button>
+            )}
+            {onCancelExecution && (orchestratorRef?.current || executorRef?.current) && (
+              <button
+                onClick={onCancelExecution}
+                className="text-xs bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded font-medium transition-colors"
+              >
+                Cancel Run
+              </button>
+            )}
+            <button
+              onClick={handleSaveRun}
+              className="text-xs bg-gray-600 hover:bg-gray-700 text-white px-3 py-1 rounded font-medium transition-colors"
+            >
+              Save Partial Results
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Header bar */}
       <div className="bg-white border-b border-gray-200 px-6 py-3 flex items-center gap-3 flex-wrap shrink-0">
         <h2 className="text-lg font-bold text-[#002144]">Batch Results</h2>
@@ -303,14 +401,32 @@ export default function ResultsScreen({ results, totalRows, batchParams, batchMe
         </span>
         <div className="flex-1" />
 
+        {/* Retry button */}
+        {isComplete && retryCount > 0 && hasCsvRows && onRetryFailed && (
+          <button
+            onClick={onRetryFailed}
+            className="text-xs bg-amber-500 hover:bg-amber-600 text-white px-4 py-1.5 rounded font-semibold transition-colors"
+          >
+            Retry {retryCount} Failed Rows
+          </button>
+        )}
+
         {/* Save/Load/Combine */}
         <button
           onClick={handleSaveRun}
-          disabled={!isComplete}
+          disabled={results.length === 0}
           className="text-xs bg-[#002144] hover:bg-[#003366] disabled:bg-gray-300 text-white px-3 py-1.5 rounded font-medium transition-colors"
         >
           Save Run
         </button>
+        {retryCount > 0 && hasCsvRows && (
+          <button
+            onClick={handleSaveAndRetry}
+            className="text-xs bg-[#002144] hover:bg-[#003366] text-white px-3 py-1.5 rounded font-medium transition-colors"
+          >
+            Save + Retry File
+          </button>
+        )}
         <button
           onClick={() => loadInputRef.current?.click()}
           className="text-xs bg-gray-200 hover:bg-gray-300 text-gray-700 px-3 py-1.5 rounded font-medium transition-colors"

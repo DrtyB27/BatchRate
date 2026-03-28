@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import CredentialScreen from './screens/CredentialScreen.jsx';
 import InputScreen from './screens/InputScreen.jsx';
 import ResultsScreen from './screens/ResultsScreen.jsx';
@@ -12,6 +12,12 @@ export default function App() {
   const [batchMeta, setBatchMeta] = useState(null);
   const [totalRows, setTotalRows] = useState(0);
   const [loadedFromFile, setLoadedFromFile] = useState(false);
+  const [csvRows, setCsvRows] = useState(null);
+  const [retryData, setRetryData] = useState(null); // { retryRows, existingResults, batchMeta }
+
+  // Lifted refs so ResultsScreen can access execution controls
+  const orchestratorRef = useRef(null);
+  const executorRef = useRef(null);
 
   const handleConnected = useCallback((creds) => {
     setCredentials(creds);
@@ -26,14 +32,17 @@ export default function App() {
     setBatchParams(null);
     setBatchMeta(null);
     setLoadedFromFile(false);
+    setCsvRows(null);
+    setRetryData(null);
   }, []);
 
-  const handleBatchStart = useCallback((params, rowCount, meta) => {
+  const handleBatchStart = useCallback((params, rowCount, meta, rows) => {
     setResults([]);
     setBatchParams(params);
     setBatchMeta(meta || null);
     setTotalRows(rowCount);
     setLoadedFromFile(false);
+    if (rows) setCsvRows(rows);
     setScreen('results');
   }, []);
 
@@ -50,6 +59,10 @@ export default function App() {
     setBatchParams(null);
     setBatchMeta(null);
     setLoadedFromFile(false);
+    setCsvRows(null);
+    setRetryData(null);
+    orchestratorRef.current = null;
+    executorRef.current = null;
     setScreen('input');
   }, []);
 
@@ -75,6 +88,82 @@ export default function App() {
     setBatchMeta(prev => ({ ...prev, ...newMeta }));
     setTotalRows(newResults.length);
   }, []);
+
+  // Merge retry results into existing results
+  const handleMergeResults = useCallback((retryResults) => {
+    setResults(prev => {
+      const succeededRefs = new Set(prev.filter(r => r.success).map(r => r.reference));
+      // Remove old failed results for references that got retried
+      const retryRefs = new Set(retryResults.map(r => r.reference));
+      const kept = prev.filter(r => {
+        if (!retryRefs.has(r.reference)) return true; // not retried, keep
+        if (r.success) return true; // already succeeded, keep
+        return false; // failed and retried, remove
+      });
+      // Add all new retry results (but skip if ref already succeeded)
+      const merged = [...kept];
+      for (const r of retryResults) {
+        if (!succeededRefs.has(r.reference)) {
+          merged.push(r);
+        }
+      }
+      return merged;
+    });
+    setRetryData(null);
+  }, []);
+
+  // Retry failed/missing rows from ResultsScreen
+  const handleRetryFailed = useCallback(() => {
+    if (!csvRows || csvRows.length === 0) return;
+
+    const succeededRefs = new Set(results.filter(r => r.success).map(r => r.reference));
+    const retryRows = csvRows.filter(row => !succeededRefs.has(row['Reference'] || ''));
+
+    if (retryRows.length === 0) return;
+
+    setRetryData({
+      retryRows,
+      existingResults: results,
+      originalTotalRows: totalRows,
+      batchMeta,
+      batchParams,
+    });
+    setScreen('input');
+  }, [csvRows, results, totalRows, batchMeta, batchParams]);
+
+  // Resume execution controls from ResultsScreen
+  const handleResumeExecution = useCallback(() => {
+    if (orchestratorRef.current) {
+      orchestratorRef.current.resume();
+    } else if (executorRef.current) {
+      executorRef.current.resume();
+    }
+  }, []);
+
+  const handleCancelExecution = useCallback(() => {
+    if (orchestratorRef.current) {
+      orchestratorRef.current.cancel();
+    } else if (executorRef.current) {
+      executorRef.current.cancel();
+    }
+  }, []);
+
+  // beforeunload: warn when batch is running or partial results unsaved
+  useEffect(() => {
+    function handleBeforeUnload(e) {
+      const orchStatus = orchestratorRef.current?.getStatus?.();
+      const execStatus = executorRef.current?.getStatus?.();
+      const hasActiveRun = orchStatus?.state === 'RUNNING' || execStatus?.state === 'RUNNING';
+      const hasUnsavedPartial = results.length > 0 && results.length < totalRows;
+
+      if (hasActiveRun || hasUnsavedPartial) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    }
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [results, totalRows]);
 
   const connectionHost = credentials?.baseURL ? (() => { try { return new URL(credentials.baseURL).hostname; } catch { return ''; } })() : '';
 
@@ -119,6 +208,15 @@ export default function App() {
             onResultRow={handleResultRow}
             onBatchEnd={handleBatchEnd}
             onLoadRun={handleLoadRun}
+            orchestratorRef={orchestratorRef}
+            executorRef={executorRef}
+            retryData={retryData}
+            onMergeResults={handleMergeResults}
+            onRetryComplete={() => {
+              setRetryData(null);
+              setScreen('results');
+            }}
+            existingResults={results}
           />
         )}
         {screen === 'results' && (
@@ -131,6 +229,12 @@ export default function App() {
             onLoadRun={handleLoadRun}
             onReplaceResults={handleReplaceResults}
             loadedFromFile={loadedFromFile}
+            csvRows={csvRows}
+            onRetryFailed={handleRetryFailed}
+            onResumeExecution={handleResumeExecution}
+            onCancelExecution={handleCancelExecution}
+            orchestratorRef={orchestratorRef}
+            executorRef={executorRef}
           />
         )}
       </div>

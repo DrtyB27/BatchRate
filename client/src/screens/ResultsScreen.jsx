@@ -349,16 +349,19 @@ export default function ResultsScreen({
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
-      {/* Incomplete batch banner */}
+      {/* Incomplete batch banner with retry */}
       {!isComplete && results.length > 0 && (
-        <div className="bg-amber-50 border-b border-amber-200 px-6 py-2.5 flex items-center gap-3 flex-wrap shrink-0">
-          <span className="text-amber-800 text-xs font-medium">
-            Batch incomplete: {results.length}/{totalRows} rows.
-            {missingCount > 0 && ` ${missingCount} rows not attempted.`}
-            {retryableFailedCount > 0 && ` ${retryableFailedCount} failed.`}
-          </span>
-          <div className="flex-1" />
-          <div className="flex gap-2">
+        <div className="bg-amber-50 border-b border-amber-200 px-6 py-3 shrink-0">
+          <div className="flex items-center gap-3 flex-wrap">
+            <span className="text-amber-800 text-sm font-semibold">
+              Batch incomplete: {results.length}/{totalRows}
+            </span>
+            <span className="text-amber-700 text-xs">
+              {totalRows - results.length} rows remaining
+              {failedCount > 0 && ` (${failedCount} failed)`}
+            </span>
+            <div className="flex-1" />
+
             {/* Resume only when orchestrator/executor is actually paused */}
             {onResumeExecution && (() => {
               const orchState = orchestratorRef?.current?.getStatus?.()?.state;
@@ -368,62 +371,60 @@ export default function ResultsScreen({
             })() && (
               <button
                 onClick={onResumeExecution}
-                className="text-xs bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded font-medium transition-colors"
+                className="text-xs bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded font-medium transition-colors"
               >
                 Resume Stalled
               </button>
             )}
-            {/* One-click retry that stays on ResultsScreen */}
-            {retryCount > 0 && hasCsvRows && onRetryInPlace && (
+
+            {/* THE RETRY BUTTON — always visible when there are missing rows */}
+            {onRetryInPlace && !retryProgress && (
               <button
                 onClick={onRetryInPlace}
-                disabled={retryProgress != null}
-                className="text-xs bg-amber-500 hover:bg-amber-600 disabled:bg-amber-300 text-white px-3 py-1 rounded font-medium transition-colors"
+                className="bg-[#39b6e6] hover:bg-[#2d9bc4] text-white px-5 py-2 rounded-lg font-bold text-sm shadow-md transition-colors"
               >
-                Retry {retryCount} Remaining Rows
+                Retry {totalRows - results.filter(r => r.success).length} Remaining Rows
               </button>
             )}
-            {/* Advanced retry (navigates to InputScreen for config) */}
-            {retryCount > 0 && hasCsvRows && onRetryFailed && !onRetryInPlace && (
-              <button
-                onClick={onRetryFailed}
-                className="text-xs bg-amber-500 hover:bg-amber-600 text-white px-3 py-1 rounded font-medium transition-colors"
-              >
-                Retry {retryCount} Failed Rows
-              </button>
-            )}
+
             {onCancelExecution && (orchestratorRef?.current || executorRef?.current) && (
               <button
                 onClick={onCancelExecution}
-                className="text-xs bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded font-medium transition-colors"
+                className="text-xs bg-red-500 hover:bg-red-600 text-white px-3 py-1.5 rounded font-medium transition-colors"
               >
                 Cancel Run
               </button>
             )}
+
             <button
               onClick={handleSaveRun}
-              className="text-xs bg-gray-600 hover:bg-gray-700 text-white px-3 py-1 rounded font-medium transition-colors"
+              className="text-xs bg-gray-600 hover:bg-gray-700 text-white px-3 py-1.5 rounded font-medium"
             >
-              Save Partial Results
+              Save Partial
             </button>
           </div>
-        </div>
-      )}
 
-      {/* Retry progress bar */}
-      {retryProgress && (
-        <div className="bg-blue-50 border-b border-blue-200 px-6 py-2 shrink-0">
-          <div className="flex items-center gap-3">
-            <div className="flex-1 h-2 bg-blue-100 rounded-full overflow-hidden">
-              <div
-                className="bg-[#39b6e6] h-full transition-all"
-                style={{ width: `${retryProgress.total > 0 ? (retryProgress.completed / retryProgress.total) * 100 : 0}%` }}
-              />
+          {/* Retry progress bar — shows while retry is running */}
+          {retryProgress && (
+            <div className="mt-2">
+              <div className="flex items-center gap-3">
+                <div className="flex-1 h-3 bg-amber-100 rounded-full overflow-hidden">
+                  <div
+                    className="bg-[#39b6e6] h-full rounded-full transition-all duration-300"
+                    style={{ width: `${retryProgress.total > 0 ? (retryProgress.completed / retryProgress.total) * 100 : 0}%` }}
+                  />
+                </div>
+                <span className="text-xs text-amber-800 font-semibold w-32 text-right">
+                  Retrying: {retryProgress.completed}/{retryProgress.total}
+                </span>
+              </div>
+              {retryProgress.failed > 0 && (
+                <span className="text-xs text-red-600 mt-1 block">
+                  {retryProgress.failed} still failing
+                </span>
+              )}
             </div>
-            <span className="text-xs text-blue-700 font-medium">
-              Retrying: {retryProgress.completed}/{retryProgress.total}
-            </span>
-          </div>
+          )}
         </div>
       )}
 
@@ -437,13 +438,13 @@ export default function ResultsScreen({
         </span>
         <div className="flex-1" />
 
-        {/* Retry button */}
-        {retryCount > 0 && hasCsvRows && onRetryFailed && (
+        {/* Retry in header — visible whenever there are retryable rows */}
+        {retryCount > 0 && onRetryInPlace && !retryProgress && (
           <button
-            onClick={onRetryFailed}
-            className="text-xs bg-amber-500 hover:bg-amber-600 text-white px-4 py-1.5 rounded font-semibold transition-colors"
+            onClick={onRetryInPlace}
+            className="text-xs bg-amber-500 hover:bg-amber-600 text-white px-4 py-1.5 rounded font-semibold"
           >
-            Retry {retryCount} Failed Rows
+            Retry {retryCount}
           </button>
         )}
 

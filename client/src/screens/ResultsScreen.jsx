@@ -246,7 +246,7 @@ function buildCustomRateCsv(flatRows) {
 export default function ResultsScreen({
   results, totalRows, batchParams, batchMeta, onNewBatch, onLoadRun, onReplaceResults,
   loadedFromFile, initialYieldConfig, csvRows, onRetryFailed, onResumeExecution,
-  onCancelExecution, orchestratorRef, executorRef,
+  onCancelExecution, orchestratorRef, executorRef, onRetryInPlace, retryProgress,
 }) {
   const [viewMode, setViewMode] = useState('both');
   const [modal, setModal] = useState(null);
@@ -279,9 +279,11 @@ export default function ResultsScreen({
   const retryCount = missingCount + retryableFailedCount;
   const hasCsvRows = csvRows && csvRows.length > 0;
 
+  const partialSuffix = isComplete ? '' : `_${results.length}of${totalRows}`;
+
   const handleExport = (type) => {
     if (type === 'raw') {
-      downloadCsv(`BidAnalysis_Raw_${timestamp()}.csv`, buildRawCsv(flatRows, lowCostFlags));
+      downloadCsv(`BidAnalysis_Raw${partialSuffix}_${timestamp()}.csv`, buildRawCsv(flatRows, lowCostFlags));
     } else if (type === 'customer') {
       setModal('customer');
     } else if (type === 'customRate') {
@@ -291,9 +293,9 @@ export default function ResultsScreen({
 
   const handleModalConfirm = () => {
     if (modal === 'customer') {
-      downloadCsv(`BidAnalysis_Customer_${timestamp()}.csv`, buildCustomerCsv(flatRows, lowCostFlags, activeMarkups));
+      downloadCsv(`BidAnalysis_Customer${partialSuffix}_${timestamp()}.csv`, buildCustomerCsv(flatRows, lowCostFlags, activeMarkups));
     } else if (modal === 'customRate') {
-      downloadCsv(`CustomRateTemplate_${timestamp()}.csv`, buildCustomRateCsv(flatRows));
+      downloadCsv(`CustomRateTemplate${partialSuffix}_${timestamp()}.csv`, buildCustomRateCsv(flatRows));
     }
     setModal(null);
   };
@@ -357,7 +359,13 @@ export default function ResultsScreen({
           </span>
           <div className="flex-1" />
           <div className="flex gap-2">
-            {onResumeExecution && (orchestratorRef?.current || executorRef?.current) && (
+            {/* Resume only when orchestrator/executor is actually paused */}
+            {onResumeExecution && (() => {
+              const orchState = orchestratorRef?.current?.getStatus?.()?.state;
+              const execState = executorRef?.current?.getStatus?.()?.state;
+              return orchState === 'PAUSED' || orchState === 'AUTO_PAUSED' ||
+                     execState === 'PAUSED' || execState === 'AUTO_PAUSED';
+            })() && (
               <button
                 onClick={onResumeExecution}
                 className="text-xs bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded font-medium transition-colors"
@@ -365,7 +373,18 @@ export default function ResultsScreen({
                 Resume Stalled
               </button>
             )}
-            {retryCount > 0 && hasCsvRows && onRetryFailed && (
+            {/* One-click retry that stays on ResultsScreen */}
+            {retryCount > 0 && hasCsvRows && onRetryInPlace && (
+              <button
+                onClick={onRetryInPlace}
+                disabled={retryProgress != null}
+                className="text-xs bg-amber-500 hover:bg-amber-600 disabled:bg-amber-300 text-white px-3 py-1 rounded font-medium transition-colors"
+              >
+                Retry {retryCount} Remaining Rows
+              </button>
+            )}
+            {/* Advanced retry (navigates to InputScreen for config) */}
+            {retryCount > 0 && hasCsvRows && onRetryFailed && !onRetryInPlace && (
               <button
                 onClick={onRetryFailed}
                 className="text-xs bg-amber-500 hover:bg-amber-600 text-white px-3 py-1 rounded font-medium transition-colors"
@@ -391,6 +410,23 @@ export default function ResultsScreen({
         </div>
       )}
 
+      {/* Retry progress bar */}
+      {retryProgress && (
+        <div className="bg-blue-50 border-b border-blue-200 px-6 py-2 shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="flex-1 h-2 bg-blue-100 rounded-full overflow-hidden">
+              <div
+                className="bg-[#39b6e6] h-full transition-all"
+                style={{ width: `${retryProgress.total > 0 ? (retryProgress.completed / retryProgress.total) * 100 : 0}%` }}
+              />
+            </div>
+            <span className="text-xs text-blue-700 font-medium">
+              Retrying: {retryProgress.completed}/{retryProgress.total}
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Header bar */}
       <div className="bg-white border-b border-gray-200 px-6 py-3 flex items-center gap-3 flex-wrap shrink-0">
         <h2 className="text-lg font-bold text-[#002144]">Batch Results</h2>
@@ -402,7 +438,7 @@ export default function ResultsScreen({
         <div className="flex-1" />
 
         {/* Retry button */}
-        {isComplete && retryCount > 0 && hasCsvRows && onRetryFailed && (
+        {retryCount > 0 && hasCsvRows && onRetryFailed && (
           <button
             onClick={onRetryFailed}
             className="text-xs bg-amber-500 hover:bg-amber-600 text-white px-4 py-1.5 rounded font-semibold transition-colors"
@@ -436,7 +472,7 @@ export default function ResultsScreen({
         <input ref={loadInputRef} type="file" accept=".json" onChange={handleLoadFile} className="hidden" />
         <button
           onClick={() => setShowCombine(true)}
-          disabled={!isComplete}
+          disabled={results.length === 0}
           className="text-xs bg-gray-200 hover:bg-gray-300 disabled:bg-gray-100 disabled:text-gray-400 text-gray-700 px-3 py-1.5 rounded font-medium transition-colors"
         >
           Combine Runs
@@ -447,21 +483,21 @@ export default function ResultsScreen({
         {/* Exports */}
         <button
           onClick={() => handleExport('raw')}
-          disabled={!isComplete}
+          disabled={results.length === 0}
           className="text-xs bg-gray-700 hover:bg-gray-800 disabled:bg-gray-300 text-white px-3 py-1.5 rounded"
         >
           Export Raw
         </button>
         <button
           onClick={() => handleExport('customer')}
-          disabled={!isComplete}
+          disabled={results.length === 0}
           className="text-xs bg-[#39b6e6] hover:bg-[#2d9bc4] disabled:bg-gray-300 text-white px-3 py-1.5 rounded"
         >
           Export Customer
         </button>
         <button
           onClick={() => handleExport('customRate')}
-          disabled={!isComplete}
+          disabled={results.length === 0}
           className="text-xs bg-amber-600 hover:bg-amber-700 disabled:bg-gray-300 text-white px-3 py-1.5 rounded"
         >
           Export Custom Rate
@@ -492,24 +528,21 @@ export default function ResultsScreen({
         <button
           className={viewBtnCls('analytics')}
           onClick={() => setViewMode('analytics')}
-          disabled={!isComplete}
-          title={!isComplete ? 'Available when batch is complete' : ''}
+          disabled={results.length === 0}
         >
           Analytics
         </button>
         <button
           className={viewBtnCls('scenarios')}
           onClick={() => setViewMode('scenarios')}
-          disabled={!isComplete}
-          title={!isComplete ? 'Available when batch is complete' : ''}
+          disabled={results.length === 0}
         >
           Scenarios
         </button>
         <button
           className={viewBtnCls('optimize')}
           onClick={() => setViewMode('optimize')}
-          disabled={!isComplete}
-          title={!isComplete ? 'Available when batch is complete' : ''}
+          disabled={results.length === 0}
         >
           Optimize
         </button>

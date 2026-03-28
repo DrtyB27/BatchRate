@@ -564,7 +564,7 @@ export default function ResultsScreen({
       ) : viewMode === 'optimize' ? (
         <OptimizationDashboard flatRows={flatRows} />
       ) : viewMode === 'performance' ? (
-        <BatchPerformance results={results} batchMeta={batchMeta} />
+        <BatchPerformance results={results} batchMeta={batchMeta} totalRows={totalRows} onRetryInPlace={onRetryInPlace} retryProgress={retryProgress} />
       ) : (
         <ResultsTable
           flatRows={flatRows}

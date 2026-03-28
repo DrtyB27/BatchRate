@@ -3,6 +3,7 @@ import CredentialScreen from './screens/CredentialScreen.jsx';
 import InputScreen from './screens/InputScreen.jsx';
 import ResultsScreen from './screens/ResultsScreen.jsx';
 import { deserializeRun, readJsonFile, validateRunFile } from './services/runPersistence.js';
+import { createBatchExecutor } from './services/batchExecutor.js';
 
 export default function App() {
   const [screen, setScreen] = useState('credentials');
@@ -14,10 +15,12 @@ export default function App() {
   const [loadedFromFile, setLoadedFromFile] = useState(false);
   const [csvRows, setCsvRows] = useState(null);
   const [retryData, setRetryData] = useState(null); // { retryRows, existingResults, batchMeta }
+  const [retryProgress, setRetryProgress] = useState(null);
 
   // Lifted refs so ResultsScreen can access execution controls
   const orchestratorRef = useRef(null);
   const executorRef = useRef(null);
+  const retryExecutorRef = useRef(null);
 
   const handleConnected = useCallback((creds) => {
     setCredentials(creds);
@@ -131,6 +134,45 @@ export default function App() {
     setScreen('input');
   }, [csvRows, results, totalRows, batchMeta, batchParams]);
 
+  // Retry failed/missing rows in-place (stays on ResultsScreen)
+  const handleRetryInPlace = useCallback(() => {
+    if (!csvRows || csvRows.length === 0 || !credentials || !batchParams) return;
+
+    const succeededRefs = new Set(results.filter(r => r.success).map(r => r.reference));
+    const retryRows = csvRows.filter(row => !succeededRefs.has(row['Reference'] || ''));
+
+    if (retryRows.length === 0) return;
+
+    const executor = createBatchExecutor({
+      concurrency: 2,
+      delayMs: 200,
+      retryAttempts: 2,
+      adaptiveBackoff: true,
+      autoTune: true,
+      autoTuneTarget: 3000,
+      timeoutMs: 60000,
+      onResult: (result) => {
+        setResults(prev => {
+          const ref = result.reference;
+          // Remove old failed result for this reference, keep successes
+          const filtered = prev.filter(r => r.reference !== ref || r.success);
+          return [...filtered, result];
+        });
+      },
+      onProgress: (progress) => {
+        setRetryProgress(progress);
+      },
+      onComplete: () => {
+        setRetryProgress(null);
+        retryExecutorRef.current = null;
+      },
+    });
+
+    setRetryProgress({ completed: 0, total: retryRows.length, state: 'RUNNING' });
+    executor.start(retryRows, batchParams, credentials);
+    retryExecutorRef.current = executor;
+  }, [csvRows, results, batchParams, credentials]);
+
   // Resume execution controls from ResultsScreen
   const handleResumeExecution = useCallback(() => {
     if (orchestratorRef.current) {
@@ -231,6 +273,8 @@ export default function App() {
             loadedFromFile={loadedFromFile}
             csvRows={csvRows}
             onRetryFailed={handleRetryFailed}
+            onRetryInPlace={handleRetryInPlace}
+            retryProgress={retryProgress}
             onResumeExecution={handleResumeExecution}
             onCancelExecution={handleCancelExecution}
             orchestratorRef={orchestratorRef}

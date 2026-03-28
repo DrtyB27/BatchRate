@@ -33,13 +33,15 @@ function CustomTooltip({ active, payload }) {
   );
 }
 
-export default function ResponseTimeline({ results, rollingAvg, degradation }) {
+export default function ResponseTimeline({ results, rollingAvg, degradation, inflection }) {
   const [xMode, setXMode] = useState('rowIndex'); // rowIndex | completionOrder | wallClock
+  const [showCusum, setShowCusum] = useState(false);
   const hasWorkerData = results.some(r => r.workerIndex !== undefined);
   const hasAgentData = results.some(r => r.agentId !== undefined);
   const hasWallClock = results.some(r => r.completedAt || r.startedAt);
   // 3-way color mode: 'success' | 'worker' | 'agent'
   const [colorMode, setColorMode] = useState(hasAgentData ? 'agent' : hasWorkerData ? 'worker' : 'success');
+  const hasCusum = inflection?.cusum?.length > 0;
 
   const chartData = useMemo(() => {
     // Compute wall clock offsets if timestamps available
@@ -76,8 +78,24 @@ export default function ResponseTimeline({ results, rollingAvg, degradation }) {
       data.sort((a, b) => a.rowIndex - b.rowIndex);
     }
 
+    // Merge CUSUM data if available and showing by completion/row order
+    if (showCusum && hasCusum && inflection?.cusum) {
+      const cusumMap = new Map();
+      for (const c of inflection.cusum) {
+        cusumMap.set(c.index, c.cusumPos);
+      }
+      // Normalize CUSUM to fit within the chart Y range
+      const maxCusum = Math.max(...inflection.cusum.map(c => c.cusumPos), 1);
+      const maxElapsed = Math.max(...data.map(d => d.elapsedMs), 1);
+      const scale = maxElapsed / maxCusum * 0.8;
+      for (let i = 0; i < data.length; i++) {
+        const cusumVal = cusumMap.get(i);
+        data[i].cusumScaled = cusumVal !== undefined ? Math.round(cusumVal * scale) : null;
+      }
+    }
+
     return data;
-  }, [results, rollingAvg, xMode, hasWallClock]);
+  }, [results, rollingAvg, xMode, hasWallClock, showCusum, hasCusum, inflection]);
 
   const p95 = useMemo(() => {
     const sorted = [...results.map(r => r.elapsedMs || 0)].sort((a, b) => a - b);
@@ -138,6 +156,16 @@ export default function ResponseTimeline({ results, rollingAvg, degradation }) {
             )}
             {hasWallClock && <option value="wallClock">X: Wall Clock Time</option>}
           </select>
+          {hasCusum && (
+            <button
+              onClick={() => setShowCusum(!showCusum)}
+              className={`text-[10px] px-2 py-0.5 rounded font-medium transition-colors ${
+                showCusum ? 'bg-purple-100 text-purple-700' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
+              }`}
+            >
+              CUSUM
+            </button>
+          )}
           {degradation?.detected && (
             <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${degradation.severe ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>
               {degradation.severe ? 'Severe' : 'Moderate'} degradation at row {degradation.degradationPoint} ({degradation.maxRatio}x)
@@ -165,6 +193,28 @@ export default function ResponseTimeline({ results, rollingAvg, degradation }) {
 
           {/* P95 line */}
           <ReferenceLine y={p95} stroke="#94a3b8" strokeDasharray="6 3" label={{ value: `P95: ${p95}ms`, position: 'right', fontSize: 10, fill: '#94a3b8' }} />
+
+          {/* CUSUM overlay */}
+          {showCusum && hasCusum && (
+            <Line type="monotone" dataKey="cusumScaled" stroke="#8b5cf6" strokeWidth={1.5} strokeDasharray="4 2" dot={false} name="CUSUM" connectNulls />
+          )}
+
+          {/* Inflection point markers */}
+          {showCusum && inflection?.points?.map((pt, i) => (
+            <ReferenceLine
+              key={`inflection-${i}`}
+              x={pt.rowIndex}
+              stroke={pt.type === 'DEGRADATION' ? '#dc2626' : '#16a34a'}
+              strokeWidth={2}
+              strokeDasharray="6 3"
+              label={{
+                value: pt.type === 'DEGRADATION' ? `Shift ${pt.ratio ? pt.ratio.toFixed(1) + 'x' : ''}` : 'Recovery',
+                position: 'top',
+                fontSize: 9,
+                fill: pt.type === 'DEGRADATION' ? '#dc2626' : '#16a34a',
+              }}
+            />
+          ))}
 
           {/* Rolling average */}
           <Line type="monotone" dataKey="rolling" stroke="#002144" strokeWidth={2} dot={false} name="Rolling Avg" />

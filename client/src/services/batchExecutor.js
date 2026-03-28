@@ -15,49 +15,108 @@ function isRetryable(errorMessage) {
   return RETRYABLE_PATTERNS.some(p => msg.includes(p));
 }
 
-// ── Concurrency Auto-Tuner ──
-class ConcurrencyAutoTuner {
-  constructor(maxConcurrency, targetResponseMs = 2000) {
-    this.max = maxConcurrency;
-    this.target = targetResponseMs;
-    this.current = Math.min(2, maxConcurrency);
+// ── Response-Time-Aware Auto-Tuner ──
+// Replaces the old error-rate-only adaptive backoff with proactive
+// response-time monitoring that detects degradation BEFORE stalls.
+class ResponseTimeAutoTuner {
+  constructor(config) {
+    this.maxConcurrency = config.maxConcurrency || 8;
+    this.targetMs = config.targetResponseMs || 2000;
+    this.warningMs = config.warningThresholdMs || 5000;
+    this.criticalMs = config.criticalThresholdMs || 15000;
+    this.current = config.initialConcurrency || Math.min(2, config.maxConcurrency || 8);
     this.window = [];
     this.windowSize = 20;
-    this.adjustInterval = 20;
+    this.adjustInterval = 10;
     this.resultCount = 0;
     this.lastAdjustAt = 0;
-    this.history = []; // track adjustments for UI
+    this.history = [];
+    this.baselineEstablished = false;
+    this.baselineAvg = 0;
+
+    // Load from tuning profile if available
+    if (config.profile) {
+      this.current = config.profile.optimalConcurrency || this.current;
+      this.targetMs = config.profile.warningThresholdMs || this.targetMs;
+      this.baselineAvg = config.profile.baselineResponseMs || 0;
+      this.baselineEstablished = this.baselineAvg > 0;
+    }
   }
 
   recordResult(elapsedMs) {
     this.window.push(elapsedMs);
     if (this.window.length > this.windowSize) this.window.shift();
     this.resultCount++;
+
+    if (!this.baselineEstablished && this.window.length >= this.windowSize) {
+      this.baselineAvg = this.getAvg();
+      this.baselineEstablished = true;
+    }
+  }
+
+  getAvg() {
+    return this.window.length > 0
+      ? this.window.reduce((a, b) => a + b, 0) / this.window.length
+      : 0;
+  }
+
+  getP95() {
+    if (this.window.length < 5) return 0;
+    const sorted = [...this.window].sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length * 0.95)];
+  }
+
+  shouldAdjust() {
+    return this.resultCount - this.lastAdjustAt >= this.adjustInterval
+      && this.window.length >= 10;
   }
 
   getOptimalConcurrency() {
-    if (this.resultCount - this.lastAdjustAt < this.adjustInterval) return this.current;
-    if (this.window.length < this.windowSize) return this.current;
+    if (!this.shouldAdjust()) return this.current;
     this.lastAdjustAt = this.resultCount;
 
-    const avgMs = this.window.reduce((a, b) => a + b, 0) / this.window.length;
-    const sorted = [...this.window].sort((a, b) => a - b);
-    const p95 = sorted[Math.floor(sorted.length * 0.95)];
-    const prev = this.current;
+    const avg = this.getAvg();
+    const p95 = this.getP95();
+    const prevConcurrency = this.current;
 
-    if (avgMs < this.target * 0.5 && p95 < this.target) {
-      this.current = Math.min(this.max, this.current + 1);
-    } else if (avgMs > this.target * 1.5 || p95 > this.target * 3) {
+    if (avg > this.criticalMs || p95 > this.criticalMs * 1.5) {
+      this.current = 1;
+    } else if (avg > this.warningMs || p95 > this.warningMs * 2) {
       this.current = Math.max(1, this.current - 2);
-    } else if (avgMs > this.target) {
+    } else if (avg > this.targetMs * 1.5) {
       this.current = Math.max(1, this.current - 1);
+    } else if (avg > this.targetMs * 0.5) {
+      // On target — hold steady
+    } else if (avg < this.targetMs * 0.5 && p95 < this.targetMs) {
+      this.current = Math.min(this.maxConcurrency, this.current + 1);
     }
 
-    if (this.current !== prev) {
-      this.history.push({ at: this.resultCount, from: prev, to: this.current, avgMs: Math.round(avgMs) });
+    if (this.current !== prevConcurrency) {
+      this.history.push({
+        atResult: this.resultCount,
+        from: prevConcurrency,
+        to: this.current,
+        triggerAvg: Math.round(avg),
+        triggerP95: Math.round(p95),
+        timestamp: new Date().toISOString(),
+      });
     }
 
     return this.current;
+  }
+
+  getState() {
+    return {
+      current: this.current,
+      max: this.maxConcurrency,
+      target: this.targetMs,
+      avgMs: Math.round(this.getAvg()),
+      p95Ms: Math.round(this.getP95()),
+      baselineAvg: Math.round(this.baselineAvg),
+      adjustments: this.history.length,
+      lastAdjustment: this.history[this.history.length - 1] || null,
+      history: this.history,
+    };
   }
 }
 
@@ -73,6 +132,9 @@ export function createBatchExecutor(config) {
     adaptiveBackoff = true,
     autoTune = false,
     autoTuneTarget = 2000,
+    warningThresholdMs = 5000,
+    criticalThresholdMs = 15000,
+    tuningProfile = null,
     timeoutMs = 30000,
     onResult,
     onProgress,
@@ -88,18 +150,52 @@ export function createBatchExecutor(config) {
   let completionCounter = 0;
   let startTimeMs = 0;
 
-  // Adaptive backoff state
+  // Adaptive backoff state (kept for error-rate-based pausing)
   let currentDelay = delayMs;
   let currentConcurrency = concurrency;
   let backoffTriggered = false;
   const recentWindow = []; // last 10 results success/fail
   let consecutiveSuccesses = 0;
 
-  // Auto-tuner (optional)
-  const tuner = autoTune ? new ConcurrencyAutoTuner(concurrency, autoTuneTarget) : null;
+  // ── Telemetry counters ──
+  let successCounter = 0;
+  let failureCounter = 0;
+  let consecutiveFailures = 0;
+  let cumulativeResponseTime = 0;
+
+  // ── Rolling window for telemetry (last 20 response times) ──
+  const rollingWindow = [];
+  function updateRolling(elapsedMs) {
+    rollingWindow.push(elapsedMs);
+    if (rollingWindow.length > 20) rollingWindow.shift();
+  }
+  function getRollingAvg() {
+    return rollingWindow.length > 0
+      ? Math.round(rollingWindow.reduce((a, b) => a + b, 0) / rollingWindow.length)
+      : 0;
+  }
+  function getRollingP95() {
+    if (rollingWindow.length < 5) return 0;
+    const sorted = [...rollingWindow].sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length * 0.95)];
+  }
+  function getRollingErrorRate() {
+    if (recentWindow.length === 0) return 0;
+    return recentWindow.filter(s => !s).length / recentWindow.length;
+  }
+
+  // ── Response-time-aware auto-tuner ──
+  const tuner = autoTune ? new ResponseTimeAutoTuner({
+    maxConcurrency: concurrency,
+    targetResponseMs: autoTuneTarget,
+    warningThresholdMs,
+    criticalThresholdMs,
+    initialConcurrency: tuningProfile?.learned?.optimalConcurrency || Math.min(2, concurrency),
+    profile: tuningProfile?.learned || null,
+  }) : null;
 
   // Retry tracking
-  const retryMap = new Map(); // rowIndex -> { attemptsLeft }
+  const retryMap = new Map();
   let totalRetried = 0;
 
   // Throughput tracking (rolling 10s window)
@@ -110,17 +206,16 @@ export function createBatchExecutor(config) {
   let params = null;
   let credentials = null;
   let workerPromises = [];
-  const abortControllers = new Map(); // rowIndex -> AbortController
+  const abortControllers = new Map();
 
   // ── Progress snapshot ──
   function buildProgress() {
     const now = Date.now();
     const elapsed = now - startTimeMs;
 
-    // Rolling throughput (last 10 seconds)
     const cutoff = now - 10000;
     const recentCompletions = completionTimestamps.filter(t => t > cutoff).length;
-    const throughput = recentCompletions / 10; // rows/sec
+    const throughput = recentCompletions / 10;
 
     const remaining = queue.length + activeCount;
     const estimatedRemainingMs = throughput > 0 ? (remaining / throughput) * 1000 : 0;
@@ -148,6 +243,7 @@ export function createBatchExecutor(config) {
       adaptiveBackoffActive: currentDelay > delayMs || currentConcurrency < concurrency,
       autoTuneActive: !!tuner,
       autoTuneHistory: tuner?.history || [],
+      tunerState: tuner?.getState() || null,
     };
   }
 
@@ -159,7 +255,7 @@ export function createBatchExecutor(config) {
     return `~${min}m ${rem}s`;
   }
 
-  // ── Adaptive backoff logic ──
+  // ── Adaptive backoff logic (error-rate based — kept for pause behavior) ──
   function updateAdaptiveBackoff(success) {
     if (!adaptiveBackoff) return;
 
@@ -173,7 +269,7 @@ export function createBatchExecutor(config) {
     }
 
     const windowSize = recentWindow.length;
-    if (windowSize < 5) return; // wait for enough data
+    if (windowSize < 5) return;
 
     const errorRate = recentWindow.filter(s => !s).length / windowSize;
 
@@ -185,23 +281,29 @@ export function createBatchExecutor(config) {
       return;
     }
 
-    // Increase backoff at 30%+ errors
+    // When auto-tuner is active, let it handle concurrency adjustments
+    // Only apply error-rate delay increases here
     if (errorRate > 0.3) {
       currentDelay = Math.min(2000, Math.max(200, currentDelay * 2 || 200));
-      currentConcurrency = Math.max(1, currentConcurrency - 1);
+      if (!tuner) {
+        currentConcurrency = Math.max(1, currentConcurrency - 1);
+      }
       backoffTriggered = true;
     }
 
-    // Recovery: 5 consecutive successes and delay above base
+    // Recovery
     if (consecutiveSuccesses >= 5 && currentDelay > delayMs) {
       currentDelay = Math.max(delayMs, Math.floor(currentDelay / 2));
-      currentConcurrency = Math.min(concurrency, currentConcurrency + 1);
+      if (!tuner) {
+        currentConcurrency = Math.min(concurrency, currentConcurrency + 1);
+      }
     }
   }
 
-  // ── Build result object (same shape as current InputScreen) ──
-  function buildResult(row, rowIndex, parsed, xml, responseXml, elapsedMs, workerIdx, err, callStartTime) {
+  // ── Build result object with telemetry ──
+  function buildResult(row, rowIndex, parsed, xml, responseXml, elapsedMs, workerIdx, err, callStartTime, dispatchTimestamp, activeWorkerSnapshot, queueSnapshot) {
     const success = !err && parsed && parsed.rates.length > 0;
+    const rateCount = success ? parsed.rates.length : 0;
     const ratesWithMargin = success
       ? parsed.rates.map(rate => {
           const { customerPrice, marginType, marginValue, isOverride } = applyMargin(rate.totalCharge, rate.carrierSCAC, params.margins);
@@ -232,7 +334,7 @@ export function createBatchExecutor(config) {
       success,
       ratingMessage: err ? err.message : (parsed?.ratingMessage || ''),
       elapsedMs,
-      rateCount: success ? parsed.rates.length : 0,
+      rateCount,
       xmlRequestSize: xml ? xml.length : 0,
       xmlResponseSize: responseXml ? responseXml.length : 0,
       batchPosition: rowIndex,
@@ -244,12 +346,46 @@ export function createBatchExecutor(config) {
       rateRequestXml: params.saveRequestXml && xml ? xml : '',
       rateResponseXml: params.saveResponseXml && responseXml ? responseXml : '',
       rates: ratesWithMargin,
+
+      // ── Telemetry ──
+      telemetry: {
+        dispatchedAt: dispatchTimestamp,
+        respondedAt: new Date().toISOString(),
+        elapsedMs,
+        activeWorkersAtDispatch: activeWorkerSnapshot,
+        pendingQueueAtDispatch: queueSnapshot,
+        completedAtDispatch: completionCounter - 1,
+        cumulativeApiCalls: completionCounter,
+        cumulativeSuccesses: successCounter + (success ? 1 : 0),
+        cumulativeFailures: failureCounter + (success ? 0 : 1),
+        cumulativeApiTimeMs: cumulativeResponseTime + elapsedMs,
+        cumulativeWallClockMs: Date.now() - startTimeMs,
+        rollingAvgMs: getRollingAvg(),
+        rollingP95Ms: getRollingP95(),
+        rollingErrorRate: getRollingErrorRate(),
+        currentConcurrency,
+        currentDelay,
+        backoffActive: backoffTriggered,
+        consecutiveSuccesses,
+        consecutiveFailures,
+        requestWeightLbs: parseFloat(row['Net Wt Lb']) || 0,
+        requestClass: row['Class'] || '',
+        requestOrigZip3: (row['Org Postal Code'] || '').slice(0, 3),
+        requestDestZip3: (row['Dst Postal Code'] || '').slice(0, 3),
+        rateCount,
+        xmlRequestSize: xml?.length || 0,
+        xmlResponseSize: responseXml?.length || 0,
+        agentId: null, // set by orchestrator
+      },
     };
   }
 
   // ── Worker loop ──
   async function workerLoop(workerIdx) {
     while (queue.length > 0 && (state === 'RUNNING')) {
+      // Check if we should be idle (tuner reduced concurrency below our index)
+      if (tuner && workerIdx >= currentConcurrency) break;
+
       const item = queue.shift();
       if (!item) break;
       const { rowIndex, attempt } = item;
@@ -263,6 +399,11 @@ export function createBatchExecutor(config) {
         await sleep(currentDelay);
         if (state !== 'RUNNING') { activeCount--; queue.unshift(item); break; }
       }
+
+      // Snapshot context before dispatch
+      const dispatchTimestamp = new Date().toISOString();
+      const activeWorkerSnapshot = activeCount;
+      const queueSnapshot = queue.length;
 
       const startTime = Date.now();
       let xml = null;
@@ -281,6 +422,10 @@ export function createBatchExecutor(config) {
       activeCount--;
       const elapsedMs = Date.now() - startTime;
 
+      // Update telemetry counters
+      updateRolling(elapsedMs);
+      cumulativeResponseTime += elapsedMs;
+
       // Retry logic
       if (error && retryAttempts > 0 && isRetryable(error.message)) {
         const retry = retryMap.get(rowIndex) || { attemptsLeft: retryAttempts };
@@ -288,12 +433,14 @@ export function createBatchExecutor(config) {
           retry.attemptsLeft--;
           retryMap.set(rowIndex, retry);
           totalRetried++;
-          // Progressive delay
           const waitMs = retryDelayMs * (retryAttempts - retry.attemptsLeft);
           await sleep(waitMs);
           if (state === 'RUNNING' || state === 'AUTO_PAUSED') {
             queue.push({ rowIndex, attempt: attempt + 1 });
           }
+          failureCounter++;
+          consecutiveFailures++;
+          consecutiveSuccesses = 0;
           updateAdaptiveBackoff(false);
           if (onProgress) onProgress(buildProgress());
           continue;
@@ -301,18 +448,33 @@ export function createBatchExecutor(config) {
       }
 
       // Final result
-      const result = buildResult(row, rowIndex, parsed, xml, responseXml, elapsedMs, workerIdx, error, startTime);
+      const result = buildResult(row, rowIndex, parsed, xml, responseXml, elapsedMs, workerIdx, error, startTime, dispatchTimestamp, activeWorkerSnapshot, queueSnapshot);
       results.push(result);
       completionTimestamps.push(Date.now());
+
+      // Update success/failure counters
+      if (result.success) {
+        successCounter++;
+        consecutiveFailures = 0;
+      } else {
+        failureCounter++;
+        consecutiveFailures++;
+      }
 
       updateAdaptiveBackoff(result.success);
 
       // Auto-tuner: adjust concurrency based on response times
-      if (tuner && result.success) {
+      if (tuner) {
         tuner.recordResult(elapsedMs);
         const optimal = tuner.getOptimalConcurrency();
-        if (optimal !== currentConcurrency && !backoffTriggered) {
+        if (optimal !== currentConcurrency) {
           currentConcurrency = optimal;
+          // If we need more workers, launch them
+          if (optimal > activeCount && queue.length > 0) {
+            for (let w = activeCount; w < optimal && queue.length > 0; w++) {
+              workerPromises.push(workerLoop(w));
+            }
+          }
         }
       }
 
@@ -367,6 +529,7 @@ export function createBatchExecutor(config) {
       delayUsed: delayMs,
       adaptiveBackoffTriggered: backoffTriggered,
       peakActiveWorkers: peakActive,
+      tunerState: tuner?.getState() || null,
     };
   }
 
@@ -383,11 +546,16 @@ export function createBatchExecutor(config) {
       completionCounter = 0;
       completionTimestamps.length = 0;
       recentWindow.length = 0;
+      rollingWindow.length = 0;
       consecutiveSuccesses = 0;
+      consecutiveFailures = 0;
+      successCounter = 0;
+      failureCounter = 0;
+      cumulativeResponseTime = 0;
       retryMap.clear();
       totalRetried = 0;
       currentDelay = delayMs;
-      currentConcurrency = concurrency;
+      currentConcurrency = tuner ? tuner.current : concurrency;
       backoffTriggered = false;
       peakActive = 0;
       activeCount = 0;
@@ -430,7 +598,6 @@ export function createBatchExecutor(config) {
     cancel() {
       state = 'CANCELLED';
       queue.length = 0;
-      // Abort any active requests
       for (const [, ctrl] of abortControllers) {
         try { ctrl.abort(); } catch {}
       }

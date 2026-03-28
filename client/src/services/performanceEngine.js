@@ -412,6 +412,243 @@ export function detectErrorPatterns(results) {
 }
 
 // ============================================================
+// CUSUM Inflection Point Detection
+// ============================================================
+export function detectInflectionPoint(results) {
+  const sorted = [...results].sort(
+    (a, b) => (a.completionOrder ?? a.rowIndex ?? 0) - (b.completionOrder ?? b.rowIndex ?? 0)
+  );
+
+  const times = sorted.map(r => r.elapsedMs || 0);
+  if (times.length < 20) return { detected: false, points: [], cusum: [] };
+
+  // Establish baseline from first 20% of results
+  const baselineEnd = Math.max(10, Math.floor(times.length * 0.2));
+  const baselineSlice = times.slice(0, baselineEnd);
+  const baselineMean = baselineSlice.reduce((a, b) => a + b, 0) / baselineSlice.length;
+  const baselineStd = Math.sqrt(
+    baselineSlice.reduce((s, t) => s + (t - baselineMean) ** 2, 0) / baselineSlice.length
+  ) || 1;
+
+  // Allowance k = 0.5 sigma (standard CUSUM parameter)
+  const k = 0.5 * baselineStd;
+  // Detection threshold h = 4 sigma
+  const h = 4 * baselineStd;
+
+  let cusumPos = 0;
+  let cusumNeg = 0;
+  const cusumSeries = [];
+  const inflectionPoints = [];
+
+  for (let i = 0; i < times.length; i++) {
+    const deviation = times[i] - baselineMean;
+    cusumPos = Math.max(0, cusumPos + deviation - k);
+    cusumNeg = Math.max(0, cusumNeg - deviation - k);
+
+    cusumSeries.push({
+      index: i,
+      rowIndex: sorted[i].rowIndex ?? i,
+      completionOrder: sorted[i].completionOrder ?? i,
+      elapsed: times[i],
+      cusumPos,
+      cusumNeg,
+      baseline: baselineMean,
+    });
+
+    // Positive shift detected (response times increasing)
+    if (cusumPos > h) {
+      const alreadyDetected = inflectionPoints.some(
+        p => p.type === 'DEGRADATION' && Math.abs(p.index - i) < 20
+      );
+      if (!alreadyDetected) {
+        // Walk back to find the actual start of the shift
+        let changeStart = i;
+        for (let j = i - 1; j >= 0; j--) {
+          if (cusumSeries[j].cusumPos <= 0) { changeStart = j + 1; break; }
+        }
+        const preAvg = Math.round(
+          times.slice(Math.max(0, changeStart - 10), changeStart).reduce((a, b) => a + b, 0) /
+          Math.min(10, changeStart)
+        ) || baselineMean;
+        const postSlice = times.slice(changeStart, Math.min(times.length, changeStart + 20));
+        const postAvg = Math.round(postSlice.reduce((a, b) => a + b, 0) / postSlice.length);
+
+        inflectionPoints.push({
+          type: 'DEGRADATION',
+          index: changeStart,
+          rowIndex: sorted[changeStart]?.rowIndex ?? changeStart,
+          severity: cusumPos / h,
+          preAvgMs: Math.round(preAvg),
+          postAvgMs: postAvg,
+          ratio: postAvg / (preAvg || 1),
+          cusumValue: Math.round(cusumPos),
+          description: `Response time shifted from ~${Math.round(preAvg)}ms to ~${postAvg}ms at row ${sorted[changeStart]?.rowIndex ?? changeStart} (${Math.round(postAvg / (preAvg || 1) * 10) / 10}x increase)`,
+        });
+      }
+      cusumPos = 0; // reset after detection
+    }
+
+    // Negative shift detected (response times decreasing — recovery)
+    if (cusumNeg > h) {
+      const alreadyDetected = inflectionPoints.some(
+        p => p.type === 'RECOVERY' && Math.abs(p.index - i) < 20
+      );
+      if (!alreadyDetected) {
+        inflectionPoints.push({
+          type: 'RECOVERY',
+          index: i,
+          rowIndex: sorted[i]?.rowIndex ?? i,
+          severity: cusumNeg / h,
+          cusumValue: Math.round(cusumNeg),
+          description: `Response times recovered around row ${sorted[i]?.rowIndex ?? i}`,
+        });
+      }
+      cusumNeg = 0;
+    }
+  }
+
+  return {
+    detected: inflectionPoints.length > 0,
+    points: inflectionPoints,
+    cusum: cusumSeries,
+    baseline: {
+      mean: Math.round(baselineMean),
+      std: Math.round(baselineStd),
+      sampleSize: baselineEnd,
+      k: Math.round(k),
+      h: Math.round(h),
+    },
+  };
+}
+
+// ============================================================
+// Telemetry Export — CSV flat + JSON with metadata
+// ============================================================
+export function buildTelemetryCsv(results, batchMeta) {
+  const headers = [
+    'rowIndex', 'reference', 'success', 'elapsedMs', 'rateCount',
+    'workerIndex', 'completionOrder', 'startedAt', 'completedAt',
+    'xmlRequestSize', 'xmlResponseSize',
+    'origZip3', 'destZip3', 'weightLbs', 'freightClass',
+    'activeWorkersAtDispatch', 'pendingQueueAtDispatch',
+    'rollingAvgMs', 'rollingP95Ms', 'rollingErrorRate',
+    'currentConcurrency', 'currentDelay', 'backoffActive',
+    'consecutiveSuccesses', 'consecutiveFailures',
+    'cumulativeApiCalls', 'cumulativeSuccesses', 'cumulativeFailures',
+    'cumulativeApiTimeMs', 'cumulativeWallClockMs',
+    'agentId',
+  ];
+
+  const escCsv = (val) => {
+    const s = String(val ?? '');
+    return s.includes(',') || s.includes('"') || s.includes('\n')
+      ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+
+  const rows = [headers.join(',')];
+  for (const r of results) {
+    const t = r.telemetry || {};
+    rows.push([
+      r.rowIndex ?? '', r.reference ?? '', r.success ?? '', r.elapsedMs ?? '',
+      r.rateCount ?? '', r.workerIndex ?? '', r.completionOrder ?? '',
+      r.startedAt ?? '', r.completedAt ?? '',
+      r.xmlRequestSize ?? '', r.xmlResponseSize ?? '',
+      t.requestOrigZip3 ?? (r.origPostal || '').slice(0, 3),
+      t.requestDestZip3 ?? (r.destPostal || '').slice(0, 3),
+      t.requestWeightLbs ?? r.inputNetWt ?? '',
+      t.requestClass ?? r.inputClass ?? '',
+      t.activeWorkersAtDispatch ?? '', t.pendingQueueAtDispatch ?? '',
+      t.rollingAvgMs ?? '', t.rollingP95Ms ?? '', t.rollingErrorRate ?? '',
+      t.currentConcurrency ?? '', t.currentDelay ?? '', t.backoffActive ?? '',
+      t.consecutiveSuccesses ?? '', t.consecutiveFailures ?? '',
+      t.cumulativeApiCalls ?? '', t.cumulativeSuccesses ?? '', t.cumulativeFailures ?? '',
+      t.cumulativeApiTimeMs ?? '', t.cumulativeWallClockMs ?? '',
+      t.agentId ?? r.agentId ?? '',
+    ].map(escCsv).join(','));
+  }
+
+  return rows.join('\n');
+}
+
+export function buildTelemetryJson(results, batchMeta) {
+  const summary = computePerformanceSummary(results, batchMeta);
+  const degradation = detectDegradation(results);
+  const inflection = detectInflectionPoint(results);
+  const errorAnalysis = computeErrorAnalysis(results);
+
+  const telemetryRows = results.map(r => {
+    const t = r.telemetry || {};
+    return {
+      rowIndex: r.rowIndex,
+      reference: r.reference,
+      success: r.success,
+      elapsedMs: r.elapsedMs,
+      rateCount: r.rateCount ?? r.rates?.length ?? 0,
+      workerIndex: r.workerIndex,
+      completionOrder: r.completionOrder,
+      startedAt: r.startedAt,
+      completedAt: r.completedAt,
+      xmlRequestSize: r.xmlRequestSize,
+      xmlResponseSize: r.xmlResponseSize,
+      lane: {
+        origZip3: t.requestOrigZip3 ?? (r.origPostal || '').slice(0, 3),
+        destZip3: t.requestDestZip3 ?? (r.destPostal || '').slice(0, 3),
+        weightLbs: t.requestWeightLbs ?? (parseFloat(r.inputNetWt) || 0),
+        freightClass: t.requestClass ?? (r.inputClass ?? ''),
+      },
+      execution: {
+        activeWorkersAtDispatch: t.activeWorkersAtDispatch,
+        pendingQueueAtDispatch: t.pendingQueueAtDispatch,
+        rollingAvgMs: t.rollingAvgMs,
+        rollingP95Ms: t.rollingP95Ms,
+        rollingErrorRate: t.rollingErrorRate,
+        currentConcurrency: t.currentConcurrency,
+        currentDelay: t.currentDelay,
+        backoffActive: t.backoffActive,
+      },
+      cumulative: {
+        apiCalls: t.cumulativeApiCalls,
+        successes: t.cumulativeSuccesses,
+        failures: t.cumulativeFailures,
+        apiTimeMs: t.cumulativeApiTimeMs,
+        wallClockMs: t.cumulativeWallClockMs,
+      },
+      agentId: t.agentId ?? r.agentId ?? null,
+    };
+  });
+
+  return {
+    version: '1.0',
+    exportedAt: new Date().toISOString(),
+    batch: {
+      batchId: batchMeta?.batchId ?? null,
+      startTime: batchMeta?.batchStartTime ?? null,
+      endTime: batchMeta?.batchEndTime ?? null,
+      executionMode: batchMeta?.executionMode ?? 'single',
+      concurrency: batchMeta?.concurrency ?? null,
+      totalRows: results.length,
+    },
+    summary,
+    degradation: {
+      detected: degradation.detected,
+      maxRatio: degradation.maxRatio,
+      degradationPoint: degradation.degradationPoint,
+      deciles: degradation.deciles,
+    },
+    inflection: {
+      detected: inflection.detected,
+      points: inflection.points,
+      baseline: inflection.baseline,
+    },
+    errors: {
+      totalErrors: errorAnalysis.totalErrors,
+      categories: errorAnalysis.summary,
+    },
+    telemetry: telemetryRows,
+  };
+}
+
+// ============================================================
 // Recommendations
 // ============================================================
 export function generateRecommendations(summary, degradation, correlations, errorAnalysis, batchMeta) {

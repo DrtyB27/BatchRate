@@ -1,5 +1,6 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import { deduplicateRows } from '../services/rateDeduplicator.js';
+import { readProfileFile, validateProfile } from '../services/tuningProfile.js';
 
 const CONCURRENCY_OPTIONS = [1, 2, 3, 4, 5, 6, 8];
 const DELAY_OPTIONS = [0, 50, 100, 150, 200, 300, 500];
@@ -68,6 +69,9 @@ function StepperControl({ label, value, options, onChange, tooltip, suffix }) {
 export default function ExecutionControls({ settings, onChange, onRun, onPause, onResume, onCancel, running, paused, csvLoaded, rowCount, csvRows }) {
   const [expanded, setExpanded] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [profileInfo, setProfileInfo] = useState(null); // { profile, filename }
+  const [profileError, setProfileError] = useState(null);
+  const profileInputRef = useRef(null);
 
   const update = (key, val) => onChange({ ...settings, [key]: val });
 
@@ -393,6 +397,76 @@ export default function ExecutionControls({ settings, onChange, onRun, onPause, 
               >
                 Use Multi-Agent
               </button>
+            </div>
+          )}
+
+          {/* Tuning Profile */}
+          {showAdvanced && (
+            <div className="bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-semibold text-indigo-800">Tuning Profile</span>
+                {profileInfo && (
+                  <button
+                    onClick={() => {
+                      onChange({ ...settings, tuningProfile: null });
+                      setProfileInfo(null);
+                    }}
+                    className="text-[10px] text-indigo-500 hover:text-indigo-700"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+              {profileInfo ? (
+                <div className="text-[10px] text-indigo-700 space-y-0.5">
+                  <div className="font-medium">Loaded: {profileInfo.filename}</div>
+                  <div>Optimal concurrency: {profileInfo.profile.learned.optimalConcurrency} | Baseline: {profileInfo.profile.learned.baselineResponseMs}ms</div>
+                  <div>Warning: {profileInfo.profile.learned.warningThresholdMs}ms | Critical: {profileInfo.profile.learned.criticalThresholdMs}ms</div>
+                  {profileInfo.profile.refinementCount > 0 && (
+                    <div>Refined {profileInfo.profile.refinementCount}x ({profileInfo.profile.sampleSize} total samples)</div>
+                  )}
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => profileInputRef.current?.click()}
+                    className="text-[10px] bg-indigo-100 hover:bg-indigo-200 text-indigo-700 font-medium px-2.5 py-1 rounded transition-colors"
+                  >
+                    Load Profile
+                  </button>
+                  <input
+                    ref={profileInputRef}
+                    type="file"
+                    accept=".json"
+                    className="hidden"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      e.target.value = '';
+                      try {
+                        const profile = await readProfileFile(file);
+                        const validation = validateProfile(profile);
+                        if (!validation.valid) throw new Error(validation.error);
+                        onChange({
+                          ...settings,
+                          tuningProfile: profile,
+                          autoTune: true,
+                          autoTuneTarget: profile.learned.baselineResponseMs || settings.autoTuneTarget,
+                        });
+                        setProfileInfo({ profile, filename: file.name });
+                        setProfileError(null);
+                      } catch (err) {
+                        setProfileError(err.message);
+                        setTimeout(() => setProfileError(null), 4000);
+                      }
+                    }}
+                  />
+                  <span className="text-[10px] text-indigo-500">Load a saved profile to auto-configure execution settings</span>
+                </div>
+              )}
+              {profileError && (
+                <div className="text-[10px] text-red-600 bg-red-50 rounded px-2 py-1">{profileError}</div>
+              )}
             </div>
           )}
 

@@ -1,14 +1,17 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import ParametersSidebar from '../components/ParametersSidebar.jsx';
 import CsvDropzone from '../components/CsvDropzone.jsx';
 import ExecutionControls from '../components/ExecutionControls.jsx';
 import ExecutionProgress from '../components/ExecutionProgress.jsx';
 import MultiAgentProgress from '../components/MultiAgentProgress.jsx';
 import { createBatchExecutor } from '../services/batchExecutor.js';
-import { createBatchOrchestrator } from '../services/batchOrchestrator.js';
+import { createBatchOrchestrator, detectResumeOpportunity } from '../services/batchOrchestrator.js';
 import { deduplicateRows, expandDedupedResults } from '../services/rateDeduplicator.js';
 
-export default function InputScreen({ credentials, onBatchStart, onResultRow, onBatchEnd, onLoadRun }) {
+export default function InputScreen({
+  credentials, onBatchStart, onResultRow, onBatchEnd, onLoadRun,
+  orchestratorRef, executorRef, retryData, onMergeResults, onRetryComplete, existingResults,
+}) {
   const [params, setParams] = useState({
     contRef: credentials.contRef || '',
     contractStatus: credentials.contractStatus || 'BeingEntered',
@@ -42,27 +45,46 @@ export default function InputScreen({ credentials, onBatchStart, onResultRow, on
   const [progress, setProgress] = useState(null);
   const [multiProgress, setMultiProgress] = useState(null);
   const [dedupInfo, setDedupInfo] = useState(null);
+  const [resumeInfo, setResumeInfo] = useState(null); // resume-from-partial dialog
   const loadInputRef = useRef(null);
-  const executorRef = useRef(null);
-  const orchestratorRef = useRef(null);
   const dedupGroupsRef = useRef(null);
   const originalCsvRef = useRef(null);
+  const retryResultsRef = useRef([]); // accumulate retry results before merge
 
-  const handleDataLoaded = useCallback((rows) => setCsvRows(rows), []);
-  const handleClear = useCallback(() => setCsvRows(null), []);
+  const handleDataLoaded = useCallback((rows) => {
+    setCsvRows(rows);
+    // Check for resume opportunity if there are loaded results
+    if (existingResults && existingResults.length > 0 && rows && rows.length > 0) {
+      const opportunity = detectResumeOpportunity(existingResults, rows);
+      if (opportunity) {
+        setResumeInfo(opportunity);
+      }
+    }
+  }, [existingResults]);
+  const handleClear = useCallback(() => { setCsvRows(null); setResumeInfo(null); }, []);
 
   const isMultiMode = execSettings.executionMode === 'multi';
 
-  const handleRunBatch = () => {
-    if (!csvRows || csvRows.length === 0) return;
+  // If retryData is set, pre-load the retry rows as CSV and restore params
+  useEffect(() => {
+    if (retryData) {
+      setCsvRows(retryData.retryRows);
+      if (retryData.batchParams) {
+        setParams(prev => ({ ...prev, ...retryData.batchParams }));
+      }
+    }
+  }, [retryData]);
+
+  const runBatchWithRows = (rowsToRun, isRetry = false) => {
+    if (!rowsToRun || rowsToRun.length === 0) return;
 
     // ── Deduplication ──
     const dedupPrecision = execSettings.dedup || 'off';
-    const { uniqueRows, groups, stats: dedupStats } = deduplicateRows(csvRows, dedupPrecision);
-    const useDedup = dedupPrecision !== 'off' && uniqueRows.length < csvRows.length;
-    const rowsToRate = useDedup ? uniqueRows : csvRows;
+    const { uniqueRows, groups, stats: dedupStats } = deduplicateRows(rowsToRun, dedupPrecision);
+    const useDedup = dedupPrecision !== 'off' && uniqueRows.length < rowsToRun.length;
+    const rowsToRate = useDedup ? uniqueRows : rowsToRun;
     dedupGroupsRef.current = useDedup ? groups : null;
-    originalCsvRef.current = csvRows;
+    originalCsvRef.current = rowsToRun;
     setDedupInfo(useDedup ? dedupStats : null);
 
     const batchId = crypto.randomUUID();
@@ -79,20 +101,30 @@ export default function InputScreen({ credentials, onBatchStart, onResultRow, on
       carrierTPNum: params.carrierTPNum,
       executionMode: isMultiMode ? 'multi' : 'single',
       dedup: useDedup ? dedupStats : null,
+      isRetry,
     };
 
-    // Report total original rows for progress display
-    onBatchStart(params, csvRows.length, batchMeta);
+    if (isRetry) {
+      // For retry: don't reset results in App, just track locally
+      retryResultsRef.current = [];
+    }
+
+    // Report total original rows for progress display — pass csvRows for storage
+    onBatchStart(params, isRetry ? (retryData?.originalTotalRows || rowsToRun.length) : rowsToRun.length, batchMeta, isRetry ? null : rowsToRun);
     setRunning(true);
     setPaused(false);
     setMultiProgress(null);
 
-    // Result handler: expand deduped results back to all original rows
+    // Result handler
     const handleResult = (result) => {
       if (useDedup && result._dedup) {
         const expanded = expandDedupedResults([result], originalCsvRef.current);
-        for (const r of expanded) onResultRow(r);
+        for (const r of expanded) {
+          if (isRetry) retryResultsRef.current.push(r);
+          onResultRow(r);
+        }
       } else {
+        if (isRetry) retryResultsRef.current.push(result);
         onResultRow(result);
       }
     };
@@ -100,16 +132,21 @@ export default function InputScreen({ credentials, onBatchStart, onResultRow, on
     const handleBatchComplete = (summary) => {
       setRunning(false);
       setPaused(false);
-      if (onBatchEnd) {
-        onBatchEnd({
-          batchEndTime: new Date().toISOString(),
-          executionSummary: { ...summary, dedup: useDedup ? dedupStats : null },
-        });
+      if (isRetry && onMergeResults) {
+        onMergeResults(retryResultsRef.current);
+        retryResultsRef.current = [];
+        if (onRetryComplete) onRetryComplete();
+      } else {
+        if (onBatchEnd) {
+          onBatchEnd({
+            batchEndTime: new Date().toISOString(),
+            executionSummary: { ...summary, dedup: useDedup ? dedupStats : null },
+          });
+        }
       }
     };
 
     if (isMultiMode) {
-      // ── Multi-Agent Mode ──
       const orchestrator = createBatchOrchestrator({
         chunkSize: execSettings.chunkSize || 400,
         maxAgents: execSettings.maxAgents || 5,
@@ -125,13 +162,8 @@ export default function InputScreen({ credentials, onBatchStart, onResultRow, on
         onAgentProgress: () => {},
         onProgress: (overall) => {
           setMultiProgress(overall);
-          if (overall.state === 'PAUSED') {
-            setPaused(true);
-            setRunning(false);
-          } else if (overall.state === 'RUNNING') {
-            setPaused(false);
-            setRunning(true);
-          }
+          if (overall.state === 'PAUSED') { setPaused(true); setRunning(false); }
+          else if (overall.state === 'RUNNING') { setPaused(false); setRunning(true); }
         },
         onAgentComplete: () => {},
         onComplete: handleBatchComplete,
@@ -139,7 +171,6 @@ export default function InputScreen({ credentials, onBatchStart, onResultRow, on
       orchestratorRef.current = orchestrator;
       orchestrator.start(rowsToRate, params, credentials);
     } else {
-      // ── Single Agent Mode ──
       const executor = createBatchExecutor({
         concurrency: execSettings.concurrency,
         delayMs: execSettings.delayMs,
@@ -152,13 +183,8 @@ export default function InputScreen({ credentials, onBatchStart, onResultRow, on
         onResult: handleResult,
         onProgress: (snap) => {
           setProgress(snap);
-          if (snap.state === 'PAUSED' || snap.state === 'AUTO_PAUSED') {
-            setPaused(true);
-            setRunning(false);
-          } else if (snap.state === 'RUNNING') {
-            setPaused(false);
-            setRunning(true);
-          }
+          if (snap.state === 'PAUSED' || snap.state === 'AUTO_PAUSED') { setPaused(true); setRunning(false); }
+          else if (snap.state === 'RUNNING') { setPaused(false); setRunning(true); }
         },
         onComplete: handleBatchComplete,
       });
@@ -167,20 +193,34 @@ export default function InputScreen({ credentials, onBatchStart, onResultRow, on
     }
   };
 
-  const handlePause = () => {
-    if (isMultiMode && orchestratorRef.current) {
-      orchestratorRef.current.pause();
+  const handleRunBatch = () => {
+    if (retryData) {
+      runBatchWithRows(retryData.retryRows, true);
     } else {
-      executorRef.current?.pause();
+      runBatchWithRows(csvRows, false);
     }
   };
 
+  const handleResumePartial = () => {
+    if (!resumeInfo) return;
+    const missingRows = resumeInfo.getMissingCsvRows();
+    setResumeInfo(null);
+    runBatchWithRows(missingRows, true);
+  };
+
+  const handleRerunAll = () => {
+    setResumeInfo(null);
+    runBatchWithRows(csvRows, false);
+  };
+
+  const handlePause = () => {
+    if (isMultiMode && orchestratorRef.current) orchestratorRef.current.pause();
+    else executorRef.current?.pause();
+  };
+
   const handleResume = () => {
-    if (isMultiMode && orchestratorRef.current) {
-      orchestratorRef.current.resume();
-    } else {
-      executorRef.current?.resume();
-    }
+    if (isMultiMode && orchestratorRef.current) orchestratorRef.current.resume();
+    else executorRef.current?.resume();
   };
 
   const handleResumeSlow = () => {
@@ -188,13 +228,14 @@ export default function InputScreen({ credentials, onBatchStart, onResultRow, on
   };
 
   const handleCancel = () => {
-    if (isMultiMode && orchestratorRef.current) {
-      orchestratorRef.current.cancel();
-    } else {
-      executorRef.current?.cancel();
-    }
+    if (isMultiMode && orchestratorRef.current) orchestratorRef.current.cancel();
+    else executorRef.current?.cancel();
     setRunning(false);
     setPaused(false);
+  };
+
+  const handleCancelRetry = () => {
+    if (onRetryComplete) onRetryComplete();
   };
 
   const handleLoadFile = (e) => {
@@ -204,6 +245,8 @@ export default function InputScreen({ credentials, onBatchStart, onResultRow, on
   };
 
   const isExecuting = running || paused;
+  const isRetryMode = !!retryData;
+  const retryCount = retryData?.retryRows?.length || 0;
 
   return (
     <div className="flex-1 flex overflow-hidden">
@@ -211,33 +254,102 @@ export default function InputScreen({ credentials, onBatchStart, onResultRow, on
 
       <main className="flex-1 flex flex-col p-6 overflow-auto">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-bold text-gray-800">Batch Rate Input</h2>
+          <h2 className="text-lg font-bold text-gray-800">
+            {isRetryMode ? 'Retry Failed Rows' : 'Batch Rate Input'}
+          </h2>
           <div className="flex items-center gap-2">
-            <button
-              onClick={() => loadInputRef.current?.click()}
-              disabled={isExecuting}
-              className="text-xs bg-gray-200 hover:bg-gray-300 disabled:opacity-50 text-gray-700 font-medium px-3 py-2 rounded-md transition-colors"
-            >
-              Load Previous Run
-            </button>
-            <input ref={loadInputRef} type="file" accept=".json" onChange={handleLoadFile} className="hidden" />
+            {!isRetryMode && (
+              <>
+                <button
+                  onClick={() => loadInputRef.current?.click()}
+                  disabled={isExecuting}
+                  className="text-xs bg-gray-200 hover:bg-gray-300 disabled:opacity-50 text-gray-700 font-medium px-3 py-2 rounded-md transition-colors"
+                >
+                  Load Previous Run
+                </button>
+                <input ref={loadInputRef} type="file" accept=".json" onChange={handleLoadFile} className="hidden" />
+              </>
+            )}
           </div>
         </div>
 
+        {/* Retry mode banner */}
+        {isRetryMode && !isExecuting && (
+          <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 mb-4">
+            <p className="text-sm font-semibold text-amber-800 mb-1">
+              Retry Run: {retryCount} rows from batch {retryData.batchMeta?.batchId?.slice(0, 8) || 'unknown'}
+            </p>
+            <p className="text-xs text-amber-700 mb-3">
+              {retryData.existingResults?.filter(r => !r.success).length || 0} previously failed + {retryData.originalTotalRows - (retryData.existingResults?.length || 0)} not attempted
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={handleRunBatch}
+                className="text-xs bg-amber-500 hover:bg-amber-600 text-white px-4 py-1.5 rounded font-semibold transition-colors"
+              >
+                Run Retry
+              </button>
+              <button
+                onClick={handleCancelRetry}
+                className="text-xs bg-gray-200 hover:bg-gray-300 text-gray-700 px-3 py-1.5 rounded font-medium transition-colors"
+              >
+                Cancel — back to results
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Resume from partial dialog */}
+        {resumeInfo && !isExecuting && !isRetryMode && (
+          <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3 mb-4">
+            <p className="text-sm font-semibold text-blue-800 mb-1">Resume Previous Run?</p>
+            <p className="text-xs text-blue-700 mb-2">
+              This CSV matches a previous run ({resumeInfo.matchPct}% overlap):
+            </p>
+            <ul className="text-xs text-blue-700 mb-3 space-y-0.5 list-disc list-inside">
+              <li>{resumeInfo.completedRows} rows already rated successfully</li>
+              <li>{resumeInfo.failedRows} rows failed</li>
+              <li>{resumeInfo.missingRows} rows not attempted</li>
+            </ul>
+            <div className="flex gap-2">
+              <button
+                onClick={handleResumePartial}
+                className="text-xs bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded font-semibold transition-colors"
+              >
+                Rate {resumeInfo.missingRows + resumeInfo.failedRows} Missing/Failed Only
+              </button>
+              <button
+                onClick={handleRerunAll}
+                className="text-xs bg-gray-200 hover:bg-gray-300 text-gray-700 px-3 py-1.5 rounded font-medium transition-colors"
+              >
+                Re-rate Everything
+              </button>
+              <button
+                onClick={() => setResumeInfo(null)}
+                className="text-xs text-gray-500 hover:text-gray-700 px-2 py-1.5"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Execution controls */}
-        <ExecutionControls
-          settings={execSettings}
-          onChange={setExecSettings}
-          onRun={handleRunBatch}
-          onPause={handlePause}
-          onResume={handleResume}
-          onCancel={handleCancel}
-          running={running}
-          paused={paused}
-          csvLoaded={csvRows && csvRows.length > 0}
-          rowCount={csvRows?.length || 0}
-          csvRows={csvRows}
-        />
+        {!isRetryMode && (
+          <ExecutionControls
+            settings={execSettings}
+            onChange={setExecSettings}
+            onRun={handleRunBatch}
+            onPause={handlePause}
+            onResume={handleResume}
+            onCancel={handleCancel}
+            running={running}
+            paused={paused}
+            csvLoaded={csvRows && csvRows.length > 0}
+            rowCount={csvRows?.length || 0}
+            csvRows={csvRows}
+          />
+        )}
 
         {/* Dedup info during execution */}
         {isExecuting && dedupInfo && (
@@ -268,8 +380,8 @@ export default function InputScreen({ credentials, onBatchStart, onResultRow, on
           />
         )}
 
-        {/* CSV dropzone (hidden during execution to save space) */}
-        {!isExecuting && (
+        {/* CSV dropzone (hidden during execution and retry mode) */}
+        {!isExecuting && !isRetryMode && (
           <CsvDropzone onDataLoaded={handleDataLoaded} onClear={handleClear} />
         )}
       </main>

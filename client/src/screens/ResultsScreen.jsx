@@ -560,7 +560,7 @@ export default function ResultsScreen({
       {viewMode === 'analytics' ? (
         <AnalyticsDashboard flatRows={flatRows} activeMarkups={activeMarkups} onMarkupsChange={setActiveMarkups} />
       ) : viewMode === 'scenarios' ? (
-        <ScenarioBuilder flatRows={flatRows} />
+        <ScenarioBuilder flatRows={flatRows} activeMarkups={activeMarkups} />
       ) : viewMode === 'optimize' ? (
         <OptimizationDashboard flatRows={flatRows} />
       ) : viewMode === 'performance' ? (

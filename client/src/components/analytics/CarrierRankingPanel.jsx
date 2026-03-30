@@ -1,9 +1,25 @@
-import React from 'react';
+import React, { useMemo } from 'react';
+import { applyMargin } from '../../services/ratingClient.js';
 
 const fmtMoney = (v) => `$${Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const fmtPct = (v) => `${Number(v).toFixed(1)}%`;
 
-export default function CarrierRankingPanel({ data }) {
+export default function CarrierRankingPanel({ data, view = 'internal', markups }) {
+  const isCustomer = view === 'customer';
+
+  // Compute avg customer price per carrier when markups are available
+  const customerPrices = useMemo(() => {
+    if (!isCustomer || !markups || !data) return {};
+    const prices = {};
+    for (const row of data) {
+      if (row.avgTotalCharge != null) {
+        const m = applyMargin(row.avgTotalCharge, row.scac, markups);
+        prices[row.scac] = m.customerPrice;
+      }
+    }
+    return prices;
+  }, [data, isCustomer, markups]);
+
   if (!data || data.length === 0) {
     return <div className="text-sm text-gray-400 p-4">No carrier data available</div>;
   }
@@ -18,11 +34,12 @@ export default function CarrierRankingPanel({ data }) {
             <th className="px-3 py-2 text-left font-semibold">Carrier Name</th>
             <th className="px-3 py-2 text-right font-semibold"># Low Cost Wins</th>
             <th className="px-3 py-2 text-right font-semibold">Win Rate %</th>
-            <th className="px-3 py-2 text-right font-semibold">Avg Total Charge</th>
-            <th className="px-3 py-2 text-right font-semibold">Avg Tariff Disc %</th>
+            {!isCustomer && <th className="px-3 py-2 text-right font-semibold">Avg Total Charge</th>}
+            {isCustomer && <th className="px-3 py-2 text-right font-semibold">Avg Customer Price</th>}
+            {!isCustomer && <th className="px-3 py-2 text-right font-semibold">Avg Tariff Disc %</th>}
             <th className="px-3 py-2 text-right font-semibold">Total Rated</th>
-            <th className="px-3 py-2 text-right font-semibold"># Min Rated</th>
-            <th className="px-3 py-2 text-right font-semibold"># Disc Rated</th>
+            {!isCustomer && <th className="px-3 py-2 text-right font-semibold"># Min Rated</th>}
+            {!isCustomer && <th className="px-3 py-2 text-right font-semibold"># Disc Rated</th>}
           </tr>
         </thead>
         <tbody>
@@ -39,13 +56,20 @@ export default function CarrierRankingPanel({ data }) {
                 <td className="px-3 py-2">{row.carrierName}</td>
                 <td className="px-3 py-2 text-right font-semibold">{row.lowCostWins}</td>
                 <td className="px-3 py-2 text-right">{fmtPct(row.winRate)}</td>
-                <td className="px-3 py-2 text-right">{fmtMoney(row.avgTotalCharge)}</td>
-                <td className="px-3 py-2 text-right">{fmtPct(row.avgTariffDiscPct)}</td>
+                {!isCustomer && <td className="px-3 py-2 text-right">{fmtMoney(row.avgTotalCharge)}</td>}
+                {isCustomer && (
+                  <td className="px-3 py-2 text-right">
+                    {customerPrices[row.scac] != null ? fmtMoney(customerPrices[row.scac]) : '-'}
+                  </td>
+                )}
+                {!isCustomer && <td className="px-3 py-2 text-right">{fmtPct(row.avgTariffDiscPct)}</td>}
                 <td className="px-3 py-2 text-right">{row.totalShipmentsRated}</td>
-                <td className={`px-3 py-2 text-right ${row.minRatedCount > 0 ? 'text-amber-600 font-medium' : ''}`}>
-                  {row.minRatedCount}
-                </td>
-                <td className="px-3 py-2 text-right">{row.discRatedCount}</td>
+                {!isCustomer && (
+                  <td className={`px-3 py-2 text-right ${row.minRatedCount > 0 ? 'text-amber-600 font-medium' : ''}`}>
+                    {row.minRatedCount}
+                  </td>
+                )}
+                {!isCustomer && <td className="px-3 py-2 text-right">{row.discRatedCount}</td>}
               </tr>
             );
           })}

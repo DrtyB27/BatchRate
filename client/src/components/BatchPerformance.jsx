@@ -23,6 +23,21 @@ export default function BatchPerformance({ results, batchMeta, totalRows, onRetr
   const missingCount = (totalRows || results.length) - results.length;
   const retryableCount = missingCount + failedCount;
 
+  // Debug: log recovery state on every render
+  if (typeof console !== 'undefined') {
+    console.log('[BRAT Performance] Recovery state:', {
+      resultsCount: results.length,
+      totalRows,
+      isComplete,
+      succeededCount,
+      failedCount,
+      missingCount,
+      retryableCount,
+      hasRetryInPlace: !!onRetryInPlace,
+      hasRetryProgress: !!retryProgress,
+    });
+  }
+
   const summary = useMemo(() => computePerformanceSummary(results, batchMeta), [results, batchMeta]);
   const rollingAvg = useMemo(() => computeRollingAverage(results, 10), [results]);
   const degradation = useMemo(() => detectDegradation(results), [results]);
@@ -93,35 +108,52 @@ export default function BatchPerformance({ results, batchMeta, totalRows, onRetr
       {/* Section 1: Executive Summary */}
       <PerformanceSummary summary={summary} batchMeta={batchMeta} />
 
-      {/* ── BATCH RECOVERY ── */}
-      {!isComplete && retryableCount > 0 && (
-        <div className="bg-amber-50 border-2 border-amber-300 rounded-lg p-4">
-          <div className="flex items-center gap-4 flex-wrap">
-            <div className="flex-1">
+      {/* ── BATCH RECOVERY — always visible when there are issues ── */}
+      {(retryableCount > 0 || !isComplete) && (
+        <div className="bg-amber-50 border-2 border-amber-300 rounded-lg p-4 space-y-3">
+          {/* Status line */}
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="flex-1 min-w-0">
               <h4 className="text-sm font-bold text-amber-900">
-                Batch Incomplete — {results.length}/{totalRows} rows
+                {isComplete
+                  ? `Batch Complete — ${failedCount} rows need attention`
+                  : `Batch Incomplete — ${results.length} of ${totalRows || '?'} rows`
+                }
               </h4>
               <p className="text-xs text-amber-700 mt-1">
-                {missingCount > 0 && `${missingCount} rows never attempted. `}
-                {failedCount > 0 && `${failedCount} rows failed. `}
-                {errorAnalysis.summary.length > 0 && (
-                  `Top error: ${errorAnalysis.summary[0].category} (${errorAnalysis.summary[0].count} rows)`
-                )}
+                {succeededCount} succeeded
+                {failedCount > 0 && `, ${failedCount} failed`}
+                {missingCount > 0 && `, ${missingCount} not attempted`}
+                {errorAnalysis.summary.length > 0 &&
+                  ` — Top error: ${errorAnalysis.summary[0].category} (${errorAnalysis.summary[0].count})`
+                }
               </p>
             </div>
 
-            {onRetryInPlace && !retryProgress && (
+            {/* THE RETRY BUTTON — big, blue, unmissable */}
+            {onRetryInPlace && !retryProgress && retryableCount > 0 && (
               <button
-                onClick={onRetryInPlace}
-                className="bg-[#39b6e6] hover:bg-[#2d9bc4] text-white px-6 py-3 rounded-lg font-bold text-sm shadow-md transition-colors whitespace-nowrap"
+                onClick={() => {
+                  console.log('[BRAT] Retry clicked. retryableCount:', retryableCount, 'results:', results.length, 'totalRows:', totalRows);
+                  onRetryInPlace();
+                }}
+                className="bg-[#39b6e6] hover:bg-[#2d9bc4] text-white px-6 py-3 rounded-lg font-bold text-sm shadow-lg transition-colors whitespace-nowrap animate-pulse hover:animate-none"
               >
-                Retry {retryableCount} Remaining Rows
+                ⟳ Retry {retryableCount} Rows
               </button>
+            )}
+
+            {/* Fallback message when retry isn't available */}
+            {!onRetryInPlace && retryableCount > 0 && (
+              <span className="text-xs text-amber-600 italic">
+                Use "Save + Retry File" to export failed rows for a new batch
+              </span>
             )}
           </div>
 
+          {/* Retry progress bar */}
           {retryProgress && (
-            <div className="mt-3">
+            <div>
               <div className="flex items-center gap-3">
                 <div className="flex-1 h-3 bg-amber-100 rounded-full overflow-hidden">
                   <div
@@ -134,56 +166,25 @@ export default function BatchPerformance({ results, batchMeta, totalRows, onRetr
                 </span>
               </div>
               <div className="flex gap-4 mt-1 text-xs text-amber-700">
-                <span>{retryProgress.succeeded || 0} succeeded</span>
-                {retryProgress.failed > 0 && (
-                  <span className="text-red-600">{retryProgress.failed} still failing</span>
+                <span>✓ {retryProgress.succeeded || 0} succeeded</span>
+                {(retryProgress.failed || 0) > 0 && (
+                  <span className="text-red-600">✗ {retryProgress.failed} still failing</span>
                 )}
               </div>
             </div>
           )}
-        </div>
-      )}
 
-      {isComplete && failedCount > 0 && (
-        <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
-          <div className="flex items-center gap-4 flex-wrap">
-            <div className="flex-1">
-              <h4 className="text-sm font-bold text-amber-900">
-                Batch Complete — {failedCount} rows failed
-              </h4>
-              <p className="text-xs text-amber-700 mt-1">
-                {succeededCount} succeeded, {failedCount} returned no rates or errors.
-                {errorAnalysis.summary.length > 0 && (
-                  ` Top error: ${errorAnalysis.summary[0].category} (${errorAnalysis.summary[0].count} rows)`
-                )}
-              </p>
-            </div>
-
-            {onRetryInPlace && !retryProgress && (
-              <button
-                onClick={onRetryInPlace}
-                className="bg-amber-500 hover:bg-amber-600 text-white px-5 py-2.5 rounded-lg font-bold text-sm transition-colors whitespace-nowrap"
-              >
-                Retry {failedCount} Failed Rows
-              </button>
+          {/* Quick stats row */}
+          <div className="flex gap-4 text-xs text-amber-700 border-t border-amber-200 pt-2">
+            <span>Success rate: <strong>{summary.successRate?.toFixed(1) || 0}%</strong></span>
+            <span>Avg response: <strong>{summary.avgTime || 0}ms</strong></span>
+            <span>P95: <strong>{summary.p95 || 0}ms</strong></span>
+            {summary.avgTime > 5000 && (
+              <span className="text-red-600 font-medium">
+                ⚠ High avg response — server may be overloaded
+              </span>
             )}
           </div>
-
-          {retryProgress && (
-            <div className="mt-3">
-              <div className="flex items-center gap-3">
-                <div className="flex-1 h-3 bg-amber-100 rounded-full overflow-hidden">
-                  <div
-                    className="bg-amber-500 h-full rounded-full transition-all duration-300"
-                    style={{ width: `${retryProgress.total > 0 ? (retryProgress.completed / retryProgress.total) * 100 : 0}%` }}
-                  />
-                </div>
-                <span className="text-xs text-amber-800 font-bold w-36 text-right">
-                  Retrying: {retryProgress.completed}/{retryProgress.total}
-                </span>
-              </div>
-            </div>
-          )}
         </div>
       )}
 

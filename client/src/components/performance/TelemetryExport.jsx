@@ -1,5 +1,11 @@
 import React, { useState, useCallback } from 'react';
-import { buildTelemetryCsv, buildTelemetryJson } from '../../services/performanceEngine.js';
+import {
+  buildTelemetryCsv,
+  buildTelemetryJson,
+  buildPerformanceReport,
+  formatPerformanceReportText,
+  formatInternalSummary,
+} from '../../services/performanceEngine.js';
 import { buildTuningProfile, downloadProfile, refineProfile, readProfileFile } from '../../services/tuningProfile.js';
 
 export default function TelemetryExport({ results, batchMeta, tunerState }) {
@@ -39,6 +45,48 @@ export default function TelemetryExport({ results, batchMeta, tunerState }) {
         `BRAT_Telemetry_${batchSlice}_${ts}.json`,
         'application/json'
       );
+    } finally {
+      setExporting(false);
+    }
+  }, [results, batchMeta, downloadBlob]);
+
+  const handleExportReport = useCallback(() => {
+    setExporting(true);
+    try {
+      const report = buildPerformanceReport(results, batchMeta);
+      const text = formatPerformanceReportText(report);
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const batchSlice = (batchMeta?.batchId || 'unknown').slice(0, 8);
+      downloadBlob(text, `BRAT_PerfReport_${batchSlice}_${ts}.txt`, 'text/plain');
+    } finally {
+      setExporting(false);
+    }
+  }, [results, batchMeta, downloadBlob]);
+
+  const handleExportReportJson = useCallback(() => {
+    setExporting(true);
+    try {
+      const report = buildPerformanceReport(results, batchMeta);
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const batchSlice = (batchMeta?.batchId || 'unknown').slice(0, 8);
+      downloadBlob(
+        JSON.stringify(report, null, 2),
+        `BRAT_PerfReport_${batchSlice}_${ts}.json`,
+        'application/json'
+      );
+    } finally {
+      setExporting(false);
+    }
+  }, [results, batchMeta, downloadBlob]);
+
+  const handleExportInternalSummary = useCallback(() => {
+    setExporting(true);
+    try {
+      const report = buildPerformanceReport(results, batchMeta);
+      const text = formatInternalSummary(report);
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const batchSlice = (batchMeta?.batchId || 'unknown').slice(0, 8);
+      downloadBlob(text, `DLX_BatchRating_Summary_${batchSlice}_${ts}.txt`, 'text/plain');
     } finally {
       setExporting(false);
     }
@@ -86,10 +134,55 @@ export default function TelemetryExport({ results, batchMeta, tunerState }) {
     <div className="bg-white border border-gray-200 rounded-lg p-4 space-y-3">
       <h4 className="text-sm font-semibold text-[#002144]">Telemetry Export & Tuning Profiles</h4>
 
-      {/* Telemetry export */}
+      {/* Shareable Summary */}
       <div className="space-y-2">
-        <p className="text-[10px] text-gray-500">
-          Export per-request performance telemetry ({results.length} rows{hasTelemetry ? ', full telemetry available' : ', basic fields only'})
+        <p className="text-[10px] text-gray-500 font-medium uppercase tracking-wider">Shareable Summary</p>
+        <p className="text-[10px] text-gray-400">
+          Plain-language batch summary safe to share with DLX support or 3G.
+          Does not expose tool internals or proprietary configuration.
+        </p>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleExportInternalSummary}
+            disabled={exporting || results.length === 0}
+            className="text-xs bg-[#39b6e6] hover:bg-[#2d9bc4] disabled:opacity-50 text-white font-medium px-3 py-1.5 rounded transition-colors"
+          >
+            Export Summary for Support / 3G
+          </button>
+        </div>
+      </div>
+
+      {/* Full Performance Reports */}
+      <div className="border-t border-gray-100 pt-3 space-y-2">
+        <p className="text-[10px] text-gray-500 font-medium uppercase tracking-wider">Full Performance Reports</p>
+        <p className="text-[10px] text-gray-400">
+          Detailed diagnostic report with server behavior analysis,
+          degradation detection, and recommended settings for future runs.
+        </p>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleExportReport}
+            disabled={exporting || results.length === 0}
+            className="text-xs bg-[#002144] hover:bg-[#003366] disabled:opacity-50 text-white font-medium px-3 py-1.5 rounded transition-colors"
+          >
+            Export Performance Report (.txt)
+          </button>
+          <button
+            onClick={handleExportReportJson}
+            disabled={exporting || results.length === 0}
+            className="text-xs bg-[#002144] hover:bg-[#003366] disabled:opacity-50 text-white font-medium px-3 py-1.5 rounded transition-colors"
+          >
+            Export Report JSON
+          </button>
+        </div>
+      </div>
+
+      {/* Raw Telemetry Data */}
+      <div className="border-t border-gray-100 pt-3 space-y-2">
+        <p className="text-[10px] text-gray-500 font-medium uppercase tracking-wider">Raw Telemetry Data</p>
+        <p className="text-[10px] text-gray-400">
+          Per-API-call telemetry ({results.length} rows{hasTelemetry ? ', full telemetry' : ', basic fields'}).
+          For pivot table analysis and ML training.
         </p>
         <div className="flex items-center gap-2">
           <button

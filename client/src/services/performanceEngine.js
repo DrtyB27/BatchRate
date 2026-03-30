@@ -735,3 +735,513 @@ export function generateRecommendations(summary, degradation, correlations, erro
 
   return recs;
 }
+
+// ============================================================
+// Structured Performance Report
+// ============================================================
+export function buildPerformanceReport(results, batchMeta) {
+  const summary = computePerformanceSummary(results, batchMeta);
+  const degradation = detectDegradation(results);
+  const inflection = detectInflectionPoint(results);
+  const errorAnalysis = computeErrorAnalysis(results);
+  const errorPatterns = detectErrorPatterns(results);
+  const correlations = computeCorrelations(results);
+  const recommendations = generateRecommendations(
+    summary, degradation, correlations, errorAnalysis, batchMeta
+  );
+
+  // ── Per-agent analysis ──
+  const agentGroups = {};
+  for (const r of results) {
+    const aid = r.agentId || 'single';
+    if (!agentGroups[aid]) agentGroups[aid] = [];
+    agentGroups[aid].push(r);
+  }
+  const agentReports = Object.entries(agentGroups).map(([agentId, rows]) => {
+    const agentSummary = computePerformanceSummary(rows, batchMeta);
+    const agentInflection = detectInflectionPoint(rows);
+    const agentErrors = computeErrorAnalysis(rows);
+    const times = rows.map(r => r.elapsedMs || 0).sort((a, b) => a - b);
+
+    const telemetryRows = rows.filter(r => r.telemetry);
+    const concurrencyBuckets = {};
+    for (const r of telemetryRows) {
+      const conc = r.telemetry?.currentConcurrency || '?';
+      if (!concurrencyBuckets[conc]) concurrencyBuckets[conc] = [];
+      concurrencyBuckets[conc].push(r.elapsedMs || 0);
+    }
+    const concurrencyAnalysis = Object.entries(concurrencyBuckets).map(([conc, t]) => ({
+      concurrency: parseInt(conc) || 0,
+      callCount: t.length,
+      avgMs: Math.round(t.reduce((a, b) => a + b, 0) / t.length),
+      p95Ms: t.length >= 5
+        ? [...t].sort((a, b) => a - b)[Math.floor(t.length * 0.95)]
+        : Math.max(...t),
+    })).sort((a, b) => a.concurrency - b.concurrency);
+
+    const maxTime = Math.max(...times, 1);
+    const bucketSize = Math.ceil(maxTime / 10);
+    const distribution = Array.from({ length: 10 }, (_, i) => ({
+      rangeMs: `${i * bucketSize}-${(i + 1) * bucketSize}`,
+      count: times.filter(t => t >= i * bucketSize && t < (i + 1) * bucketSize).length,
+    }));
+
+    return {
+      agentId,
+      rows: rows.length,
+      succeeded: agentSummary.successCount,
+      failed: agentSummary.failCount,
+      successRate: agentSummary.successRate,
+      avgMs: agentSummary.avgTime,
+      p50Ms: agentSummary.p50,
+      p95Ms: agentSummary.p95,
+      p99Ms: agentSummary.p99,
+      throughput: agentSummary.throughput,
+      inflection: agentInflection.detected ? {
+        detectedAtRow: agentInflection.points[0]?.rowIndex,
+        preAvgMs: agentInflection.points[0]?.preAvgMs,
+        postAvgMs: agentInflection.points[0]?.postAvgMs,
+        ratio: agentInflection.points[0]?.ratio,
+        description: agentInflection.points[0]?.description,
+      } : null,
+      errors: agentErrors.summary.map(e => ({
+        category: e.category,
+        count: e.count,
+        firstRow: e.firstOccurrence,
+        lastRow: e.lastOccurrence,
+        longestStreak: e.consecutiveStreak,
+      })),
+      concurrencyAnalysis,
+      responseDistribution: distribution,
+    };
+  });
+
+  // ── Concurrency vs response time analysis (global) ──
+  const allTelemetry = results.filter(r => r.telemetry);
+  const globalConcurrencyAnalysis = {};
+  for (const r of allTelemetry) {
+    const conc = r.telemetry?.activeWorkersAtDispatch || r.telemetry?.currentConcurrency || 0;
+    if (!globalConcurrencyAnalysis[conc]) globalConcurrencyAnalysis[conc] = [];
+    globalConcurrencyAnalysis[conc].push(r.elapsedMs || 0);
+  }
+  const concurrencyImpact = Object.entries(globalConcurrencyAnalysis)
+    .map(([conc, t]) => ({
+      activeWorkers: parseInt(conc),
+      callCount: t.length,
+      avgMs: Math.round(t.reduce((a, b) => a + b, 0) / t.length),
+      p50Ms: (() => { const s = [...t].sort((a, b) => a - b); return s[Math.floor(s.length * 0.5)] || 0; })(),
+      p95Ms: (() => { const s = [...t].sort((a, b) => a - b); return s[Math.floor(s.length * 0.95)] || 0; })(),
+      errorRate: t.length > 0
+        ? Math.round(allTelemetry.filter(r2 =>
+            (r2.telemetry?.activeWorkersAtDispatch || r2.telemetry?.currentConcurrency || 0) == conc && !r2.success
+          ).length / t.length * 1000) / 10
+        : 0,
+    }))
+    .sort((a, b) => a.activeWorkers - b.activeWorkers);
+
+  // ── Time-series phases (5-minute windows) ──
+  const timestamps = results
+    .map(r => r.batchTimestamp ? new Date(r.batchTimestamp).getTime() : 0)
+    .filter(t => t > 0);
+  const minTs = timestamps.length > 0 ? Math.min(...timestamps) : 0;
+  const maxTs = timestamps.length > 0 ? Math.max(...timestamps) : 0;
+  const windowMs = 5 * 60 * 1000;
+  const phases = [];
+  if (minTs > 0 && maxTs > minTs) {
+    for (let start = minTs; start < maxTs; start += windowMs) {
+      const end = start + windowMs;
+      const windowResults = results.filter(r => {
+        const ts = r.batchTimestamp ? new Date(r.batchTimestamp).getTime() : 0;
+        return ts >= start && ts < end;
+      });
+      if (windowResults.length === 0) continue;
+      const windowTimes = windowResults.map(r => r.elapsedMs || 0);
+      const windowSucceeded = windowResults.filter(r => r.success).length;
+      phases.push({
+        windowStart: new Date(start).toISOString(),
+        windowEnd: new Date(end).toISOString(),
+        minutesIntoRun: Math.round((start - minTs) / 60000),
+        callCount: windowResults.length,
+        succeeded: windowSucceeded,
+        failed: windowResults.length - windowSucceeded,
+        avgMs: Math.round(windowTimes.reduce((a, b) => a + b, 0) / windowTimes.length),
+        p95Ms: (() => { const s = [...windowTimes].sort((a, b) => a - b); return s[Math.floor(s.length * 0.95)] || 0; })(),
+        throughput: Math.round(windowResults.length / (windowMs / 60000) * 10) / 10,
+      });
+    }
+  }
+
+  // ── 3G server behavior fingerprint ──
+  const serverFingerprint = {
+    estimatedMaxSafeConcurrency: (() => {
+      const safe = concurrencyImpact.filter(c => c.avgMs < 3000 && c.callCount >= 5);
+      return safe.length > 0 ? Math.max(...safe.map(c => c.activeWorkers)) : 2;
+    })(),
+    estimatedMaxSafeBatchSize: inflection.detected
+      ? Math.floor((inflection.points[0]?.index || results.length) * 0.8)
+      : results.length,
+    responseTimeDegradationPattern: inflection.detected
+      ? `Server degrades after ~${inflection.points[0]?.index || '?'} cumulative API calls. Response time increases ${inflection.points[0]?.ratio?.toFixed(1) || '?'}x from baseline.`
+      : 'No degradation pattern detected in this run.',
+    errorPattern: errorPatterns.length > 0
+      ? errorPatterns.map(p => p.message).join(' ')
+      : 'No significant error patterns.',
+    smcCascadeEstimate: summary.avgRatesPerRow > 0
+      ? `Each API call triggers ~${Math.round(summary.avgRatesPerRow)} SMC3 CarrierConnect lookups. At concurrency N, the server handles N*${Math.round(summary.avgRatesPerRow)} simultaneous SMC3 calls.`
+      : null,
+  };
+
+  return {
+    reportVersion: '2.0',
+    generatedAt: new Date().toISOString(),
+    reportType: 'BRAT Performance Report',
+    runSummary: {
+      batchId: batchMeta?.batchId || null,
+      serverUrl: batchMeta?.baseURLHost || 'shipdlx.3gtms.com',
+      startTime: batchMeta?.batchStartTime || null,
+      endTime: batchMeta?.batchEndTime || null,
+      executionMode: batchMeta?.executionMode || 'single',
+      totalRows: results.length,
+      targetRows: batchMeta?.totalRows || results.length,
+      succeeded: summary.successCount,
+      failed: summary.failCount,
+      successRate: summary.successRate,
+      completionRate: batchMeta?.totalRows
+        ? Math.round(results.length / batchMeta.totalRows * 1000) / 10
+        : 100,
+      avgResponseMs: summary.avgTime,
+      p50Ms: summary.p50,
+      p95Ms: summary.p95,
+      p99Ms: summary.p99,
+      totalBatchTimeMs: summary.totalBatchTimeMs,
+      throughputRowsPerMin: summary.throughput,
+      avgRatesPerRow: summary.avgRatesPerRow,
+    },
+    executionConfig: {
+      concurrency: batchMeta?.concurrency || null,
+      maxConcurrency: batchMeta?.executionSummary?.concurrencyUsed || null,
+      delayMs: batchMeta?.requestDelay || 0,
+      retryAttempts: batchMeta?.retryAttempts || 0,
+      adaptiveBackoff: batchMeta?.adaptiveBackoff ?? true,
+      dedup: batchMeta?.dedupMode || 'off',
+      numberOfRates: batchMeta?.numberOfRates || null,
+      contractStatus: batchMeta?.contractStatus || null,
+      contractUse: batchMeta?.contractUse || null,
+      chunkSize: batchMeta?.chunkSize || null,
+      maxAgents: batchMeta?.maxAgents || null,
+      concurrencyPerAgent: batchMeta?.concurrencyPerAgent || null,
+    },
+    serverBehavior: serverFingerprint,
+    degradationAnalysis: {
+      decileDetection: {
+        detected: degradation.detected,
+        severe: degradation.severe,
+        degradationPoint: degradation.degradationPoint,
+        maxRatio: degradation.maxRatio,
+        deciles: degradation.deciles,
+      },
+      cusumInflection: {
+        detected: inflection.detected,
+        points: inflection.points,
+        baseline: inflection.baseline,
+      },
+    },
+    concurrencyImpact,
+    timeSeriesPhases: phases,
+    agentReports,
+    errorAnalysis: {
+      totalErrors: errorAnalysis.totalErrors,
+      categories: errorAnalysis.summary.map(e => ({
+        category: e.category, count: e.count, pct: e.pct,
+        firstOccurrence: e.firstOccurrence, lastOccurrence: e.lastOccurrence,
+        longestStreak: e.consecutiveStreak, rootCause: e.rootCause, guidance: e.guidance,
+      })),
+      patterns: errorPatterns.map(p => ({ type: p.type, severity: p.severity, message: p.message })),
+    },
+    correlations: correlations.map(c => ({
+      id: c.id, title: c.title, significant: c.significant,
+      guidance: c.guidance, regression: c.regression || null,
+    })),
+    recommendations: recommendations.map(r => ({ severity: r.severity, title: r.title, message: r.message })),
+    nextRunConfig: {
+      description: "Recommended settings based on this run's performance data.",
+      concurrency: serverFingerprint.estimatedMaxSafeConcurrency,
+      delayMs: summary.avgTime > 5000 ? 200 : summary.avgTime > 2000 ? 100 : 0,
+      chunkSize: Math.min(
+        serverFingerprint.estimatedMaxSafeBatchSize,
+        Math.max(100, Math.floor(serverFingerprint.estimatedMaxSafeBatchSize * 0.8))
+      ),
+      maxAgents: Math.min(8, Math.ceil((batchMeta?.totalRows || results.length) / serverFingerprint.estimatedMaxSafeBatchSize)),
+      targetResponseMs: Math.round(summary.p50 * 1.2),
+      warningThresholdMs: Math.round(summary.p95),
+      criticalThresholdMs: Math.round(summary.p99 * 1.5),
+      autoTune: true,
+      reasoning: [
+        `Server baseline: ~${summary.p50}ms P50, ~${summary.p95}ms P95.`,
+        `Safe concurrency: ${serverFingerprint.estimatedMaxSafeConcurrency} workers (avg response stays under 3s).`,
+        inflection.detected
+          ? `Degradation detected at ~${inflection.points[0]?.index} calls. Chunk size limited to ${serverFingerprint.estimatedMaxSafeBatchSize} rows.`
+          : `No degradation detected. Batch size up to ${results.length} rows is safe at this config.`,
+        `Each call triggers ~${Math.round(summary.avgRatesPerRow)} carrier lookups => ${serverFingerprint.estimatedMaxSafeConcurrency}x${Math.round(summary.avgRatesPerRow)} = ${serverFingerprint.estimatedMaxSafeConcurrency * Math.round(summary.avgRatesPerRow)} concurrent SMC3 evaluations.`,
+        errorAnalysis.totalErrors > 0
+          ? `${errorAnalysis.totalErrors} errors detected. ${errorPatterns.length > 0 ? errorPatterns[0].message : ''}`
+          : 'No errors detected.',
+      ],
+    },
+  };
+}
+
+// ============================================================
+// Format Performance Report as Plain Text
+// ============================================================
+export function formatPerformanceReportText(report) {
+  const lines = [];
+  const ln = (s = '') => lines.push(s);
+  const hr = () => ln('='.repeat(60));
+  const fmtMs = (ms) => ms > 60000 ? `${(ms / 60000).toFixed(1)}m` : ms > 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
+  const fmtPct = (p) => `${(p || 0).toFixed(1)}%`;
+
+  ln('B.R.A.T. PERFORMANCE REPORT');
+  ln(`Generated: ${report.generatedAt}`);
+  hr();
+
+  ln('');
+  ln('RUN SUMMARY');
+  ln(`  Server:           ${report.runSummary.serverUrl}`);
+  ln(`  Batch ID:         ${report.runSummary.batchId || 'N/A'}`);
+  ln(`  Execution Mode:   ${report.runSummary.executionMode}`);
+  ln(`  Total Rows:       ${report.runSummary.totalRows}/${report.runSummary.targetRows}`);
+  ln(`  Success Rate:     ${fmtPct(report.runSummary.successRate)}`);
+  ln(`  Avg Response:     ${fmtMs(report.runSummary.avgResponseMs)}`);
+  ln(`  P50 / P95 / P99:  ${fmtMs(report.runSummary.p50Ms)} / ${fmtMs(report.runSummary.p95Ms)} / ${fmtMs(report.runSummary.p99Ms)}`);
+  ln(`  Total Time:       ${fmtMs(report.runSummary.totalBatchTimeMs)}`);
+  ln(`  Throughput:       ${report.runSummary.throughputRowsPerMin} rows/min`);
+  ln(`  Avg Carriers/Row: ${report.runSummary.avgRatesPerRow}`);
+
+  ln('');
+  ln('EXECUTION CONFIGURATION');
+  const ec = report.executionConfig;
+  ln(`  Concurrency:      ${ec.concurrency || 'N/A'} (max ${ec.maxConcurrency || 'N/A'})`);
+  ln(`  Delay:            ${ec.delayMs}ms`);
+  ln(`  Dedup:            ${ec.dedup}`);
+  ln(`  Carriers:         ${ec.numberOfRates || 'all'}`);
+  ln(`  Contract Status:  ${ec.contractStatus || 'N/A'}`);
+  ln(`  Chunk Size:       ${ec.chunkSize || 'N/A'}`);
+  ln(`  Max Agents:       ${ec.maxAgents || 'N/A'}`);
+  ln(`  Per-Agent Conc:   ${ec.concurrencyPerAgent || 'N/A'}`);
+
+  ln('');
+  ln('SERVER BEHAVIOR');
+  const sb = report.serverBehavior;
+  ln(`  Max Safe Conc:    ${sb.estimatedMaxSafeConcurrency} workers`);
+  ln(`  Max Safe Batch:   ${sb.estimatedMaxSafeBatchSize} rows/chunk`);
+  ln(`  Degradation:      ${sb.responseTimeDegradationPattern}`);
+  ln(`  Errors:           ${sb.errorPattern}`);
+  if (sb.smcCascadeEstimate) ln(`  SMC3 Cascade:     ${sb.smcCascadeEstimate}`);
+
+  if (report.concurrencyImpact.length > 1) {
+    ln('');
+    ln('CONCURRENCY vs RESPONSE TIME');
+    ln('  Workers  Calls   Avg      P50      P95      Errors');
+    for (const c of report.concurrencyImpact) {
+      ln(`  ${String(c.activeWorkers).padStart(4)}     ${String(c.callCount).padStart(5)}   ${String(fmtMs(c.avgMs)).padStart(7)}  ${String(fmtMs(c.p50Ms)).padStart(7)}  ${String(fmtMs(c.p95Ms)).padStart(7)}  ${String(fmtPct(c.errorRate)).padStart(6)}`);
+    }
+  }
+
+  ln('');
+  ln('DEGRADATION ANALYSIS');
+  if (report.degradationAnalysis.cusumInflection.detected) {
+    for (const p of report.degradationAnalysis.cusumInflection.points) {
+      ln(`  [${p.type}] ${p.description}`);
+    }
+  } else {
+    ln('  No inflection points detected.');
+  }
+  if (report.degradationAnalysis.decileDetection.detected) {
+    ln(`  Decile analysis: ${report.degradationAnalysis.decileDetection.maxRatio}x degradation at row ${report.degradationAnalysis.decileDetection.degradationPoint}`);
+  }
+
+  if (report.timeSeriesPhases.length > 1) {
+    ln('');
+    ln('TIME-SERIES (5-minute windows)');
+    ln('  Minute  Calls  Success  Failed  Avg      P95      Thruput');
+    for (const p of report.timeSeriesPhases) {
+      ln(`  ${String(p.minutesIntoRun).padStart(4)}m   ${String(p.callCount).padStart(5)}  ${String(p.succeeded).padStart(5)}    ${String(p.failed).padStart(5)}   ${String(fmtMs(p.avgMs)).padStart(7)}  ${String(fmtMs(p.p95Ms)).padStart(7)}  ${String(p.throughput).padStart(5)}/min`);
+    }
+  }
+
+  if (report.agentReports.length > 1) {
+    ln('');
+    ln('PER-AGENT BREAKDOWN');
+    ln('  Agent        Rows  Success%  Avg      P95      Thruput  Inflection');
+    for (const a of report.agentReports) {
+      const inflStr = a.inflection
+        ? `row ${a.inflection.detectedAtRow} (${a.inflection.ratio?.toFixed(1)}x)`
+        : 'none';
+      ln(`  ${a.agentId.padEnd(12)} ${String(a.rows).padStart(4)}  ${String(fmtPct(a.successRate)).padStart(7)}   ${String(fmtMs(a.avgMs)).padStart(7)}  ${String(fmtMs(a.p95Ms)).padStart(7)}  ${String(a.throughput).padStart(5)}/min  ${inflStr}`);
+    }
+    for (const a of report.agentReports) {
+      if (a.concurrencyAnalysis.length > 1) {
+        ln(`  ${a.agentId} concurrency profile:`);
+        for (const c of a.concurrencyAnalysis) {
+          ln(`    Conc ${c.concurrency}: ${c.callCount} calls, avg ${fmtMs(c.avgMs)}, P95 ${fmtMs(c.p95Ms)}`);
+        }
+      }
+    }
+  }
+
+  if (report.errorAnalysis.totalErrors > 0) {
+    ln('');
+    ln('ERROR ANALYSIS');
+    for (const e of report.errorAnalysis.categories) {
+      ln(`  ${e.category}: ${e.count} (${fmtPct(e.pct)})`);
+      ln(`    First: row ${e.firstOccurrence}, Last: row ${e.lastOccurrence}, Streak: ${e.longestStreak}`);
+      ln(`    Cause: ${e.rootCause}`);
+      ln(`    Fix:   ${e.guidance}`);
+    }
+    if (report.errorAnalysis.patterns.length > 0) {
+      ln('  Patterns:');
+      for (const p of report.errorAnalysis.patterns) {
+        ln(`    [${p.severity}] ${p.message}`);
+      }
+    }
+  }
+
+  ln('');
+  ln('RECOMMENDATIONS');
+  for (const r of report.recommendations) {
+    ln(`  [${r.severity}] ${r.title}: ${r.message}`);
+  }
+
+  ln('');
+  hr();
+  ln('RECOMMENDED CONFIGURATION FOR NEXT RUN');
+  hr();
+  const nc = report.nextRunConfig;
+  ln(`  concurrency:         ${nc.concurrency}`);
+  ln(`  delayMs:             ${nc.delayMs}`);
+  ln(`  chunkSize:           ${nc.chunkSize}`);
+  ln(`  maxAgents:           ${nc.maxAgents}`);
+  ln(`  targetResponseMs:    ${nc.targetResponseMs}`);
+  ln(`  warningThresholdMs:  ${nc.warningThresholdMs}`);
+  ln(`  criticalThresholdMs: ${nc.criticalThresholdMs}`);
+  ln(`  autoTune:            ${nc.autoTune}`);
+  ln('');
+  ln('REASONING:');
+  for (const r of nc.reasoning) {
+    ln(`  - ${r}`);
+  }
+  ln('');
+  hr();
+
+  return lines.join('\n');
+}
+
+// ============================================================
+// Internal Summary (shareable with DLX support / 3G)
+// ============================================================
+export function formatInternalSummary(report) {
+  const lines = [];
+  const ln = (s = '') => lines.push(s);
+  const fmtMs = (ms) => ms > 60000 ? `${(ms / 60000).toFixed(1)} min` : ms > 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
+
+  ln('Dynamic Logistix — 3G TMS Batch Rating Summary');
+  ln(`Date: ${new Date(report.generatedAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}`);
+  ln(`Server: ${report.runSummary.serverUrl}`);
+  ln('');
+  ln('BATCH OVERVIEW');
+  ln(`  Total shipments rated: ${report.runSummary.succeeded} of ${report.runSummary.targetRows} attempted`);
+  if (report.runSummary.failed > 0) {
+    ln(`  Failed to rate: ${report.runSummary.failed} shipments`);
+  }
+  ln(`  Average API response time: ${fmtMs(report.runSummary.avgResponseMs)}`);
+  ln(`  P95 response time: ${fmtMs(report.runSummary.p95Ms)}`);
+  ln(`  Total elapsed time: ${fmtMs(report.runSummary.totalBatchTimeMs)}`);
+  ln(`  Average carriers returned per request: ${report.runSummary.avgRatesPerRow}`);
+
+  // Only show if there were problems
+  const hasProblems = report.runSummary.failed > 0
+    || report.runSummary.avgResponseMs > 5000
+    || report.degradationAnalysis.cusumInflection.detected
+    || report.errorAnalysis.totalErrors > 0;
+
+  if (hasProblems) {
+    ln('');
+    ln('ISSUES OBSERVED');
+
+    if (report.degradationAnalysis.cusumInflection.detected) {
+      const pt = report.degradationAnalysis.cusumInflection.points[0];
+      if (pt) {
+        ln(`  - API response times increased significantly during the run.`);
+        ln(`    Response times started at ~${fmtMs(pt.preAvgMs || 0)} and`);
+        ln(`    increased to ~${fmtMs(pt.postAvgMs || 0)} (${pt.ratio?.toFixed(1) || '?'}x slower).`);
+        ln(`    This pattern is consistent with server-side resource`);
+        ln(`    contention under sustained concurrent load.`);
+      }
+    }
+
+    if (report.runSummary.avgResponseMs > 5000) {
+      ln(`  - Overall average response time (${fmtMs(report.runSummary.avgResponseMs)})`);
+      ln(`    is elevated. Typical single-request response is 200-500ms.`);
+      ln(`    This suggests the server was under heavy load during`);
+      ln(`    the batch window.`);
+    }
+
+    if (report.errorAnalysis.totalErrors > 0) {
+      ln(`  - ${report.errorAnalysis.totalErrors} requests returned errors:`);
+      for (const e of report.errorAnalysis.categories.slice(0, 3)) {
+        ln(`    ${e.category}: ${e.count} occurrences`);
+        if (e.rootCause) ln(`      (${e.rootCause})`);
+      }
+    }
+
+    if (report.runSummary.completionRate < 100) {
+      ln(`  - Batch did not complete: ${report.runSummary.completionRate}% of rows`);
+      ln(`    were processed before the run was stopped or stalled.`);
+    }
+  } else {
+    ln('');
+    ln('STATUS: Batch completed successfully with no significant issues.');
+  }
+
+  ln('');
+  ln('CONFIGURATION USED');
+  const ec = report.executionConfig;
+  ln(`  Contract Status: ${ec.contractStatus || 'N/A'}`);
+  ln(`  Contract Use: ${Array.isArray(ec.contractUse) ? ec.contractUse.join(', ') : (ec.contractUse || 'N/A')}`);
+  ln(`  Carriers requested per call: ${ec.numberOfRates || 'all qualifying'}`);
+  ln(`  Concurrent API connections: ${ec.concurrency || 'N/A'}`);
+
+  if (hasProblems) {
+    ln('');
+    ln('SUGGESTED ACTIONS');
+    const safeCon = report.serverBehavior.estimatedMaxSafeConcurrency;
+    if (report.runSummary.avgResponseMs > 3000 && (ec.concurrency || 0) > safeCon) {
+      ln(`  - Reduce concurrent connections from ${ec.concurrency} to ${safeCon}.`);
+      ln(`    Each concurrent request triggers carrier contract evaluations`);
+      ln(`    which cascade to SMC3 lookups. Fewer concurrent connections`);
+      ln(`    allows the server to process each request faster.`);
+    }
+    if (report.runSummary.avgResponseMs > 5000) {
+      ln(`  - Consider reducing the number of carriers evaluated per`);
+      ln(`    request if possible (currently: ${ec.numberOfRates || 'all qualifying'}).`);
+    }
+    if (report.errorAnalysis.categories.some(e => e.category === 'TIMEOUT')) {
+      ln(`  - Timeout errors detected. The server may need additional`);
+      ln(`    time to process requests during peak load. Consider running`);
+      ln(`    large batches during off-peak hours.`);
+    }
+    if (report.degradationAnalysis.cusumInflection.detected) {
+      const safeBatch = report.serverBehavior.estimatedMaxSafeBatchSize;
+      ln(`  - For sustained batch operations, limit to ~${safeBatch} requests`);
+      ln(`    per batch window, then pause 30-60 seconds before continuing.`);
+    }
+  }
+
+  ln('');
+  ln('---');
+  ln('This summary was generated by the DLX Batch Rating Tool.');
+  ln('For detailed performance telemetry, contact the DLX Carrier Procurement team.');
+
+  return lines.join('\n');
+}

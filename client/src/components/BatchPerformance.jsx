@@ -17,11 +17,12 @@ export default function BatchPerformance({ results, batchMeta, totalRows, onRetr
   const isCombined = batchMeta?.isCombined || false;
   const isMultiAgent = batchMeta?.executionMode === 'multi' || results.some(r => r.agentId !== undefined);
 
-  const isComplete = results.length >= (totalRows || results.length);
+  const isComplete = totalRows > 0 ? results.length >= totalRows : false;
   const succeededCount = results.filter(r => r.success).length;
   const failedCount = results.filter(r => !r.success).length;
   const missingCount = (totalRows || results.length) - results.length;
   const retryableCount = missingCount + failedCount;
+  console.log('[BRAT Perf]', { resultsLen: results.length, totalRows, isComplete: totalRows > 0 ? results.length >= totalRows : false, retryableCount });
 
   // Debug: log recovery state on every render
   if (typeof console !== 'undefined') {

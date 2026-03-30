@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { computeLaneComparison } from '../../services/analyticsEngine.js';
+import { applyMargin } from '../../services/ratingClient.js';
 
 const fmtMoney = (v) => `$${Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const fmtPct = (v) => `${Number(v).toFixed(1)}%`;
@@ -19,7 +20,8 @@ function benchmarkColor(avgTotalCharge, laneAvg) {
   return 'bg-red-100 text-red-800';
 }
 
-export default function LaneComparisonPanel({ flatRows }) {
+export default function LaneComparisonPanel({ flatRows, view = 'internal', markups }) {
+  const isCustomer = view === 'customer';
   const [subView, setSubView] = useState('discount');
   const [sortCol, setSortCol] = useState('laneKey');
   const [sortDir, setSortDir] = useState('asc');
@@ -35,6 +37,18 @@ export default function LaneComparisonPanel({ flatRows }) {
       { key: 'laneKey', label: 'Lane', numeric: false },
       { key: 'scac', label: 'SCAC', numeric: false },
     ];
+
+    if (isCustomer) {
+      // Customer view: hide tariff details, discount %, show customer price
+      return [
+        ...base,
+        { key: 'shipments', label: '# Shipments', numeric: true },
+        { key: 'avgWeight', label: 'Avg Weight', numeric: true },
+        { key: 'avgCustomerPrice', label: 'Avg Customer Price', numeric: true, fmt: 'money' },
+        { key: 'laneAvgCustomer', label: 'Lane Avg (All Carriers)', numeric: true, fmt: 'benchmarkCustomer' },
+        { key: 'lowCostWinner', label: 'Low Cost', numeric: false, center: true },
+      ];
+    }
 
     if (subView === 'discount') {
       return [
@@ -70,10 +84,38 @@ export default function LaneComparisonPanel({ flatRows }) {
         { key: 'lowCostWinner', label: 'Low Cost', numeric: false, center: true },
       ];
     }
-  }, [subView]);
+  }, [subView, isCustomer]);
+
+  // Enrich data with customer prices when in customer view
+  const enrichedData = useMemo(() => {
+    if (!isCustomer || !markups) return data;
+
+    // Compute lane avg customer prices
+    const laneCustomerTotals = {};
+    for (const r of data) {
+      if (r.avgTotalCharge != null) {
+        const m = applyMargin(r.avgTotalCharge, r.scac, markups);
+        const lk = r.laneKey;
+        if (!laneCustomerTotals[lk]) laneCustomerTotals[lk] = { sum: 0, count: 0 };
+        laneCustomerTotals[lk].sum += m.customerPrice;
+        laneCustomerTotals[lk].count++;
+      }
+    }
+
+    return data.map(r => {
+      if (r.avgTotalCharge == null) return { ...r, avgCustomerPrice: null, laneAvgCustomer: null };
+      const m = applyMargin(r.avgTotalCharge, r.scac, markups);
+      const laneAvg = laneCustomerTotals[r.laneKey];
+      return {
+        ...r,
+        avgCustomerPrice: m.customerPrice,
+        laneAvgCustomer: laneAvg ? laneAvg.sum / laneAvg.count : null,
+      };
+    });
+  }, [data, isCustomer, markups]);
 
   const filtered = useMemo(() => {
-    let rows = data;
+    let rows = enrichedData;
     if (scacFilter.length > 0) {
       rows = rows.filter(r => scacFilter.includes(r.scac));
     }
@@ -99,7 +141,7 @@ export default function LaneComparisonPanel({ flatRows }) {
       });
     }
     return rows;
-  }, [data, scacFilter, laneSearch, sortCol, sortDir, columns]);
+  }, [enrichedData, scacFilter, laneSearch, sortCol, sortDir, columns]);
 
   const handleSort = (col) => {
     if (sortCol === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
@@ -123,24 +165,26 @@ export default function LaneComparisonPanel({ flatRows }) {
   let laneIdx = 0;
 
   const isMinView = subView === 'minimum';
-  const headerBg = isMinView ? 'bg-amber-700' : 'bg-[#002144]';
-  const headerHover = isMinView ? 'hover:bg-amber-800' : 'hover:bg-[#003366]';
+  const headerBg = !isCustomer && isMinView ? 'bg-amber-700' : 'bg-[#002144]';
+  const headerHover = !isCustomer && isMinView ? 'hover:bg-amber-800' : 'hover:bg-[#003366]';
 
   return (
     <div className="flex flex-col max-h-[50vh]">
       {/* Sub-view toggle + filters */}
       <div className="px-3 py-2 border-b border-gray-200 flex flex-wrap gap-2 items-center shrink-0">
-        <div className="flex gap-1 mr-3">
-          <button className={subViewBtnCls('discount')} onClick={() => setSubView('discount')}>
-            Discount-Rated
-          </button>
-          <button className={subViewBtnCls('minimum')} onClick={() => setSubView('minimum')}>
-            Minimum-Rated
-          </button>
-          <button className={subViewBtnCls('all')} onClick={() => setSubView('all')}>
-            All
-          </button>
-        </div>
+        {!isCustomer && (
+          <div className="flex gap-1 mr-3">
+            <button className={subViewBtnCls('discount')} onClick={() => setSubView('discount')}>
+              Discount-Rated
+            </button>
+            <button className={subViewBtnCls('minimum')} onClick={() => setSubView('minimum')}>
+              Minimum-Rated
+            </button>
+            <button className={subViewBtnCls('all')} onClick={() => setSubView('all')}>
+              All
+            </button>
+          </div>
+        )}
         <input
           type="text"
           placeholder="Search lanes..."
@@ -218,8 +262,9 @@ export default function LaneComparisonPanel({ flatRows }) {
                       );
                     }
 
-                    if (col.fmt === 'benchmark') {
-                      const colorCls = benchmarkColor(row.avgTotalCharge, val);
+                    if (col.fmt === 'benchmark' || col.fmt === 'benchmarkCustomer') {
+                      const compareVal = col.fmt === 'benchmarkCustomer' ? row.avgCustomerPrice : row.avgTotalCharge;
+                      const colorCls = benchmarkColor(compareVal, val);
                       return (
                         <td key={col.key} className={`px-3 py-2 text-right font-medium ${colorCls}`}>
                           {val != null ? fmtMoney(val) : '-'}

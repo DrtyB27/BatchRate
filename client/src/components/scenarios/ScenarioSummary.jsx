@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useMemo } from 'react';
+import { applyMargin } from '../../services/ratingClient.js';
 
 const fmtMoney = (v) => `$${Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const fmtPct = (v) => `${Number(v).toFixed(1)}%`;
@@ -29,7 +30,28 @@ function MetricRow({ label, value, delta, deltaLabel }) {
   );
 }
 
-export default function ScenarioSummary({ scenarios, currentStateResult, historicMatchResult, lowCostResult }) {
+export default function ScenarioSummary({ scenarios, currentStateResult, historicMatchResult, lowCostResult, view = 'internal', markups }) {
+  const isCustomer = view === 'customer';
+
+  // Compute customer spend for each scenario (approximate: apply margin to totalSpend / shipments)
+  const customerSpends = useMemo(() => {
+    if (!isCustomer || !markups) return {};
+    const spends = {};
+    for (const s of scenarios) {
+      if (!s.result) continue;
+      // Use per-lane breakdown to get more accurate customer pricing
+      let custTotal = 0;
+      for (const lb of Object.values(s.result.laneBreakdown || {})) {
+        if (lb.awardedCost != null && lb.awardedSCAC) {
+          const m = applyMargin(lb.awardedCost, lb.awardedSCAC, markups);
+          custTotal += m.customerPrice;
+        }
+      }
+      spends[s.id] = custTotal;
+    }
+    return spends;
+  }, [scenarios, isCustomer, markups]);
+
   return (
     <div className="flex gap-3 overflow-x-auto pb-2">
       {scenarios.map((s, idx) => {
@@ -37,32 +59,46 @@ export default function ScenarioSummary({ scenarios, currentStateResult, histori
         if (!r) return null;
         const color = getColor(idx, s);
 
+        const displaySpend = isCustomer && customerSpends[s.id] != null ? customerSpends[s.id] : r.summary.totalSpend;
+        const currentDisplaySpend = isCustomer && currentStateResult && customerSpends[scenarios.find(x => x.isCurrentState)?.id]
+          ? customerSpends[scenarios.find(x => x.isCurrentState)?.id]
+          : currentStateResult?.summary.totalSpend;
+
         // Savings vs Current State
         let savingsVsCurrent = null;
         let savingsVsCurrentPct = null;
-        if (currentStateResult && !s.isCurrentState) {
-          savingsVsCurrent = currentStateResult.summary.totalSpend - r.summary.totalSpend;
-          savingsVsCurrentPct = currentStateResult.summary.totalSpend > 0
-            ? (savingsVsCurrent / currentStateResult.summary.totalSpend) * 100 : 0;
+        if (currentDisplaySpend != null && !s.isCurrentState) {
+          savingsVsCurrent = currentDisplaySpend - displaySpend;
+          savingsVsCurrentPct = currentDisplaySpend > 0
+            ? (savingsVsCurrent / currentDisplaySpend) * 100 : 0;
         }
 
         // Savings vs Low Cost
         let savingsVsLowCost = null;
         if (lowCostResult && !s.isLowCost) {
-          savingsVsLowCost = r.summary.totalSpend - lowCostResult.summary.totalSpend;
+          const lowCostSpend = isCustomer && customerSpends[scenarios.find(x => x.isLowCost)?.id] != null
+            ? customerSpends[scenarios.find(x => x.isLowCost)?.id]
+            : lowCostResult.summary.totalSpend;
+          savingsVsLowCost = displaySpend - lowCostSpend;
         }
 
-        // Historic Match specific: rate change savings and carrier optimization delta
+        // Historic Match specific
         const isHM = s.isHistoricMatch;
         let rateChangeSavings = null;
         let rateChangePct = null;
         let carrierOptSavings = null;
-        if (isHM && r.summary.rateChangeSavings != null) {
+        if (!isCustomer && isHM && r.summary.rateChangeSavings != null) {
           rateChangeSavings = r.summary.rateChangeSavings;
           rateChangePct = r.summary.rateChangePct;
           if (lowCostResult) {
             carrierOptSavings = r.summary.totalSpend - lowCostResult.summary.totalSpend;
           }
+        }
+
+        // Margin % (internal only)
+        let marginPct = null;
+        if (!isCustomer && markups && customerSpends[s.id] != null && r.summary.totalSpend > 0) {
+          marginPct = ((customerSpends[s.id] - r.summary.totalSpend) / customerSpends[s.id]) * 100;
         }
 
         return (
@@ -74,12 +110,20 @@ export default function ScenarioSummary({ scenarios, currentStateResult, histori
               </span>
             </div>
             <div className="px-3 py-2">
-              <MetricRow label="Total Spend" value={fmtMoney(r.summary.totalSpend)} />
+              <MetricRow label={isCustomer ? 'Customer Spend' : 'Total Spend'} value={fmtMoney(displaySpend)} />
               <MetricRow label="# Carriers" value={r.summary.carrierCount} />
               <MetricRow label="# Shipments" value={r.summary.shipmentsAwarded} />
               <MetricRow label="# Unserviced" value={r.summary.unservicedCount} />
-              <MetricRow label="# Min Rated" value={r.summary.minRatedCount} />
-              <MetricRow label="Avg Disc % (excl min)" value={fmtPct(r.summary.avgDiscountPct)} />
+              {!isCustomer && <MetricRow label="# Min Rated" value={r.summary.minRatedCount} />}
+              {!isCustomer && <MetricRow label="Avg Disc % (excl min)" value={fmtPct(r.summary.avgDiscountPct)} />}
+              {!isCustomer && marginPct != null && (
+                <MetricRow
+                  label="Expected Margin %"
+                  value={fmtPct(marginPct)}
+                  delta={marginPct}
+                  deltaLabel={marginPct >= 0 ? 'Profitable' : 'Loss'}
+                />
+              )}
               {savingsVsCurrent != null && (
                 <MetricRow
                   label="Savings vs Current"
@@ -88,7 +132,7 @@ export default function ScenarioSummary({ scenarios, currentStateResult, histori
                   deltaLabel={`${savingsVsCurrentPct >= 0 ? '+' : ''}${savingsVsCurrentPct.toFixed(1)}%`}
                 />
               )}
-              {isHM && rateChangeSavings != null && (
+              {!isCustomer && isHM && rateChangeSavings != null && (
                 <MetricRow
                   label="Rate Change vs Historic"
                   value={fmtDelta(rateChangeSavings)}
@@ -96,7 +140,7 @@ export default function ScenarioSummary({ scenarios, currentStateResult, histori
                   deltaLabel={`${rateChangePct >= 0 ? '+' : ''}${rateChangePct.toFixed(1)}%`}
                 />
               )}
-              {isHM && carrierOptSavings != null && (
+              {!isCustomer && isHM && carrierOptSavings != null && (
                 <MetricRow
                   label="Savings vs Low Cost"
                   value={fmtDelta(-carrierOptSavings)}

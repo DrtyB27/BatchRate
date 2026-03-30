@@ -75,8 +75,7 @@ export default function ExecutionControls({ settings, onChange, onRun, onPause, 
 
   const update = (key, val) => onChange({ ...settings, [key]: val });
 
-  const isMulti = settings.executionMode === 'multi';
-  const showMultiRecommendation = rowCount > 400 && !isMulti && csvLoaded;
+  const isMulti = true; // always multi-agent
 
   // Compute dedup stats for display
   const dedupStats = useMemo(() => {
@@ -116,8 +115,7 @@ export default function ExecutionControls({ settings, onChange, onRun, onPause, 
   const summaryParts = [];
   if (settings.dedup && settings.dedup !== 'off') summaryParts.push(`${settings.dedup} dedup`);
   if (settings.autoTune) summaryParts.push('auto-tune');
-  if (isMulti) summaryParts.push(`multi-agent`);
-  else summaryParts.push(`conc ${settings.concurrency}`);
+  summaryParts.push('multi-agent');
   if (estimatedCalls < rowCount) summaryParts.push(`${estimatedCalls} calls`);
   const summaryText = summaryParts.join(' \u2022 ');
 
@@ -185,19 +183,9 @@ export default function ExecutionControls({ settings, onChange, onRun, onPause, 
             )}
           </div>
 
-          {/* Mode toggle */}
-          <div className="flex items-center gap-3 pb-2 border-b border-gray-100">
-            <span className="text-[11px] text-gray-600 font-medium">Execution Mode:</span>
-            <button
-              type="button"
-              onClick={() => update('executionMode', 'single')}
-              className={`text-[11px] px-2.5 py-1 rounded font-medium transition-colors ${!isMulti ? 'bg-[#39b6e6] text-white' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}
-            >Single Agent</button>
-            <button
-              type="button"
-              onClick={() => update('executionMode', 'multi')}
-              className={`text-[11px] px-2.5 py-1 rounded font-medium transition-colors ${isMulti ? 'bg-[#39b6e6] text-white' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}
-            >Multi-Agent</button>
+          {/* Execution mode label */}
+          <div className="flex items-center gap-2 pb-2 border-b border-gray-100">
+            <span className="text-[11px] text-gray-500">Multi-agent execution (auto-resume enabled)</span>
           </div>
 
           {/* Advanced Settings toggle */}
@@ -259,43 +247,6 @@ export default function ExecutionControls({ settings, onChange, onRun, onPause, 
                   tooltip="Target response time in ms. Auto-tuner adjusts concurrency to stay below this."
                   suffix="ms"
                 />
-              )}
-
-              {/* Single agent settings */}
-              {!isMulti && (
-                <div className="flex flex-wrap gap-x-6 gap-y-2">
-                  <StepperControl
-                    label="Concurrency"
-                    value={settings.concurrency}
-                    options={CONCURRENCY_OPTIONS}
-                    onChange={v => update('concurrency', v)}
-                    tooltip="Max simultaneous API calls. Auto-tune starts at 2 and scales up to this."
-                  />
-                  <StepperControl
-                    label="Delay"
-                    value={settings.delayMs}
-                    options={DELAY_OPTIONS}
-                    onChange={v => update('delayMs', v)}
-                    tooltip="Milliseconds between dispatches."
-                    suffix="ms"
-                  />
-                  <StepperControl
-                    label="Retries"
-                    value={settings.retryAttempts}
-                    options={RETRY_OPTIONS}
-                    onChange={v => update('retryAttempts', v)}
-                    tooltip="Number of retry attempts for failed requests."
-                  />
-                  <label className="flex items-center gap-1.5 text-[11px] text-gray-600 font-medium cursor-pointer" title="Automatically reduce speed on errors">
-                    <input
-                      type="checkbox"
-                      checked={settings.adaptiveBackoff}
-                      onChange={e => update('adaptiveBackoff', e.target.checked)}
-                      className="rounded border-gray-300"
-                    />
-                    Auto-throttle
-                  </label>
-                </div>
               )}
 
               {/* Multi-agent settings */}
@@ -373,30 +324,6 @@ export default function ExecutionControls({ settings, onChange, onRun, onPause, 
                   )}
                 </div>
               )}
-            </div>
-          )}
-
-          {/* Multi-agent recommendation */}
-          {showMultiRecommendation && (
-            <div className="bg-blue-50 border border-blue-200 rounded px-3 py-2 text-[11px] text-blue-700 flex items-center justify-between">
-              <span>
-                Large batch ({rowCount} rows). Multi-Agent mode splits into {Math.ceil(rowCount / 400)} independent agents for resilience.
-              </span>
-              <button
-                type="button"
-                onClick={() => onChange({
-                  ...settings,
-                  executionMode: 'multi',
-                  chunkSize: 400,
-                  maxAgents: 5,
-                  concurrencyPerAgent: 2,
-                  totalMaxConcurrency: 8,
-                  staggerStartMs: 500,
-                })}
-                className="bg-blue-500 text-white px-2 py-0.5 rounded text-[10px] font-medium hover:bg-blue-600 ml-2 whitespace-nowrap"
-              >
-                Use Multi-Agent
-              </button>
             </div>
           )}
 

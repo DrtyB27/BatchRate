@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from 'react';
+import { applyMargin } from '../../services/ratingClient.js';
 
 const fmtMoney = (v) => `$${Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
@@ -11,7 +12,8 @@ function getColor(idx, scenario) {
   return SCENARIO_COLORS[Math.min(idx, SCENARIO_COLORS.length - 1)];
 }
 
-export default function ScenarioDetailTable({ scenarios, currentStateResult }) {
+export default function ScenarioDetailTable({ scenarios, currentStateResult, view = 'internal', markups }) {
+  const isCustomer = view === 'customer';
   const [laneSearch, setLaneSearch] = useState('');
   const [sortCol, setSortCol] = useState('lane');
   const [sortDir, setSortDir] = useState('asc');
@@ -94,6 +96,12 @@ export default function ScenarioDetailTable({ scenarios, currentStateResult }) {
 
   // Determine column span per scenario
   const getColSpan = (s) => {
+    if (isCustomer) {
+      // SCAC + Customer Price only (no Min, no Savings detail for raw)
+      let cols = 2; // SCAC, Customer Price
+      if (currentStateResult && !s.isCurrentState) cols++; // Savings
+      return cols;
+    }
     const baseCols = 3; // SCAC, Cost, Min
     const savingsCol = currentStateResult && !s.isCurrentState ? 1 : 0;
     const rateDeltaCol = s.isHistoricMatch ? 1 : 0;
@@ -159,13 +167,13 @@ export default function ScenarioDetailTable({ scenarios, currentStateResult }) {
                 <React.Fragment key={s.id}>
                   <th className="px-2 py-1 text-left text-[10px] font-medium text-gray-500">SCAC</th>
                   <th className="px-2 py-1 text-right text-[10px] font-medium text-gray-500 cursor-pointer" onClick={() => handleSort(`cost_${idx}`)}>
-                    Cost{sortIndicator(`cost_${idx}`)}
+                    {isCustomer ? 'Cust. Price' : 'Cost'}{sortIndicator(`cost_${idx}`)}
                   </th>
-                  <th className="px-2 py-1 text-center text-[10px] font-medium text-gray-500">Min</th>
+                  {!isCustomer && <th className="px-2 py-1 text-center text-[10px] font-medium text-gray-500">Min</th>}
                   {currentStateResult && !s.isCurrentState && (
                     <th className="px-2 py-1 text-right text-[10px] font-medium text-gray-500">Savings</th>
                   )}
-                  {s.isHistoricMatch && (
+                  {!isCustomer && s.isHistoricMatch && (
                     <th className="px-2 py-1 text-right text-[10px] font-medium text-gray-500">Rate Delta</th>
                   )}
                 </React.Fragment>
@@ -185,11 +193,6 @@ export default function ScenarioDetailTable({ scenarios, currentStateResult }) {
 
                   // Check for unserviced lanes on historic match
                   if (!lb && s.isHistoricMatch) {
-                    // Check unserviced reasons
-                    const reasons = s.result?.unservicedReasons || {};
-                    const laneRefs = Object.entries(s.result?.awards || {})
-                      .filter(([, a]) => a.laneKey === row.laneKey);
-                    const hasUnserviced = laneRefs.length === 0;
                     return (
                       <td key={s.id} colSpan={getColSpan(s)} className="px-2 py-1.5 text-center text-amber-600 text-[10px]">
                         No rate
@@ -205,17 +208,29 @@ export default function ScenarioDetailTable({ scenarios, currentStateResult }) {
                     );
                   }
 
+                  // Compute display cost
+                  let displayCost = lb.awardedCost;
+                  if (isCustomer && markups && lb.awardedCost != null && lb.awardedSCAC) {
+                    const m = applyMargin(lb.awardedCost, lb.awardedSCAC, markups);
+                    displayCost = m.customerPrice;
+                  }
+
                   // Savings vs current state
                   let savings = null;
                   if (currentStateResult && !s.isCurrentState) {
                     const csLane = currentStateResult.laneBreakdown[row.laneKey];
                     if (csLane) {
-                      savings = csLane.awardedCost - lb.awardedCost;
+                      if (isCustomer && markups) {
+                        const csCustPrice = applyMargin(csLane.awardedCost, csLane.awardedSCAC, markups).customerPrice;
+                        savings = csCustPrice - displayCost;
+                      } else {
+                        savings = csLane.awardedCost - lb.awardedCost;
+                      }
                     }
                   }
 
-                  // Rate delta for historic match
-                  const rateDelta = s.isHistoricMatch ? lb.rateDelta : null;
+                  // Rate delta for historic match (internal only)
+                  const rateDelta = !isCustomer && s.isHistoricMatch ? lb.rateDelta : null;
 
                   return (
                     <React.Fragment key={s.id}>
@@ -223,15 +238,17 @@ export default function ScenarioDetailTable({ scenarios, currentStateResult }) {
                         {lb.awardedSCACLabel}
                       </td>
                       <td className="px-2 py-1.5 text-right font-medium">
-                        {fmtMoney(lb.awardedCost)}
+                        {fmtMoney(displayCost)}
                       </td>
-                      <td className="px-2 py-1.5 text-center">
-                        {s.isCurrentState ? (
-                          <span className="text-gray-400">n/a</span>
-                        ) : lb.isMinRated ? (
-                          <span className="font-bold" style={{ color: '#d97706' }}>MIN</span>
-                        ) : ''}
-                      </td>
+                      {!isCustomer && (
+                        <td className="px-2 py-1.5 text-center">
+                          {s.isCurrentState ? (
+                            <span className="text-gray-400">n/a</span>
+                          ) : lb.isMinRated ? (
+                            <span className="font-bold" style={{ color: '#d97706' }}>MIN</span>
+                          ) : ''}
+                        </td>
+                      )}
                       {currentStateResult && !s.isCurrentState && (
                         <td className={`px-2 py-1.5 text-right font-medium ${
                           savings != null ? (savings > 0 ? 'text-green-600' : savings < 0 ? 'text-red-600' : 'text-gray-400') : 'text-gray-300'
@@ -239,7 +256,7 @@ export default function ScenarioDetailTable({ scenarios, currentStateResult }) {
                           {savings != null ? `${savings >= 0 ? '+' : ''}${fmtMoney(savings)}` : '-'}
                         </td>
                       )}
-                      {s.isHistoricMatch && (
+                      {!isCustomer && s.isHistoricMatch && (
                         <td className={`px-2 py-1.5 text-right font-medium ${
                           rateDelta != null ? (rateDelta < 0 ? 'text-green-600' : rateDelta > 0 ? 'text-red-600' : 'text-gray-400') : 'text-gray-300'
                         }`}>

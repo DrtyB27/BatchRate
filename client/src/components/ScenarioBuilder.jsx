@@ -26,7 +26,9 @@ function timestamp() {
 
 let nextId = 1;
 
-export default function ScenarioBuilder({ flatRows }) {
+export default function ScenarioBuilder({ flatRows, activeMarkups }) {
+  const [scenarioView, setScenarioView] = useState('internal');
+  const isCustomer = scenarioView === 'customer';
   // Detect all unique SCACs from rated results
   const allSCACs = useMemo(() => {
     const scacs = new Set();
@@ -147,6 +149,19 @@ export default function ScenarioBuilder({ flatRows }) {
           <h3 className="text-sm font-bold text-[#002144]" style={{ fontFamily: "'Montserrat', Arial, sans-serif" }}>
             Scenario Builder
           </h3>
+          <div className="flex gap-1">
+            <button
+              className={`px-3 py-1.5 text-xs font-semibold rounded transition-colors ${scenarioView === 'internal' ? 'bg-[#002144] text-white' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}
+              onClick={() => setScenarioView('internal')}
+            >Internal</button>
+            <button
+              className={`px-3 py-1.5 text-xs font-semibold rounded transition-colors ${scenarioView === 'customer' ? 'bg-[#002144] text-white' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}
+              onClick={() => setScenarioView('customer')}
+            >Customer</button>
+          </div>
+          {isCustomer && (
+            <span className="text-[11px] text-amber-600 font-medium">Customer-safe view</span>
+          )}
           <button
             onClick={handleAddScenario}
             disabled={scenarios.length >= 5}
@@ -187,6 +202,8 @@ export default function ScenarioBuilder({ flatRows }) {
           currentStateResult={currentStateResult}
           historicMatchResult={historicMatchResult}
           lowCostResult={lowCostResult}
+          view={scenarioView}
+          markups={activeMarkups}
         />
       </div>
 
@@ -199,6 +216,8 @@ export default function ScenarioBuilder({ flatRows }) {
           <ScenarioDetailTable
             scenarios={computedScenarios}
             currentStateResult={currentStateResult}
+            view={scenarioView}
+            markups={activeMarkups}
           />
         </div>
       </div>

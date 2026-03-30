@@ -2,9 +2,7 @@ import React, { useState, useCallback, useRef, useEffect } from 'react';
 import ParametersSidebar from '../components/ParametersSidebar.jsx';
 import CsvDropzone from '../components/CsvDropzone.jsx';
 import ExecutionControls from '../components/ExecutionControls.jsx';
-import ExecutionProgress from '../components/ExecutionProgress.jsx';
 import MultiAgentProgress from '../components/MultiAgentProgress.jsx';
-import { createBatchExecutor } from '../services/batchExecutor.js';
 import { createBatchOrchestrator, detectResumeOpportunity } from '../services/batchOrchestrator.js';
 import { deduplicateRows, expandDedupedResults } from '../services/rateDeduplicator.js';
 
@@ -31,18 +29,23 @@ export default function InputScreen({
   const [execSettings, setExecSettings] = useState({
     strategy: 'balanced',
     dedup: '5-digit',
+    executionMode: 'multi',
     concurrency: 4,
     delayMs: 0,
     retryAttempts: 1,
     adaptiveBackoff: true,
     autoTune: true,
     autoTuneTarget: 2000,
+    chunkSize: 400,
+    maxAgents: 5,
+    concurrencyPerAgent: 2,
+    totalMaxConcurrency: 8,
+    staggerStartMs: 500,
   });
 
   const [csvRows, setCsvRows] = useState(null);
   const [running, setRunning] = useState(false);
   const [paused, setPaused] = useState(false);
-  const [progress, setProgress] = useState(null);
   const [multiProgress, setMultiProgress] = useState(null);
   const [dedupInfo, setDedupInfo] = useState(null);
   const [resumeInfo, setResumeInfo] = useState(null); // resume-from-partial dialog
@@ -63,7 +66,7 @@ export default function InputScreen({
   }, [existingResults]);
   const handleClear = useCallback(() => { setCsvRows(null); setResumeInfo(null); }, []);
 
-  const isMultiMode = execSettings.executionMode === 'multi';
+  // Always multi-agent — orchestrator auto-sizes chunks for small batches
 
   // If retryData is set, pre-load the retry rows as CSV and restore params
   useEffect(() => {
@@ -93,13 +96,13 @@ export default function InputScreen({
       batchId,
       batchStartTime,
       requestDelay: execSettings.delayMs,
-      concurrency: isMultiMode ? execSettings.totalMaxConcurrency || 8 : execSettings.concurrency,
+      concurrency: execSettings.totalMaxConcurrency || 8,
       numberOfRates: params.numberOfRates,
       contractUse: params.contractUse,
       contractStatus: params.contractStatus,
       clientTPNum: params.clientTPNum,
       carrierTPNum: params.carrierTPNum,
-      executionMode: isMultiMode ? 'multi' : 'single',
+      executionMode: 'multi',
       dedup: useDedup ? dedupStats : null,
       isRetry,
     };
@@ -146,51 +149,32 @@ export default function InputScreen({
       }
     };
 
-    if (isMultiMode) {
-      const orchestrator = createBatchOrchestrator({
-        chunkSize: execSettings.chunkSize || 400,
-        maxAgents: execSettings.maxAgents || 5,
-        concurrencyPerAgent: execSettings.concurrencyPerAgent || 2,
-        totalMaxConcurrency: execSettings.totalMaxConcurrency || 8,
-        delayMs: execSettings.delayMs,
-        retryAttempts: execSettings.retryAttempts,
-        adaptiveBackoff: execSettings.adaptiveBackoff,
-        timeoutMs: 30000,
-        staggerStartMs: execSettings.staggerStartMs || 500,
-        autoSavePerAgent: true,
-        onResult: handleResult,
-        onAgentProgress: () => {},
-        onProgress: (overall) => {
-          setMultiProgress(overall);
-          if (overall.state === 'PAUSED') { setPaused(true); setRunning(false); }
-          else if (overall.state === 'RUNNING') { setPaused(false); setRunning(true); }
-        },
-        onAgentComplete: () => {},
-        onComplete: handleBatchComplete,
-      });
-      orchestratorRef.current = orchestrator;
-      orchestrator.start(rowsToRate, params, credentials);
-    } else {
-      const executor = createBatchExecutor({
-        concurrency: execSettings.concurrency,
-        delayMs: execSettings.delayMs,
-        retryAttempts: execSettings.retryAttempts,
-        retryDelayMs: 1000,
-        adaptiveBackoff: execSettings.adaptiveBackoff,
-        autoTune: execSettings.autoTune || false,
-        autoTuneTarget: execSettings.autoTuneTarget || 2000,
-        timeoutMs: 30000,
-        onResult: handleResult,
-        onProgress: (snap) => {
-          setProgress(snap);
-          if (snap.state === 'PAUSED' || snap.state === 'AUTO_PAUSED') { setPaused(true); setRunning(false); }
-          else if (snap.state === 'RUNNING') { setPaused(false); setRunning(true); }
-        },
-        onComplete: handleBatchComplete,
-      });
-      executorRef.current = executor;
-      executor.start(rowsToRate, params, credentials);
-    }
+    // Always use multi-agent orchestrator (auto-sizes chunks for small batches)
+    const orchestrator = createBatchOrchestrator({
+      chunkSize: execSettings.chunkSize || 400,
+      maxAgents: execSettings.maxAgents || 5,
+      concurrencyPerAgent: execSettings.concurrencyPerAgent || 2,
+      totalMaxConcurrency: execSettings.totalMaxConcurrency || 8,
+      delayMs: execSettings.delayMs,
+      retryAttempts: execSettings.retryAttempts,
+      adaptiveBackoff: execSettings.adaptiveBackoff,
+      autoTune: execSettings.autoTune || false,
+      autoTuneTarget: execSettings.autoTuneTarget || 2000,
+      timeoutMs: 30000,
+      staggerStartMs: execSettings.staggerStartMs || 500,
+      autoSavePerAgent: true,
+      onResult: handleResult,
+      onAgentProgress: () => {},
+      onProgress: (overall) => {
+        setMultiProgress(overall);
+        if (overall.state === 'PAUSED') { setPaused(true); setRunning(false); }
+        else if (overall.state === 'RUNNING') { setPaused(false); setRunning(true); }
+      },
+      onAgentComplete: () => {},
+      onComplete: handleBatchComplete,
+    });
+    orchestratorRef.current = orchestrator;
+    orchestrator.start(rowsToRate, params, credentials);
   };
 
   const handleRunBatch = () => {
@@ -214,22 +198,16 @@ export default function InputScreen({
   };
 
   const handlePause = () => {
-    if (isMultiMode && orchestratorRef.current) orchestratorRef.current.pause();
-    else executorRef.current?.pause();
+    orchestratorRef.current?.pause();
   };
 
   const handleResume = () => {
-    if (isMultiMode && orchestratorRef.current) orchestratorRef.current.resume();
-    else executorRef.current?.resume();
+    orchestratorRef.current?.resume();
   };
 
-  const handleResumeSlow = () => {
-    executorRef.current?.resumeSlow();
-  };
 
   const handleCancel = () => {
-    if (isMultiMode && orchestratorRef.current) orchestratorRef.current.cancel();
-    else executorRef.current?.cancel();
+    orchestratorRef.current?.cancel();
     setRunning(false);
     setPaused(false);
   };
@@ -359,7 +337,7 @@ export default function InputScreen({
         )}
 
         {/* Live progress during execution */}
-        {isExecuting && isMultiMode && multiProgress && (
+        {isExecuting && multiProgress && (
           <MultiAgentProgress
             progress={multiProgress}
             onPauseAll={handlePause}
@@ -370,13 +348,6 @@ export default function InputScreen({
             onCancelAgent={(id) => orchestratorRef.current?.cancelAgent(id)}
             onRetryAgent={(id) => orchestratorRef.current?.retryAgent(id)}
             onRetryAllFailed={() => orchestratorRef.current?.retryAllFailed()}
-          />
-        )}
-        {isExecuting && !isMultiMode && progress && (
-          <ExecutionProgress
-            progress={progress}
-            onResumeSlow={handleResumeSlow}
-            onCancel={handleCancel}
           />
         )}
 

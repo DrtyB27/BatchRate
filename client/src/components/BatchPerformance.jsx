@@ -23,9 +23,6 @@ export default function BatchPerformance({ results, batchMeta, totalRows, onRetr
   const missingCount = (totalRows || results.length) - results.length;
   const retryableCount = missingCount + failedCount;
   
-  // Debug: log recovery state on every render
-  if (typeof console !== 'undefined') 
-
   const summary = useMemo(() => computePerformanceSummary(results, batchMeta), [results, batchMeta]);
   const rollingAvg = useMemo(() => computeRollingAverage(results, 10), [results]);
   const degradation = useMemo(() => detectDegradation(results), [results]);

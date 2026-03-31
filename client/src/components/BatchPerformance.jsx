@@ -22,22 +22,9 @@ export default function BatchPerformance({ results, batchMeta, totalRows, onRetr
   const failedCount = results.filter(r => !r.success).length;
   const missingCount = (totalRows || results.length) - results.length;
   const retryableCount = missingCount + failedCount;
-  console.log('[BRAT Perf]', { resultsLen: results.length, totalRows, isComplete: totalRows > 0 ? results.length >= totalRows : false, retryableCount });
-
+  
   // Debug: log recovery state on every render
-  if (typeof console !== 'undefined') {
-    console.log('[BRAT Performance] Recovery state:', {
-      resultsCount: results.length,
-      totalRows,
-      isComplete,
-      succeededCount,
-      failedCount,
-      missingCount,
-      retryableCount,
-      hasRetryInPlace: !!onRetryInPlace,
-      hasRetryProgress: !!retryProgress,
-    });
-  }
+  if (typeof console !== 'undefined') 
 
   const summary = useMemo(() => computePerformanceSummary(results, batchMeta), [results, batchMeta]);
   const rollingAvg = useMemo(() => computeRollingAverage(results, 10), [results]);

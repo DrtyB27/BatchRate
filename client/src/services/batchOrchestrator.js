@@ -19,6 +19,235 @@ function calculateOptimalChunkSize(totalRows) {
   return 1000;
 }
 
+// ── Adaptive Orchestrator Tuner ──
+// Internal class — learns from initial probe agent and dynamically
+// adjusts chunk size, concurrency, and agent count for queued agents.
+class AdaptiveOrchestratorTuner {
+  constructor(totalRows, config) {
+    this.totalRows = totalRows;
+    this.configuredChunkSize = config.chunkSize;
+    this.configuredMaxAgents = config.maxAgents;
+    this.configuredConcPerAgent = config.concurrencyPerAgent;
+    this.configuredTotalMaxConc = config.totalMaxConcurrency;
+
+    // State
+    this.phase = 'PROBE'; // PROBE | CALIBRATE | SCALE | SUSTAIN
+    this.probeResults = [];
+    this.probeSize = Math.min(50, Math.ceil(totalRows * 0.05)); // 5% or 50 rows
+    this.calibrated = false;
+
+    // Computed optimal values (set after calibration)
+    this.optimalChunkSize = config.chunkSize || 200;
+    this.optimalMaxAgents = 1;
+    this.optimalConcPerAgent = 2; // conservative start
+    this.optimalMaxActiveAgents = 1;
+    this.optimalDelayMs = config.delayMs || 0;
+
+    // Monitoring
+    this.rollingWindow = []; // last 30 response times across ALL agents
+    this.rollingWindowSize = 30;
+    this.lastThrottleCheck = 0;
+    this.throttleCheckInterval = 20; // re-evaluate every 20 results
+    this.totalResultCount = 0;
+    this.throttleHistory = [];
+  }
+
+  // Called on every result from any agent
+  recordResult(elapsedMs, success) {
+    this.totalResultCount++;
+    this.rollingWindow.push({ elapsedMs, success, ts: Date.now() });
+    if (this.rollingWindow.length > this.rollingWindowSize) {
+      this.rollingWindow.shift();
+    }
+
+    if (this.phase === 'PROBE') {
+      this.probeResults.push({ elapsedMs, success });
+      if (this.probeResults.length >= this.probeSize) {
+        this.calibrate();
+      }
+    } else if (this.phase === 'SUSTAIN') {
+      this.checkThrottle();
+    }
+  }
+
+  // Phase 2: Calibrate from probe data
+  calibrate() {
+    this.phase = 'CALIBRATE';
+
+    const times = this.probeResults.map(r => r.elapsedMs);
+    const successes = this.probeResults.filter(r => r.success).length;
+    const errorRate = 1 - (successes / this.probeResults.length);
+    const avg = times.reduce((a, b) => a + b, 0) / times.length;
+    const sorted = [...times].sort((a, b) => a - b);
+    const p95 = sorted[Math.floor(sorted.length * 0.95)] || avg;
+
+    // Rows remaining after probe
+    const remaining = this.totalRows - this.probeResults.length;
+
+    if (avg < 1000 && errorRate < 0.05) {
+      // SERVER IS FAST — scale up aggressively
+      this.optimalConcPerAgent = Math.min(4, this.configuredTotalMaxConc);
+      this.optimalMaxActiveAgents = Math.min(
+        this.configuredMaxAgents,
+        Math.floor(this.configuredTotalMaxConc / this.optimalConcPerAgent)
+      );
+      this.optimalChunkSize = Math.min(
+        Math.ceil(remaining / this.optimalMaxActiveAgents),
+        1000
+      );
+      this.optimalDelayMs = 0;
+    } else if (avg < 3000 && errorRate < 0.1) {
+      // SERVER IS NORMAL — moderate scaling
+      this.optimalConcPerAgent = 2;
+      this.optimalMaxActiveAgents = Math.min(
+        this.configuredMaxAgents,
+        Math.floor(this.configuredTotalMaxConc / this.optimalConcPerAgent),
+        4 // cap at 4 active agents
+      );
+      this.optimalChunkSize = Math.min(
+        Math.ceil(remaining / this.optimalMaxActiveAgents),
+        500
+      );
+      this.optimalDelayMs = 50;
+    } else if (avg < 10000) {
+      // SERVER IS SLOW — conservative
+      this.optimalConcPerAgent = 1;
+      this.optimalMaxActiveAgents = 2;
+      this.optimalChunkSize = Math.min(
+        Math.ceil(remaining / 2),
+        300
+      );
+      this.optimalDelayMs = 100;
+    } else {
+      // SERVER IS STRESSED — minimal load
+      this.optimalConcPerAgent = 1;
+      this.optimalMaxActiveAgents = 1;
+      this.optimalChunkSize = remaining; // single agent for the rest
+      this.optimalDelayMs = 200;
+    }
+
+    // Floor chunk size at 50
+    this.optimalChunkSize = Math.max(50, this.optimalChunkSize);
+
+    // Calculate total agents needed
+    this.optimalMaxAgents = Math.ceil(remaining / this.optimalChunkSize);
+
+    this.calibrated = true;
+    this.phase = 'SCALE';
+
+    this.throttleHistory.push({
+      phase: 'CALIBRATE',
+      at: this.totalResultCount,
+      probeAvgMs: Math.round(avg),
+      probeP95Ms: Math.round(p95),
+      probeErrorRate: Math.round(errorRate * 100),
+      chunkSize: this.optimalChunkSize,
+      maxActiveAgents: this.optimalMaxActiveAgents,
+      concPerAgent: this.optimalConcPerAgent,
+      delayMs: this.optimalDelayMs,
+    });
+  }
+
+  // Phase 4: Ongoing throttle check
+  checkThrottle() {
+    if (this.totalResultCount - this.lastThrottleCheck < this.throttleCheckInterval) return;
+    this.lastThrottleCheck = this.totalResultCount;
+
+    if (this.rollingWindow.length < 10) return;
+
+    const recentTimes = this.rollingWindow.map(r => r.elapsedMs);
+    const avg = recentTimes.reduce((a, b) => a + b, 0) / recentTimes.length;
+    const errors = this.rollingWindow.filter(r => !r.success).length;
+    const errorRate = errors / this.rollingWindow.length;
+
+    // DEGRADATION: avg response doubled from calibration baseline
+    if (this.calibrated) {
+      const probeAvg = this.throttleHistory.find(h => h.phase === 'CALIBRATE')?.probeAvgMs || avg;
+
+      if (avg > probeAvg * 2.5 || errorRate > 0.2) {
+        // Severe degradation — reduce active agents
+        this.optimalMaxActiveAgents = Math.max(1, this.optimalMaxActiveAgents - 1);
+        this.throttleHistory.push({
+          phase: 'THROTTLE_DOWN',
+          at: this.totalResultCount,
+          reason: avg > probeAvg * 2.5 ? 'response_time' : 'error_rate',
+          avgMs: Math.round(avg),
+          errorRate: Math.round(errorRate * 100),
+          newMaxActive: this.optimalMaxActiveAgents,
+        });
+      } else if (avg < probeAvg * 1.2 && errorRate < 0.05
+                 && this.optimalMaxActiveAgents < this.configuredMaxAgents) {
+        // Performance recovered — try adding an agent
+        this.optimalMaxActiveAgents = Math.min(
+          this.configuredMaxAgents,
+          Math.floor(this.configuredTotalMaxConc / this.optimalConcPerAgent),
+          this.optimalMaxActiveAgents + 1
+        );
+        this.throttleHistory.push({
+          phase: 'SCALE_UP',
+          at: this.totalResultCount,
+          avgMs: Math.round(avg),
+          newMaxActive: this.optimalMaxActiveAgents,
+        });
+      }
+
+      // Cap throttle history at 50 entries
+      if (this.throttleHistory.length > 50) {
+        this.throttleHistory = this.throttleHistory.slice(-50);
+      }
+    }
+  }
+
+  // Called by the orchestrator to decide whether to launch the next queued agent
+  shouldLaunchNext(currentActiveCount) {
+    return currentActiveCount < this.optimalMaxActiveAgents;
+  }
+
+  // Get current settings for a new agent about to launch
+  getAgentSettings() {
+    return {
+      concurrency: this.optimalConcPerAgent,
+      delayMs: this.optimalDelayMs,
+    };
+  }
+
+  // After calibration, return how to re-chunk remaining rows
+  getRechunkPlan(remainingRows) {
+    if (!this.calibrated || remainingRows.length === 0) return null;
+
+    const chunks = [];
+    for (let i = 0; i < remainingRows.length; i += this.optimalChunkSize) {
+      chunks.push(remainingRows.slice(i, i + this.optimalChunkSize));
+    }
+    return {
+      chunks,
+      chunkSize: this.optimalChunkSize,
+      maxActiveAgents: this.optimalMaxActiveAgents,
+      concPerAgent: this.optimalConcPerAgent,
+      delayMs: this.optimalDelayMs,
+    };
+  }
+
+  // Get state for telemetry/progress reporting
+  getState() {
+    return {
+      phase: this.phase,
+      calibrated: this.calibrated,
+      probeResultCount: this.probeResults.length,
+      probeTarget: this.probeSize,
+      optimalChunkSize: this.optimalChunkSize,
+      optimalMaxAgents: this.optimalMaxAgents,
+      optimalMaxActiveAgents: this.optimalMaxActiveAgents,
+      optimalConcPerAgent: this.optimalConcPerAgent,
+      optimalDelayMs: this.optimalDelayMs,
+      throttleHistory: this.throttleHistory,
+      rollingAvgMs: this.rollingWindow.length > 0
+        ? Math.round(this.rollingWindow.reduce((s, r) => s + r.elapsedMs, 0) / this.rollingWindow.length)
+        : 0,
+    };
+  }
+}
+
 /**
  * Create a batch orchestrator for multi-agent execution.
  */
@@ -31,6 +260,7 @@ export function createBatchOrchestrator(config) {
     delayMs = 0,
     retryAttempts = 1,
     adaptiveBackoff = true,
+    adaptiveOrchestration = true,
     timeoutMs = 30000,
     staggerStartMs = 500,
     autoSavePerAgent = true,
@@ -46,8 +276,13 @@ export function createBatchOrchestrator(config) {
   const agents = [];       // { agentId, startIndex, endIndex, rows, executor, state, progress, autoSaver }
   const agentQueue = [];   // agents waiting for a concurrency slot
   let activeAgentCount = 0;
-  const maxActiveAgents = Math.min(maxAgents, Math.floor(totalMaxConcurrency / concurrencyPerAgent));
+  let maxActiveAgents = Math.min(maxAgents, Math.floor(totalMaxConcurrency / concurrencyPerAgent));
   let startTimeMs = 0;
+  let tuner = null;
+  let remainingRowsRef = null;
+  let remainingStartIndex = 0;
+  let concurrencyPerAgentLocal = concurrencyPerAgent;
+  let delayMsLocal = delayMs;
   let masterAutoSaver = null;
   let keepAlive = null;
   let allResults = [];     // unified results across all agents
@@ -99,6 +334,7 @@ export function createBatchOrchestrator(config) {
       failedAgents: agents.filter(a => a.state === 'failed' || a.state === 'stalled').length,
       state,
       isMultiAgent: true,
+      tunerState: tuner ? tuner.getState() : null,
     };
   }
 
@@ -119,9 +355,14 @@ export function createBatchOrchestrator(config) {
     agent.state = 'running';
     activeAgentCount++;
 
+    const agentSettings = tuner ? tuner.getAgentSettings() : {
+      concurrency: concurrencyPerAgentLocal,
+      delayMs: delayMsLocal,
+    };
+
     const executor = createBatchExecutor({
-      concurrency: concurrencyPerAgent,
-      delayMs,
+      concurrency: agentSettings.concurrency,
+      delayMs: agentSettings.delayMs,
       retryAttempts,
       retryDelayMs: 1000,
       adaptiveBackoff,
@@ -132,6 +373,21 @@ export function createBatchOrchestrator(config) {
         result.agentId = agent.agentId;
         allResults.push(result);
         if (onResult) onResult(result);
+
+        // Feed the tuner
+        if (tuner) {
+          tuner.recordResult(result.elapsedMs || 0, result.success);
+
+          // Check if calibration just completed — re-chunk and launch
+          if (tuner.phase === 'SCALE' && remainingRowsRef && remainingRowsRef.length > 0) {
+            rechunkAndLaunch();
+          }
+
+          // Transition from SCALE to SUSTAIN once rechunked agents are launching
+          if (tuner.phase === 'SCALE' && !remainingRowsRef) {
+            tuner.phase = 'SUSTAIN';
+          }
+        }
       },
       onProgress: (snap) => {
         agent.progress = snap;
@@ -184,13 +440,63 @@ export function createBatchOrchestrator(config) {
   }
 
   function launchNextQueued() {
-    while (agentQueue.length > 0 && activeAgentCount < maxActiveAgents) {
+    while (agentQueue.length > 0) {
+      // Ask tuner if we should launch another
+      if (tuner && !tuner.shouldLaunchNext(activeAgentCount)) break;
+      if (!tuner && activeAgentCount >= maxActiveAgents) break;
+
       const next = agentQueue.shift();
       if (next.state === 'queued') {
         setTimeout(() => launchAgent(next), staggerStartMs);
         break; // stagger — one at a time
       }
     }
+  }
+
+  // Re-chunk remaining rows after calibration and launch new agents
+  function rechunkAndLaunch() {
+    if (!remainingRowsRef || remainingRowsRef.length === 0) return;
+
+    const plan = tuner.getRechunkPlan(remainingRowsRef);
+    if (!plan) return;
+
+    // Update orchestrator-level settings
+    concurrencyPerAgentLocal = plan.concPerAgent;
+    delayMsLocal = plan.delayMs;
+
+    // Create new agents for the remaining chunks
+    for (let i = 0; i < plan.chunks.length; i++) {
+      const chunk = plan.chunks[i];
+      const startIdx = remainingStartIndex + (i * plan.chunkSize);
+      agents.push({
+        agentId: `agent-${agents.length}`,
+        startIndex: startIdx,
+        endIndex: Math.min(startIdx + chunk.length, csvRowsRef.length),
+        rows: chunk,
+        executor: null,
+        state: 'queued',
+        progress: null,
+        summary: null,
+        autoSaver: null,
+      });
+    }
+
+    // Queue new agents
+    const newAgents = agents.filter(a => a.state === 'queued');
+    for (const a of newAgents) {
+      agentQueue.push(a);
+    }
+
+    // Update max active agents from tuner
+    maxActiveAgents = tuner.optimalMaxActiveAgents;
+
+    // Clear remaining ref so we don't rechunk again
+    remainingRowsRef = null;
+
+    // Launch queued agents up to the new limit
+    launchNextQueued();
+
+    emitProgress();
   }
 
   function checkAllComplete() {
@@ -257,24 +563,62 @@ export function createBatchOrchestrator(config) {
 
       const effectiveChunkSize = userChunkSize || calculateOptimalChunkSize(csvRows.length);
 
-      // Split into chunks
-      for (let i = 0; i < csvRows.length; i += effectiveChunkSize) {
-        const end = Math.min(i + effectiveChunkSize, csvRows.length);
-        agents.push({
-          agentId: `agent-${agents.length}`,
-          startIndex: i,
-          endIndex: end,
-          rows: csvRows.slice(i, end),
+      startTimeMs = Date.now();
+      state = 'RUNNING';
+
+      // Initialize adaptive tuner for large batches
+      tuner = null;
+      remainingRowsRef = null;
+      remainingStartIndex = 0;
+      concurrencyPerAgentLocal = concurrencyPerAgent;
+      delayMsLocal = delayMs;
+
+      if (adaptiveOrchestration && csvRows.length > 200) {
+        tuner = new AdaptiveOrchestratorTuner(csvRows.length, {
+          chunkSize: effectiveChunkSize,
+          maxAgents,
+          concurrencyPerAgent,
+          totalMaxConcurrency,
+          delayMs,
+        });
+      }
+
+      if (tuner) {
+        // Adaptive mode: launch a probe agent first
+        const probeSize = Math.min(200, Math.ceil(csvRows.length * 0.05));
+        const probeChunk = {
+          agentId: 'agent-0',
+          startIndex: 0,
+          endIndex: probeSize,
+          rows: csvRows.slice(0, probeSize),
           executor: null,
           state: 'queued',
           progress: null,
           summary: null,
           autoSaver: null,
-        });
-      }
+        };
+        agents.push(probeChunk);
 
-      startTimeMs = Date.now();
-      state = 'RUNNING';
+        // Remaining rows stored but not chunked yet
+        remainingRowsRef = csvRows.slice(probeSize);
+        remainingStartIndex = probeSize;
+      } else {
+        // Standard mode: split into chunks upfront
+        for (let i = 0; i < csvRows.length; i += effectiveChunkSize) {
+          const end = Math.min(i + effectiveChunkSize, csvRows.length);
+          agents.push({
+            agentId: `agent-${agents.length}`,
+            startIndex: i,
+            endIndex: end,
+            rows: csvRows.slice(i, end),
+            executor: null,
+            state: 'queued',
+            progress: null,
+            summary: null,
+            autoSaver: null,
+          });
+        }
+      }
 
       // Start keep-alive (once for all agents)
       keepAlive = createKeepAlive();
@@ -292,17 +636,26 @@ export function createBatchOrchestrator(config) {
         () => ({ batchId: `batch-${startTimeMs}` }),
       );
 
-      // Launch initial batch of agents with stagger
-      const initialCount = Math.min(agents.length, maxActiveAgents);
-      for (let i = 0; i < agents.length; i++) {
-        if (i < initialCount) {
-          setTimeout(() => {
-            if (state === 'RUNNING' && agents[i].state === 'queued') {
-              launchAgent(agents[i]);
-            }
-          }, i * staggerStartMs);
-        } else {
-          agentQueue.push(agents[i]);
+      if (tuner) {
+        // Launch only the probe agent
+        setTimeout(() => {
+          if (state === 'RUNNING' && agents[0].state === 'queued') {
+            launchAgent(agents[0]);
+          }
+        }, 0);
+      } else {
+        // Launch initial batch of agents with stagger
+        const initialCount = Math.min(agents.length, maxActiveAgents);
+        for (let i = 0; i < agents.length; i++) {
+          if (i < initialCount) {
+            setTimeout(() => {
+              if (state === 'RUNNING' && agents[i].state === 'queued') {
+                launchAgent(agents[i]);
+              }
+            }, i * staggerStartMs);
+          } else {
+            agentQueue.push(agents[i]);
+          }
         }
       }
 

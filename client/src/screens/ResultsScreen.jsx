@@ -5,6 +5,7 @@ import AnalyticsDashboard from '../components/AnalyticsDashboard.jsx';
 import ScenarioBuilder from '../components/ScenarioBuilder.jsx';
 import OptimizationDashboard from '../components/OptimizationDashboard.jsx';
 import BatchPerformance from '../components/BatchPerformance.jsx';
+import CarrierFeedback from '../components/CarrierFeedback.jsx';
 import CombineRunsDialog from '../components/CombineRunsDialog.jsx';
 import { serializeRun, downloadRunFile } from '../services/runPersistence.js';
 import { applyMargin } from '../services/ratingClient.js';
@@ -554,6 +555,13 @@ export default function ResultsScreen({
         >
           Performance
         </button>
+        <button
+          className={viewBtnCls('feedback')}
+          onClick={() => setViewMode('feedback')}
+          disabled={results.length === 0}
+        >
+          Carrier Feedback
+        </button>
       </div>
 
       {/* Content */}
@@ -565,6 +573,8 @@ export default function ResultsScreen({
         <OptimizationDashboard flatRows={flatRows} />
       ) : viewMode === 'performance' ? (
         <BatchPerformance results={results} batchMeta={batchMeta} totalRows={totalRows} onRetryInPlace={onRetryInPlace} retryProgress={retryProgress} />
+      ) : viewMode === 'feedback' ? (
+        <CarrierFeedback flatRows={flatRows} />
       ) : (
         <ResultsTable
           flatRows={flatRows}

@@ -1036,3 +1036,100 @@ export function buildScenarioCsv(scenarios) {
 
   return lines.join('\n');
 }
+
+// ============================================================
+// CARRIER FEEDBACK
+// ============================================================
+export function computeCarrierFeedback(flatRows, selectedSCAC) {
+  const scacUpper = selectedSCAC.toUpperCase();
+  const validRows = flatRows.filter(r => r.hasRate && r.rate.validRate !== 'false');
+
+  // Group by lane + carrier
+  const laneCarriers = {};
+  for (const row of validRows) {
+    const lk = getLaneKey(row);
+    const scac = (row.rate.carrierSCAC || '').toUpperCase();
+    if (!laneCarriers[lk]) laneCarriers[lk] = {};
+    if (!laneCarriers[lk][scac]) laneCarriers[lk][scac] = { charges: [], weights: [], count: 0 };
+    laneCarriers[lk][scac].charges.push(row.rate.totalCharge || 0);
+    laneCarriers[lk][scac].weights.push(parseFloat(row.inputNetWt) || 0);
+    laneCarriers[lk][scac].count++;
+  }
+
+  const lanes = [];
+  const percentiles = [];
+
+  for (const [lk, carriers] of Object.entries(laneCarriers)) {
+    if (!carriers[scacUpper]) continue;
+
+    const myData = carriers[scacUpper];
+    const myAvg = myData.charges.reduce((a, b) => a + b, 0) / myData.charges.length;
+    const myAvgWeight = myData.weights.reduce((a, b) => a + b, 0) / myData.weights.length;
+
+    // Rank all carriers on this lane by avg totalCharge
+    const allAvgs = Object.entries(carriers).map(([scac, data]) => ({
+      scac,
+      avg: data.charges.reduce((a, b) => a + b, 0) / data.charges.length,
+    })).sort((a, b) => a.avg - b.avg);
+
+    const myRank = allAvgs.findIndex(c => c.scac === scacUpper) + 1;
+    const totalCarriers = allAvgs.length;
+    const bestRate = allAvgs[0].avg;
+    const gapPct = bestRate > 0 ? ((myAvg - bestRate) / bestRate) * 100 : 0;
+
+    const percentile = totalCarriers > 1
+      ? ((totalCarriers - myRank) / (totalCarriers - 1)) * 100
+      : 100;
+
+    let status;
+    if (myRank === 1) status = 'Low Cost Winner';
+    else if (gapPct <= 5) status = 'Within 5% of best';
+    else if (gapPct <= 10) status = 'Within 10% of best';
+    else status = `${gapPct.toFixed(0)}% above best`;
+
+    let tier;
+    if (percentile >= 90) tier = 'Top 10%';
+    else if (percentile >= 75) tier = 'Top 25%';
+    else if (percentile >= 50) tier = 'Top 50%';
+    else tier = 'Bottom 50%';
+
+    lanes.push({
+      laneKey: lk,
+      shipments: myData.count,
+      avgWeight: Math.round(myAvgWeight),
+      theirRate: Math.round(myAvg * 100) / 100,
+      rank: myRank,
+      totalCarriers,
+      percentile: Math.round(percentile * 10) / 10,
+      tier,
+      gapPct: Math.round(gapPct * 10) / 10,
+      status,
+      isWinner: myRank === 1,
+    });
+
+    percentiles.push({ percentile, weight: myData.count });
+  }
+
+  // Weighted overall percentile
+  const totalWeight = percentiles.reduce((s, p) => s + p.weight, 0);
+  const overallPercentile = totalWeight > 0
+    ? percentiles.reduce((s, p) => s + p.percentile * p.weight, 0) / totalWeight
+    : 0;
+
+  const wins = lanes.filter(l => l.isWinner).length;
+
+  return {
+    scac: selectedSCAC,
+    carrierName: validRows.find(r =>
+      (r.rate.carrierSCAC || '').toUpperCase() === scacUpper
+    )?.rate.carrierName || selectedSCAC,
+    totalLanes: lanes.length,
+    totalShipments: lanes.reduce((s, l) => s + l.shipments, 0),
+    wins,
+    overallPercentile: Math.round(overallPercentile * 10) / 10,
+    overallTier: overallPercentile >= 90 ? 'Top 10%'
+      : overallPercentile >= 75 ? 'Top 25%'
+      : overallPercentile >= 50 ? 'Top 50%' : 'Bottom 50%',
+    lanes: lanes.sort((a, b) => b.percentile - a.percentile),
+  };
+}

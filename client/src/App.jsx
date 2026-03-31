@@ -74,11 +74,19 @@ export default function App() {
       const validation = validateRunFile(json);
       if (!validation.valid) throw new Error(validation.errors.join(', '));
       const run = deserializeRun(json);
+
       setResults(run.results);
       setBatchMeta({ batchId: run.batchId, ...run.metadata });
       setBatchParams(run.metadata);
-      setTotalRows(run.results.length);
       setLoadedFromFile(true);
+
+      // Handle resumable files with pending rows
+      if (run.pendingRows && run.pendingRows.length > 0) {
+        setCsvRows(run.pendingRows);
+        setTotalRows(run.targetRows || (run.results.length + run.pendingRows.length));
+      } else {
+        setTotalRows(run.results.length);
+      }
       setScreen('results');
     } catch (err) {
       alert(`Failed to load run: ${err.message}`);

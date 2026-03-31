@@ -269,6 +269,34 @@ export default function CredentialScreen({ onConnected, onLoadRun }) {
           ) : 'Connect'}
         </button>
 
+        <div className="border-t border-gray-200 mt-6 pt-4">
+          <p className="text-xs text-gray-500 mb-2">
+            Resume a previously saved batch
+          </p>
+          <label className="inline-flex items-center gap-2 text-sm bg-gray-100 hover:bg-gray-200 text-gray-700 px-4 py-2 rounded cursor-pointer transition-colors">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+            </svg>
+            Load Saved Run
+            <input
+              type="file"
+              accept=".json"
+              className="hidden"
+              onChange={async (e) => {
+                const file = e.target.files?.[0];
+                if (file && onLoadRun) {
+                  await onLoadRun(file);
+                }
+                e.target.value = '';
+              }}
+            />
+          </label>
+          <p className="text-[10px] text-gray-400 mt-1">
+            Load a .json file saved from a previous B.R.A.T. run.
+            If it contains unrated rows, you can resume after connecting.
+          </p>
+        </div>
+
         <p className="text-center text-[10px] text-gray-400 mt-2">Powered by Dynamic Logistix</p>
       </form>
     </div>

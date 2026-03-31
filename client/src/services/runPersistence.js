@@ -30,7 +30,7 @@ export function stripXmlBodies(results) {
 // ============================================================
 // Serialize a run to JSON
 // ============================================================
-export function serializeRun(results, batchParams, batchMeta, yieldConfig) {
+export function serializeRun(results, batchParams, batchMeta, yieldConfig, options = {}) {
   const strippedResults = stripXmlBodies(results);
   const safeMeta = stripCredentials({
     ...(batchMeta || {}),
@@ -51,13 +51,34 @@ export function serializeRun(results, batchParams, batchMeta, yieldConfig) {
     metadata: {
       ...safeMeta,
       totalRows: results.length,
+      targetRows: options.targetRows || batchMeta?.totalRows || results.length,
     },
     results: strippedResults,
+    batchStatus: {
+      isComplete: options.isComplete ?? (results.length >= (options.targetRows || results.length)),
+      succeededCount: results.filter(r => r.success).length,
+      failedCount: results.filter(r => !r.success).length,
+      missingCount: Math.max(0, (options.targetRows || results.length) - results.length),
+    },
   };
 
   // Include yield optimizer config if set
   if (yieldConfig) {
     run.yieldConfig = yieldConfig;
+  }
+
+  // Include unrated CSV rows for resume capability
+  if (options.csvRows && !run.batchStatus.isComplete) {
+    const succeededRefs = new Set(
+      results.filter(r => r.success).map(r => r.reference)
+    );
+    const unratedRows = options.csvRows.filter(row =>
+      !succeededRefs.has(row['Reference'] || '')
+    );
+    if (unratedRows.length > 0) {
+      run.pendingRows = unratedRows;
+      run.pendingRowCount = unratedRows.length;
+    }
   }
 
   return JSON.stringify(run, null, 2);
@@ -82,6 +103,14 @@ export function validateRunFile(json) {
     if (first.rowIndex === undefined && first.reference === undefined) {
       errors.push('Results do not contain expected fields (rowIndex, reference)');
     }
+  }
+
+  // Validate new optional fields
+  if (json.pendingRows && !Array.isArray(json.pendingRows)) {
+    errors.push('pendingRows must be an array');
+  }
+  if (json.batchStatus && typeof json.batchStatus !== 'object') {
+    errors.push('batchStatus must be an object');
   }
 
   // Check for accidental credential inclusion
@@ -114,6 +143,10 @@ export function deserializeRun(json) {
     version: json.version,
     appVersion: json.appVersion,
     yieldConfig: json.yieldConfig || null,
+    batchStatus: json.batchStatus || null,
+    pendingRows: json.pendingRows || null,
+    pendingRowCount: json.pendingRowCount || 0,
+    targetRows: json.metadata?.targetRows || json.results?.length || 0,
   };
 }
 

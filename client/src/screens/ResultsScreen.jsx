@@ -308,8 +308,48 @@ export default function ResultsScreen({
   };
 
   const handleSaveRun = () => {
-    const jsonStr = serializeRun(results, batchParams, batchMeta, activeMarkups);
+    const jsonStr = serializeRun(results, batchParams, batchMeta, activeMarkups, {
+      targetRows: totalRows,
+      isComplete: isComplete,
+      csvRows: csvRows,
+    });
     downloadRunFile(jsonStr, batchMeta?.batchId);
+  };
+
+  const handlePauseAndSave = () => {
+    // 1. Pause the orchestrator/executor if still running
+    if (orchestratorRef?.current) {
+      const status = orchestratorRef.current.getStatus?.();
+      if (status?.state === 'RUNNING') {
+        orchestratorRef.current.pause();
+      }
+    }
+    if (executorRef?.current) {
+      const status = executorRef.current.getStatus?.();
+      if (status?.state === 'RUNNING') {
+        executorRef.current.pause();
+      }
+    }
+
+    // 2. Save with pending rows included
+    const jsonStr = serializeRun(results, batchParams, batchMeta, activeMarkups, {
+      targetRows: totalRows,
+      isComplete: false,
+      csvRows: csvRows,
+    });
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const batchSlice = (batchMeta?.batchId || 'unknown').slice(0, 8);
+    const filename = `BRAT_Resumable_${batchSlice}_${results.length}of${totalRows}_${ts}.json`;
+    const blob = new Blob([jsonStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    // 3. Show confirmation
+    alert(`Saved ${results.length} completed results + ${totalRows - results.length} pending rows.\n\nTo resume: Load this file from the login screen or the Load Run button. The unrated rows are included — no CSV re-upload needed.`);
   };
 
   const handleSaveAndRetry = () => {
@@ -361,6 +401,11 @@ export default function ResultsScreen({
               {totalRows - results.length} rows remaining
               {failedCount > 0 && ` (${failedCount} failed)`}
             </span>
+            {loadedFromFile && hasCsvRows && !isComplete && (
+              <span className="text-blue-700 font-medium text-xs ml-2">
+                (Resumable — {csvRows.length} pending rows ready to rate)
+              </span>
+            )}
             <div className="flex-1" />
 
             {/* Resume only when orchestrator/executor is actually paused */}
@@ -397,6 +442,15 @@ export default function ResultsScreen({
               </button>
             )}
 
+            <button
+              onClick={handlePauseAndSave}
+              className="text-xs bg-[#002144] hover:bg-[#003366] text-white px-4 py-2 rounded font-semibold transition-colors flex items-center gap-1.5"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              Pause &amp; Save for Later
+            </button>
             <button
               onClick={handleSaveRun}
               className="text-xs bg-gray-600 hover:bg-gray-700 text-white px-3 py-1.5 rounded font-medium"

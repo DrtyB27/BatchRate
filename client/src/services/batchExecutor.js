@@ -412,9 +412,49 @@ export function createBatchExecutor(config) {
       let error = null;
 
       try {
-        xml = buildRatingRequest(row, params, credentials);
-        responseXml = await postToG3(xml, credentials, timeoutMs);
-        parsed = parseRatingResponse(responseXml);
+        const statuses = Array.isArray(params.contractStatus) && params.contractStatus.length > 1
+          ? params.contractStatus
+          : null;
+
+        if (statuses) {
+          // Multi-status mode: one API call per status, merge rates
+          const allRates = [];
+          let lastXml = null;
+          let lastResponseXml = null;
+          let ratingMessage = '';
+
+          for (const status of statuses) {
+            const statusParams = { ...params, contractStatus: [status] };
+            const reqXml = buildRatingRequest(row, statusParams, credentials);
+            const respXml = await postToG3(reqXml, credentials, timeoutMs);
+            const parsedResp = parseRatingResponse(respXml);
+
+            lastXml = reqXml;
+            lastResponseXml = respXml;
+
+            if (parsedResp && parsedResp.rates && parsedResp.rates.length > 0) {
+              for (const rate of parsedResp.rates) {
+                rate.contractStatusSource = status;
+              }
+              allRates.push(...parsedResp.rates);
+            }
+            if (parsedResp?.ratingMessage) {
+              ratingMessage += (ratingMessage ? ' | ' : '') + `[${status}] ${parsedResp.ratingMessage}`;
+            }
+
+            // Respect pause/cancel between status calls
+            if (state !== 'RUNNING') break;
+          }
+
+          xml = lastXml;
+          responseXml = lastResponseXml;
+          parsed = { rates: allRates, ratingMessage };
+        } else {
+          // Single status — normal path
+          xml = buildRatingRequest(row, params, credentials);
+          responseXml = await postToG3(xml, credentials, timeoutMs);
+          parsed = parseRatingResponse(responseXml);
+        }
       } catch (err) {
         error = err;
       }

@@ -105,8 +105,8 @@ export function buildRatingRequest(row, sidebarParams, session) {
   }
   const contractUseStr = ep.contractUse.length > 0 ? ` ${ep.contractUse.join(' ')} ` : '';
   lines.push(`    <ContractUse>${esc(contractUseStr)}</ContractUse>`);
-  const contractStatusStr = ep.contractStatus.length > 0 ? ` ${ep.contractStatus.join(' ')} ` : ' BeingEntered ';
-  lines.push(`    <ContractStatus>${esc(contractStatusStr)}</ContractStatus>`);
+  const contractStatusValue = Array.isArray(ep.contractStatus) ? ep.contractStatus[0] : (ep.contractStatus || 'BeingEntered');
+  lines.push(`    <ContractStatus>${esc(contractStatusValue)}</ContractStatus>`);
   lines.push(`    <SkipCarrierSafetyCheck>${ep.skipSafety ? '1' : '0'}</SkipCarrierSafetyCheck>`);
   lines.push(`    <EnableRoutingGuides>${ep.useRoutingGuides ? '1' : '0'}</EnableRoutingGuides>`);
   lines.push(`    <IncludeCostPlusMarkup>${ep.showTMSMarkup ? 'true' : 'false'}</IncludeCostPlusMarkup>`);

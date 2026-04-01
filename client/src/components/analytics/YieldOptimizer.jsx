@@ -28,7 +28,7 @@ function savingsColor(val) {
   return 'text-green-600';
 }
 
-export default function YieldOptimizer({ flatRows, activeMarkups, onMarkupsChange, allSCACs }) {
+export default function YieldOptimizer({ flatRows, activeMarkups, onMarkupsChange, computedScenarios, allSCACs }) {
   const [mode, setMode] = useState('manual'); // 'manual' | 'solver'
   const [collapsed, setCollapsed] = useState(false);
   const [showLaneTable, setShowLaneTable] = useState(false);
@@ -39,47 +39,57 @@ export default function YieldOptimizer({ flatRows, activeMarkups, onMarkupsChang
   const [customScenarioName, setCustomScenarioName] = useState('');
   const [showScenarioBuilder, setShowScenarioBuilder] = useState(false);
 
-  // Detect if historic data exists
-  const hasHistoric = useMemo(() => {
-    return flatRows.some(r => r.historicCarrier && r.historicCarrier.trim());
-  }, [flatRows]);
-
-  // Available preset scenarios
+  // Build dropdown options from shared scenario list
   const scenarioOptions = useMemo(() => {
-    const options = [
-      { key: 'all', label: 'All Rates (no filter)' },
-      { key: 'lowCost', label: 'Low Cost Award' },
-    ];
-    if (hasHistoric) {
-      options.push({ key: 'currentState', label: 'Current State (historic carrier)' });
-      options.push({ key: 'historicMatch', label: 'Historic Carrier — New Rate' });
+    const options = [{ key: 'all', label: 'All Rates (no filter)' }];
+    if (computedScenarios && computedScenarios.length > 0) {
+      for (const s of computedScenarios) {
+        options.push({ key: s.id, label: s.name });
+      }
     }
     if (customScenarioName && customScenarioSCACs.length > 0) {
       options.push({ key: 'custom', label: customScenarioName });
     }
     return options;
-  }, [hasHistoric, customScenarioName, customScenarioSCACs]);
+  }, [computedScenarios, customScenarioName, customScenarioSCACs]);
 
   // Compute the active scenario's filtered rows
   const scenarioFilteredRows = useMemo(() => {
     if (selectedScenario === 'all') return flatRows;
 
-    let scenarioResult;
-    if (selectedScenario === 'lowCost') {
-      const scacs = allSCACs.length > 0 ? allSCACs : [...new Set(flatRows.filter(r => r.hasRate).map(r => r.rate.carrierSCAC))];
-      scenarioResult = computeScenario(flatRows, scacs);
-    } else if (selectedScenario === 'currentState') {
-      scenarioResult = computeCurrentState(flatRows);
-    } else if (selectedScenario === 'historicMatch') {
-      scenarioResult = computeHistoricCarrierMatch(flatRows);
-    } else if (selectedScenario === 'custom' && customScenarioSCACs.length > 0) {
-      scenarioResult = computeScenario(flatRows, customScenarioSCACs);
-    } else {
-      return flatRows;
+    // Check shared computedScenarios first
+    if (computedScenarios) {
+      const scenario = computedScenarios.find(s => s.id === selectedScenario);
+      if (scenario && scenario.result && scenario.result.awards) {
+        const { awards } = scenario.result;
+        const winnerMap = new Map();
+        for (const [ref, award] of Object.entries(awards)) {
+          winnerMap.set(ref, (award.scac || '').toUpperCase());
+        }
+
+        const seen = new Set();
+        const filtered = [];
+        for (const row of flatRows) {
+          const ref = row.reference || '';
+          const scac = (row.rate?.carrierSCAC || '').toUpperCase();
+          const winnerScac = winnerMap.get(ref);
+          if (winnerScac && scac === winnerScac && !seen.has(ref)) {
+            seen.add(ref);
+            filtered.push(row);
+          }
+        }
+        return filtered;
+      }
     }
 
-    return filterRowsByScenario(flatRows, { result: scenarioResult });
-  }, [flatRows, selectedScenario, allSCACs, customScenarioSCACs]);
+    // Fallback for custom scenario built inline
+    if (selectedScenario === 'custom' && customScenarioSCACs.length > 0) {
+      const scenarioResult = computeScenario(flatRows, customScenarioSCACs);
+      return filterRowsByScenario(flatRows, { result: scenarioResult });
+    }
+
+    return flatRows;
+  }, [flatRows, selectedScenario, computedScenarios, customScenarioSCACs]);
 
   // Scenario summary for the info bar
   const scenarioInfo = useMemo(() => {

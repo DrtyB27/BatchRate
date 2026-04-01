@@ -2,8 +2,6 @@ import React, { useState, useRef } from 'react';
 import { buildTestRequest } from '../services/xmlBuilder.js';
 import { postToG3 } from '../services/ratingClient.js';
 
-const CONTRACT_STATUS_OPTIONS = ['BeingEntered', 'UnderReview', 'InProduction', 'OnHold'];
-
 const TEMPLATE_HEADERS = [
   'Reference','Historic Carrier','Historic Cost',
   'Orig City','Org State','Org Postal Code','Orig Cntry',
@@ -22,24 +20,11 @@ function downloadTemplate() {
   URL.revokeObjectURL(url);
 }
 
-const CONTRACT_USE_OPTIONS = [
-  { key: 'BlanketCost', label: 'Blanket Cost', requiresClient: false },
-  { key: 'ClientCost', label: 'Client Cost', requiresClient: true },
-  { key: 'BlanketBilling', label: 'Blanket Billing', requiresClient: false },
-  { key: 'ClientBilling', label: 'Client Billing', requiresClient: true },
-  { key: 'BlanketBenchmark', label: 'Blanket Benchmark', requiresClient: false },
-];
-
 export default function CredentialScreen({ onConnected, onLoadRun }) {
   const [form, setForm] = useState({
     baseURL: 'https://shipdlx.3gtms.com',
     username: '',
     password: '',
-    clientTPNum: '',
-    carrierTPNum: '',
-    contRef: '',
-    contractStatus: ['BeingEntered'],
-    contractUse: ['ClientCost'],
     utcOffset: '05:00',
     weightUOM: 'Lb',
     volumeUOM: 'CuFt',
@@ -53,37 +38,8 @@ export default function CredentialScreen({ onConnected, onLoadRun }) {
 
   const update = (field) => (e) => setForm(prev => ({ ...prev, [field]: e.target.value }));
 
-  const toggleContractUse = (key) => {
-    setForm(prev => {
-      const list = prev.contractUse || [];
-      return {
-        ...prev,
-        contractUse: list.includes(key) ? list.filter(k => k !== key) : [...list, key],
-      };
-    });
-  };
-
-  const toggleContractStatus = (key) => {
-    setForm(prev => {
-      const list = prev.contractStatus || [];
-      return {
-        ...prev,
-        contractStatus: list.includes(key) ? list.filter(k => k !== key) : [...list, key],
-      };
-    });
-  };
-
-  const clientVariantSelected = (form.contractUse || []).some(
-    key => CONTRACT_USE_OPTIONS.find(o => o.key === key)?.requiresClient
-  );
-  const clientTPMissing = clientVariantSelected && !form.clientTPNum.trim();
-
   const handleConnect = async (e) => {
     e.preventDefault();
-    if (clientTPMissing) {
-      setError('Client Trading Partner Number is required when Client Cost or Client Billing is selected.');
-      return;
-    }
     setLoading(true);
     setError('');
     try {
@@ -104,7 +60,6 @@ export default function CredentialScreen({ onConnected, onLoadRun }) {
   };
 
   const inputCls = 'w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#39b6e6] focus:border-transparent';
-  const inputErrCls = 'w-full border border-red-400 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent';
   const labelCls = 'block text-sm font-medium text-gray-700 mb-1';
   const sectionTitle = 'text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3';
 
@@ -160,82 +115,6 @@ export default function CredentialScreen({ onConnected, onLoadRun }) {
 
         <hr className="border-gray-200" />
 
-        {/* ── Session Context ── */}
-        <div className="space-y-3">
-          <h3 className={sectionTitle}>Trading Partner &amp; Contract</h3>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className={labelCls}>
-                Client TP Num
-                {clientVariantSelected && <span className="text-red-500 ml-0.5">*</span>}
-              </label>
-              <input
-                className={clientTPMissing ? inputErrCls : inputCls}
-                value={form.clientTPNum}
-                onChange={update('clientTPNum')}
-                placeholder="Trading Partner Number"
-              />
-              {clientTPMissing && (
-                <p className="text-xs text-red-500 mt-1">Required when Client Cost or Client Billing is selected</p>
-              )}
-            </div>
-            <div>
-              <label className={labelCls}>Carrier TP Num</label>
-              <input className={inputCls} value={form.carrierTPNum} onChange={update('carrierTPNum')} placeholder="Optional" />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className={labelCls}>Contract Ref</label>
-              <input className={inputCls} value={form.contRef} onChange={update('contRef')} placeholder="Contract reference" />
-            </div>
-            <div className="col-span-2">
-              <label className={labelCls}>Contract Status</label>
-              <div className="flex flex-wrap gap-x-4 gap-y-1.5 mt-1">
-                {CONTRACT_STATUS_OPTIONS.map(status => (
-                  <label key={status} className="flex items-center gap-1.5 text-sm">
-                    <input
-                      type="checkbox"
-                      checked={(form.contractStatus || []).includes(status)}
-                      onChange={() => toggleContractStatus(status)}
-                      className="rounded border-gray-300"
-                    />
-                    <span>{status}</span>
-                  </label>
-                ))}
-              </div>
-              {(form.contractStatus || []).length > 1 && (
-                <p className="text-[10px] text-blue-600 mt-1">
-                  Multiple statuses selected — rates from all will appear in results for comparison
-                </p>
-              )}
-            </div>
-          </div>
-
-          <div>
-            <label className={labelCls}>Contract Use</label>
-            <div className="flex flex-wrap gap-x-4 gap-y-1.5 mt-1">
-              {CONTRACT_USE_OPTIONS.map(({ key, label, requiresClient }) => (
-                <label key={key} className="flex items-center gap-1.5 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={(form.contractUse || []).includes(key)}
-                    onChange={() => toggleContractUse(key)}
-                    className="rounded border-gray-300"
-                  />
-                  <span className={requiresClient && !form.clientTPNum.trim() && (form.contractUse || []).includes(key) ? 'text-red-600 font-medium' : ''}>
-                    {label}
-                  </span>
-                  {requiresClient && <span className="text-[10px] text-amber-600">(requires Client TP)</span>}
-                </label>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        <hr className="border-gray-200" />
-
         {/* ── Advanced Defaults ── */}
         <div>
           <button
@@ -283,7 +162,7 @@ export default function CredentialScreen({ onConnected, onLoadRun }) {
 
         <button
           type="submit"
-          disabled={loading || !form.username || !form.password || clientTPMissing}
+          disabled={loading || !form.username || !form.password}
           className="w-full bg-[#39b6e6] hover:bg-[#2d9bc4] disabled:bg-gray-300 text-white font-semibold py-2.5 rounded-md transition-colors text-sm"
         >
           {loading ? (

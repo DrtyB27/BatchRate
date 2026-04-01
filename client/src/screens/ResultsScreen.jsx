@@ -248,6 +248,7 @@ export default function ResultsScreen({
   results, totalRows, batchParams, batchMeta, onNewBatch, onLoadRun, onReplaceResults,
   loadedFromFile, initialYieldConfig, csvRows, onRetryFailed, onResumeExecution,
   onCancelExecution, orchestratorRef, executorRef, onRetryInPlace, retryProgress,
+  hasCredentials,
 }) {
   const [viewMode, setViewMode] = useState('both');
   const [modal, setModal] = useState(null);
@@ -391,20 +392,38 @@ export default function ResultsScreen({
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       {/* Incomplete batch banner with retry */}
-      {!isComplete && results.length > 0 && (
+      {((!isComplete && results.length > 0) || (isComplete && retryCount > 0)) && (
         <div className="bg-amber-50 border-b border-amber-200 px-6 py-3 shrink-0">
           <div className="flex items-center gap-3 flex-wrap">
             <span className="text-amber-800 text-sm font-semibold">
-              Batch incomplete: {results.length}/{totalRows}
+              {isComplete
+                ? `Batch Complete — ${retryCount} rows need attention`
+                : `Batch incomplete: ${results.length}/${totalRows}`
+              }
             </span>
             <span className="text-amber-700 text-xs">
-              {totalRows - results.length} rows remaining
-              {failedCount > 0 && ` (${failedCount} failed)`}
+              {isComplete
+                ? `${failedCount} failed`
+                : `${totalRows - results.length} rows remaining${failedCount > 0 ? ` (${failedCount} failed)` : ''}`
+              }
             </span>
             {loadedFromFile && hasCsvRows && !isComplete && (
               <span className="text-blue-700 font-medium text-xs ml-2">
                 (Resumable — {csvRows.length} pending rows ready to rate)
               </span>
+            )}
+            {!hasCredentials && hasCsvRows && !isComplete && (
+              <button
+                onClick={() => {
+                  document.querySelector('[data-reconnect]')?.click();
+                }}
+                className="text-xs bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded font-semibold transition-colors flex items-center gap-1.5"
+              >
+                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                </svg>
+                Connect to 3G TMS to Resume
+              </button>
             )}
             <div className="flex-1" />
 
@@ -423,13 +442,26 @@ export default function ResultsScreen({
               </button>
             )}
 
+            {/* Resume from loaded file — dedicated button when credentials exist */}
+            {loadedFromFile && hasCsvRows && !isComplete && !retryProgress && hasCredentials && (
+              <button
+                onClick={onRetryInPlace}
+                className="bg-green-600 hover:bg-green-700 text-white px-5 py-2 rounded-lg font-bold text-sm shadow-md transition-colors flex items-center gap-1.5"
+              >
+                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                  <path d="M6.3 2.8A1 1 0 005 3.7v12.6a1 1 0 001.3.9l10-6.3a1 1 0 000-1.8l-10-6.3z" />
+                </svg>
+                Resume Rating ({csvRows.length} rows)
+              </button>
+            )}
+
             {/* THE RETRY BUTTON — always visible when there are missing rows */}
-            {onRetryInPlace && !retryProgress && (
+            {onRetryInPlace && !retryProgress && !loadedFromFile && hasCredentials && (
               <button
                 onClick={onRetryInPlace}
                 className="bg-[#39b6e6] hover:bg-[#2d9bc4] text-white px-5 py-2 rounded-lg font-bold text-sm shadow-md transition-colors"
               >
-                Retry {totalRows - results.filter(r => r.success).length} Remaining Rows
+                {loadedFromFile ? 'Resume' : 'Retry'} {totalRows - results.filter(r => r.success).length} {isComplete ? 'Failed' : 'Remaining'} Rows
               </button>
             )}
 

@@ -12,7 +12,7 @@ export default function InputScreen({
 }) {
   const [params, setParams] = useState({
     contRef: credentials.contRef || '',
-    contractStatus: credentials.contractStatus || 'BeingEntered',
+    contractStatus: credentials.contractStatus || ['BeingEntered'],
     clientTPNum: credentials.clientTPNum || '',
     carrierTPNum: credentials.carrierTPNum || '',
     skipSafety: true,

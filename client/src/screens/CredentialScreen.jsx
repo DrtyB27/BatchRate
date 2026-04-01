@@ -38,7 +38,7 @@ export default function CredentialScreen({ onConnected, onLoadRun }) {
     clientTPNum: '',
     carrierTPNum: '',
     contRef: '',
-    contractStatus: 'BeingEntered',
+    contractStatus: ['BeingEntered'],
     contractUse: ['ClientCost'],
     utcOffset: '05:00',
     weightUOM: 'Lb',
@@ -59,6 +59,16 @@ export default function CredentialScreen({ onConnected, onLoadRun }) {
       return {
         ...prev,
         contractUse: list.includes(key) ? list.filter(k => k !== key) : [...list, key],
+      };
+    });
+  };
+
+  const toggleContractStatus = (key) => {
+    setForm(prev => {
+      const list = prev.contractStatus || [];
+      return {
+        ...prev,
+        contractStatus: list.includes(key) ? list.filter(k => k !== key) : [...list, key],
       };
     });
   };
@@ -180,11 +190,26 @@ export default function CredentialScreen({ onConnected, onLoadRun }) {
               <label className={labelCls}>Contract Ref</label>
               <input className={inputCls} value={form.contRef} onChange={update('contRef')} placeholder="Contract reference" />
             </div>
-            <div>
+            <div className="col-span-2">
               <label className={labelCls}>Contract Status</label>
-              <select className={inputCls} value={form.contractStatus} onChange={update('contractStatus')}>
-                {CONTRACT_STATUS_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
-              </select>
+              <div className="flex flex-wrap gap-x-4 gap-y-1.5 mt-1">
+                {CONTRACT_STATUS_OPTIONS.map(status => (
+                  <label key={status} className="flex items-center gap-1.5 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={(form.contractStatus || []).includes(status)}
+                      onChange={() => toggleContractStatus(status)}
+                      className="rounded border-gray-300"
+                    />
+                    <span>{status}</span>
+                  </label>
+                ))}
+              </div>
+              {(form.contractStatus || []).length > 1 && (
+                <p className="text-[10px] text-blue-600 mt-1">
+                  Multiple statuses selected — rates from all will appear in results for comparison
+                </p>
+              )}
             </div>
           </div>
 

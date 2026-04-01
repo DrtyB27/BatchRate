@@ -63,7 +63,11 @@ function resolveParams(row, sidebarParams) {
 
   return {
     contRef: val('Cont. Ref') || sidebarParams.contRef || '',
-    contractStatus: val('Cont. Status') || sidebarParams.contractStatus || 'BeingEntered',
+    contractStatus: val('Cont. Status')
+      ? [val('Cont. Status')]
+      : (Array.isArray(sidebarParams.contractStatus)
+          ? sidebarParams.contractStatus
+          : [sidebarParams.contractStatus || 'BeingEntered']),
     clientTPNum: val('Client TP Num') || sidebarParams.clientTPNum || '',
     carrierTPNum: val('Carrier TP Num') || sidebarParams.carrierTPNum || '',
     skipSafety,
@@ -101,7 +105,8 @@ export function buildRatingRequest(row, sidebarParams, session) {
   }
   const contractUseStr = ep.contractUse.length > 0 ? ` ${ep.contractUse.join(' ')} ` : '';
   lines.push(`    <ContractUse>${esc(contractUseStr)}</ContractUse>`);
-  lines.push(`    <ContractStatus>${esc(ep.contractStatus)}</ContractStatus>`);
+  const contractStatusStr = ep.contractStatus.length > 0 ? ` ${ep.contractStatus.join(' ')} ` : '';
+  lines.push(`    <ContractStatus>${esc(contractStatusStr)}</ContractStatus>`);
   lines.push(`    <SkipCarrierSafetyCheck>${ep.skipSafety ? '1' : '0'}</SkipCarrierSafetyCheck>`);
   lines.push(`    <EnableRoutingGuides>${ep.useRoutingGuides ? '1' : '0'}</EnableRoutingGuides>`);
   lines.push(`    <IncludeCostPlusMarkup>${ep.showTMSMarkup ? 'true' : 'false'}</IncludeCostPlusMarkup>`);
@@ -256,7 +261,7 @@ export function buildTestRequest(session) {
   <RequestToken>connection-test</RequestToken>
   <Configuration>
     <ContractUse> ClientCost </ContractUse>
-    <ContractStatus>BeingEntered</ContractStatus>
+    <ContractStatus> ${(session.contractStatus || ['BeingEntered']).join(' ')} </ContractStatus>
     <SkipCarrierSafetyCheck>1</SkipCarrierSafetyCheck>
     <EnableRoutingGuides>0</EnableRoutingGuides>
     <IncludeCostPlusMarkup>false</IncludeCostPlusMarkup>

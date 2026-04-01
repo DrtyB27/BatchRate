@@ -105,7 +105,7 @@ export function buildRatingRequest(row, sidebarParams, session) {
   }
   const contractUseStr = ep.contractUse.length > 0 ? ` ${ep.contractUse.join(' ')} ` : '';
   lines.push(`    <ContractUse>${esc(contractUseStr)}</ContractUse>`);
-  const contractStatusStr = ep.contractStatus.length > 0 ? ` ${ep.contractStatus.join(' ')} ` : '';
+  const contractStatusStr = ep.contractStatus.length > 0 ? ` ${ep.contractStatus.join(' ')} ` : ' BeingEntered ';
   lines.push(`    <ContractStatus>${esc(contractStatusStr)}</ContractStatus>`);
   lines.push(`    <SkipCarrierSafetyCheck>${ep.skipSafety ? '1' : '0'}</SkipCarrierSafetyCheck>`);
   lines.push(`    <EnableRoutingGuides>${ep.useRoutingGuides ? '1' : '0'}</EnableRoutingGuides>`);
@@ -261,7 +261,7 @@ export function buildTestRequest(session) {
   <RequestToken>connection-test</RequestToken>
   <Configuration>
     <ContractUse> ClientCost </ContractUse>
-    <ContractStatus> ${(session.contractStatus || ['BeingEntered']).join(' ')} </ContractStatus>
+    <ContractStatus>BeingEntered</ContractStatus>
     <SkipCarrierSafetyCheck>1</SkipCarrierSafetyCheck>
     <EnableRoutingGuides>0</EnableRoutingGuides>
     <IncludeCostPlusMarkup>false</IncludeCostPlusMarkup>

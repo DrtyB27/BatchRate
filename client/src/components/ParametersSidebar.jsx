@@ -26,6 +26,20 @@ export default function ParametersSidebar({ params, setParams }) {
     });
   };
 
+  const toggleContractStatus = (key) => {
+    setParams(prev => {
+      const list = Array.isArray(prev.contractStatus)
+        ? prev.contractStatus
+        : [prev.contractStatus || 'BeingEntered'];
+      return {
+        ...prev,
+        contractStatus: list.includes(key)
+          ? list.filter(k => k !== key)
+          : [...list, key],
+      };
+    });
+  };
+
   const inputCls = 'w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500';
   const labelCls = 'block text-xs font-medium text-gray-600 mb-0.5';
   const sectionCls = 'border-b border-gray-200 pb-3 mb-3';
@@ -36,7 +50,7 @@ export default function ParametersSidebar({ params, setParams }) {
 
       {/* Connection Settings */}
       <div className={sectionCls}>
-        <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Connection Settings</h3>
+        <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Rating Configuration</h3>
 
         <div className="mb-2">
           <label className={labelCls}>Cont. Ref</label>
@@ -45,9 +59,24 @@ export default function ParametersSidebar({ params, setParams }) {
 
         <div className="mb-2">
           <label className={labelCls}>Contract Status</label>
-          <select className={inputCls} value={params.contractStatus} onChange={e => update('contractStatus', e.target.value)}>
-            {CONTRACT_STATUS_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
-          </select>
+          <div className="space-y-1">
+            {CONTRACT_STATUS_OPTIONS.map(status => (
+              <label key={status} className="flex items-center gap-1.5 text-xs">
+                <input
+                  type="checkbox"
+                  checked={(Array.isArray(params.contractStatus) ? params.contractStatus : [params.contractStatus]).includes(status)}
+                  onChange={() => toggleContractStatus(status)}
+                  className="rounded border-gray-300"
+                />
+                {status}
+              </label>
+            ))}
+          </div>
+          {Array.isArray(params.contractStatus) && params.contractStatus.length > 1 && (
+            <p className="text-[10px] text-blue-600 mt-1">
+              Multi-status: bid vs active comparison
+            </p>
+          )}
         </div>
 
         <div className="mb-2">

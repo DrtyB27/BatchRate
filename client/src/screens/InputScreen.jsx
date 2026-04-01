@@ -11,12 +11,12 @@ export default function InputScreen({
   orchestratorRef, executorRef, retryData, onMergeResults, onRetryComplete, existingResults,
 }) {
   const [params, setParams] = useState({
-    contRef: credentials.contRef || '',
-    contractStatus: credentials.contractStatus || ['BeingEntered'],
-    clientTPNum: credentials.clientTPNum || '',
-    carrierTPNum: credentials.carrierTPNum || '',
+    contRef: '',
+    contractStatus: ['BeingEntered'],
+    clientTPNum: '',
+    carrierTPNum: '',
     skipSafety: true,
-    contractUse: credentials.contractUse || ['ClientCost'],
+    contractUse: ['ClientCost'],
     useRoutingGuides: false,
     forceRoutingGuideName: '',
     numberOfRates: 4,

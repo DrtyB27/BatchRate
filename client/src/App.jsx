@@ -23,23 +23,22 @@ export default function App() {
 
   const handleConnected = useCallback((creds) => {
     setCredentials(creds);
-    // If results exist from a loaded file, go back to ResultsScreen
-    // so the user can resume rating. Otherwise go to InputScreen.
-    if (results.length > 0 && csvRows && csvRows.length > 0) {
+    // If we have loaded run data, go back to results so user can resume
+    if (results.length > 0 && loadedFromFile) {
       setScreen('results');
     } else {
       setLoadedFromFile(false);
       setScreen('input');
     }
-  }, [results, csvRows]);
+  }, [results.length, loadedFromFile]);
 
-  // Soft reconnect — preserves loaded run data
+  // Soft reconnect — preserves loaded run data, just re-authenticates
   const handleReconnect = useCallback(() => {
     setCredentials(null);
     setScreen('credentials');
   }, []);
 
-  // Full disconnect — resets everything (used by "New Batch")
+  // Full disconnect — clears everything
   const handleDisconnect = useCallback(() => {
     setCredentials(null);
     setScreen('credentials');
@@ -277,11 +276,10 @@ export default function App() {
               </span>
             ) : null}
             <button
-              data-reconnect
               onClick={handleReconnect}
               className="text-sm bg-[#39b6e6]/20 border border-[#39b6e6] text-[#39b6e6] hover:bg-[#39b6e6]/30 px-3 py-1.5 rounded transition-colors"
             >
-              Edit Connection
+              {credentials ? 'Edit Connection' : 'Connect to 3G TMS'}
             </button>
           </div>
         )}
@@ -317,7 +315,6 @@ export default function App() {
             onLoadRun={handleLoadRun}
             onReplaceResults={handleReplaceResults}
             loadedFromFile={loadedFromFile}
-            hasCredentials={!!credentials}
             csvRows={csvRows}
             onRetryFailed={handleRetryFailed}
             onRetryInPlace={handleRetryInPlace}

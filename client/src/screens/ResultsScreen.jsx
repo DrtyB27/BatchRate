@@ -248,7 +248,6 @@ export default function ResultsScreen({
   results, totalRows, batchParams, batchMeta, onNewBatch, onLoadRun, onReplaceResults,
   loadedFromFile, initialYieldConfig, csvRows, onRetryFailed, onResumeExecution,
   onCancelExecution, orchestratorRef, executorRef, onRetryInPlace, retryProgress,
-  hasCredentials,
 }) {
   const [viewMode, setViewMode] = useState('both');
   const [modal, setModal] = useState(null);
@@ -391,19 +390,19 @@ export default function ResultsScreen({
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
-      {/* Incomplete batch banner with retry */}
-      {((!isComplete && results.length > 0) || (isComplete && retryCount > 0)) && (
-        <div className="bg-amber-50 border-b border-amber-200 px-6 py-3 shrink-0">
+      {/* Batch action banner — shows during execution OR after completion with failures */}
+      {results.length > 0 && (!isComplete || retryCount > 0) && (
+        <div className={`${isComplete ? 'bg-red-50 border-b border-red-200' : 'bg-amber-50 border-b border-amber-200'} px-6 py-3 shrink-0`}>
           <div className="flex items-center gap-3 flex-wrap">
-            <span className="text-amber-800 text-sm font-semibold">
+            <span className={`${isComplete ? 'text-red-800' : 'text-amber-800'} text-sm font-semibold`}>
               {isComplete
-                ? `Batch Complete — ${retryCount} rows need attention`
+                ? `Batch complete — ${retryCount} rows need attention`
                 : `Batch incomplete: ${results.length}/${totalRows}`
               }
             </span>
-            <span className="text-amber-700 text-xs">
+            <span className={`${isComplete ? 'text-red-700' : 'text-amber-700'} text-xs`}>
               {isComplete
-                ? `${failedCount} failed`
+                ? `${failedCount} failed, ${successCount} succeeded`
                 : `${totalRows - results.length} rows remaining${failedCount > 0 ? ` (${failedCount} failed)` : ''}`
               }
             </span>
@@ -412,23 +411,10 @@ export default function ResultsScreen({
                 (Resumable — {csvRows.length} pending rows ready to rate)
               </span>
             )}
-            {!hasCredentials && hasCsvRows && !isComplete && (
-              <button
-                onClick={() => {
-                  document.querySelector('[data-reconnect]')?.click();
-                }}
-                className="text-xs bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded font-semibold transition-colors flex items-center gap-1.5"
-              >
-                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                </svg>
-                Connect to 3G TMS to Resume
-              </button>
-            )}
             <div className="flex-1" />
 
             {/* Resume only when orchestrator/executor is actually paused */}
-            {onResumeExecution && (() => {
+            {!isComplete && onResumeExecution && (() => {
               const orchState = orchestratorRef?.current?.getStatus?.()?.state;
               const execState = executorRef?.current?.getStatus?.()?.state;
               return orchState === 'PAUSED' || orchState === 'AUTO_PAUSED' ||
@@ -442,30 +428,17 @@ export default function ResultsScreen({
               </button>
             )}
 
-            {/* Resume from loaded file — dedicated button when credentials exist */}
-            {loadedFromFile && hasCsvRows && !isComplete && !retryProgress && hasCredentials && (
-              <button
-                onClick={onRetryInPlace}
-                className="bg-green-600 hover:bg-green-700 text-white px-5 py-2 rounded-lg font-bold text-sm shadow-md transition-colors flex items-center gap-1.5"
-              >
-                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-                  <path d="M6.3 2.8A1 1 0 005 3.7v12.6a1 1 0 001.3.9l10-6.3a1 1 0 000-1.8l-10-6.3z" />
-                </svg>
-                Resume Rating ({csvRows.length} rows)
-              </button>
-            )}
-
-            {/* THE RETRY BUTTON — always visible when there are missing rows */}
-            {onRetryInPlace && !retryProgress && !loadedFromFile && hasCredentials && (
+            {/* RETRY BUTTON — visible when there are retryable rows */}
+            {onRetryInPlace && !retryProgress && retryCount > 0 && (
               <button
                 onClick={onRetryInPlace}
                 className="bg-[#39b6e6] hover:bg-[#2d9bc4] text-white px-5 py-2 rounded-lg font-bold text-sm shadow-md transition-colors"
               >
-                {loadedFromFile ? 'Resume' : 'Retry'} {totalRows - results.filter(r => r.success).length} {isComplete ? 'Failed' : 'Remaining'} Rows
+                {isComplete ? `Retry ${retryCount} Failed Rows` : `Retry ${totalRows - results.filter(r => r.success).length} Remaining Rows`}
               </button>
             )}
 
-            {onCancelExecution && (orchestratorRef?.current || executorRef?.current) && (
+            {!isComplete && onCancelExecution && (orchestratorRef?.current || executorRef?.current) && (
               <button
                 onClick={onCancelExecution}
                 className="text-xs bg-red-500 hover:bg-red-600 text-white px-3 py-1.5 rounded font-medium transition-colors"
@@ -474,20 +447,22 @@ export default function ResultsScreen({
               </button>
             )}
 
-            <button
-              onClick={handlePauseAndSave}
-              className="text-xs bg-[#002144] hover:bg-[#003366] text-white px-4 py-2 rounded font-semibold transition-colors flex items-center gap-1.5"
-            >
-              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              Pause &amp; Save for Later
-            </button>
+            {!isComplete && (
+              <button
+                onClick={handlePauseAndSave}
+                className="text-xs bg-[#002144] hover:bg-[#003366] text-white px-4 py-2 rounded font-semibold transition-colors flex items-center gap-1.5"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                Pause &amp; Save for Later
+              </button>
+            )}
             <button
               onClick={handleSaveRun}
               className="text-xs bg-gray-600 hover:bg-gray-700 text-white px-3 py-1.5 rounded font-medium"
             >
-              Save Partial
+              {isComplete ? 'Save Run' : 'Save Partial'}
             </button>
           </div>
 

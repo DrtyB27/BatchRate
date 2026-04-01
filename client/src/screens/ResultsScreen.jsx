@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import ResultsTable, { flattenResults, computeLowCostFlags } from '../components/ResultsTable.jsx';
 import ExportWarningModal from '../components/ExportWarningModal.jsx';
 import AnalyticsDashboard from '../components/AnalyticsDashboard.jsx';
@@ -8,6 +8,9 @@ import BatchPerformance from '../components/BatchPerformance.jsx';
 import CarrierFeedback from '../components/CarrierFeedback.jsx';
 import CombineRunsDialog from '../components/CombineRunsDialog.jsx';
 import { serializeRun, downloadRunFile } from '../services/runPersistence.js';
+import {
+  computeScenario, computeCurrentState, computeHistoricCarrierMatch,
+} from '../services/analyticsEngine.js';
 import { applyMargin } from '../services/ratingClient.js';
 
 function downloadBlob(filename, blob) {
@@ -273,6 +276,80 @@ export default function ResultsScreen({
     }
     return [...scacs].sort();
   }, [flatRows]);
+
+  const hasHistoric = useMemo(() => {
+    return flatRows.some(r => r.historicCarrier && r.historicCarrier.trim());
+  }, [flatRows]);
+
+  const [scenarios, setScenarios] = useState(() => {
+    const initial = [];
+    initial.push({
+      id: 'lc_1',
+      name: 'Low Cost Award',
+      eligibleSCACs: [],
+      locked: false,
+      isCurrentState: false,
+      isLowCost: true,
+    });
+    return initial;
+  });
+
+  // Ensure Low Cost Award has all SCACs once they're known
+  // and add Current State + Historic Match if historic data appears
+  useEffect(() => {
+    setScenarios(prev => {
+      let updated = [...prev];
+
+      // Update Low Cost Award SCACs
+      const lc = updated.find(s => s.isLowCost);
+      if (lc && allSCACs.length > 0 && lc.eligibleSCACs.length === 0) {
+        lc.eligibleSCACs = [...allSCACs];
+      }
+
+      // Add Current State + Historic Match if historic data exists and not already added
+      if (hasHistoric && !updated.some(s => s.isCurrentState)) {
+        updated = [
+          {
+            id: 'cs_1',
+            name: 'Current State',
+            eligibleSCACs: [],
+            locked: true,
+            isCurrentState: true,
+            isLowCost: false,
+            isHistoricMatch: false,
+          },
+          {
+            id: 'hm_1',
+            name: 'Historic Carrier \u2014 New Rate',
+            eligibleSCACs: [],
+            locked: true,
+            isCurrentState: false,
+            isLowCost: false,
+            isHistoricMatch: true,
+          },
+          ...updated,
+        ];
+      }
+
+      return updated;
+    });
+  }, [allSCACs, hasHistoric]);
+
+  // Compute scenario results for sharing
+  const computedScenarios = useMemo(() => {
+    return scenarios.map(s => {
+      let result;
+      if (s.isCurrentState) {
+        result = computeCurrentState(flatRows);
+      } else if (s.isHistoricMatch) {
+        result = computeHistoricCarrierMatch(flatRows);
+      } else {
+        const scacs = s.eligibleSCACs.length > 0 ? s.eligibleSCACs : allSCACs;
+        result = computeScenario(flatRows, scacs);
+      }
+      return { ...s, result };
+    });
+  }, [scenarios, flatRows, allSCACs]);
 
   // Summary stats
   const successCount = results.filter(r => r.success).length;
@@ -635,9 +712,23 @@ export default function ResultsScreen({
 
       {/* Content */}
       {viewMode === 'analytics' ? (
-        <AnalyticsDashboard flatRows={flatRows} activeMarkups={activeMarkups} onMarkupsChange={setActiveMarkups} allSCACs={allSCACs} />
+        <AnalyticsDashboard
+          flatRows={flatRows}
+          activeMarkups={activeMarkups}
+          onMarkupsChange={setActiveMarkups}
+          computedScenarios={computedScenarios}
+          allSCACs={allSCACs}
+        />
       ) : viewMode === 'scenarios' ? (
-        <ScenarioBuilder flatRows={flatRows} activeMarkups={activeMarkups} />
+        <ScenarioBuilder
+          flatRows={flatRows}
+          activeMarkups={activeMarkups}
+          scenarios={scenarios}
+          setScenarios={setScenarios}
+          computedScenarios={computedScenarios}
+          allSCACs={allSCACs}
+          hasHistoric={hasHistoric}
+        />
       ) : viewMode === 'optimize' ? (
         <OptimizationDashboard flatRows={flatRows} />
       ) : viewMode === 'performance' ? (

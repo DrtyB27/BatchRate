@@ -24,81 +24,11 @@ function timestamp() {
   return new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 }
 
-let nextId = 1;
+let nextId = 100;
 
-export default function ScenarioBuilder({ flatRows, activeMarkups }) {
+export default function ScenarioBuilder({ flatRows, activeMarkups, scenarios, setScenarios, computedScenarios, allSCACs, hasHistoric }) {
   const [scenarioView, setScenarioView] = useState('internal');
   const isCustomer = scenarioView === 'customer';
-  // Detect all unique SCACs from rated results
-  const allSCACs = useMemo(() => {
-    const scacs = new Set();
-    for (const r of flatRows) {
-      if (r.hasRate && r.rate.carrierSCAC) scacs.add(r.rate.carrierSCAC);
-    }
-    return [...scacs].sort();
-  }, [flatRows]);
-
-  // Detect if historic data exists
-  const hasHistoric = useMemo(() => {
-    return flatRows.some(r => r.historicCarrier && r.historicCarrier.trim());
-  }, [flatRows]);
-
-  // Initialize scenarios
-  const [scenarios, setScenarios] = useState(() => {
-    const initial = [];
-
-    // Current State (if historic data exists)
-    if (hasHistoric) {
-      initial.push({
-        id: `cs_${nextId++}`,
-        name: 'Current State',
-        eligibleSCACs: [],
-        locked: true,
-        isCurrentState: true,
-        isLowCost: false,
-        isHistoricMatch: false,
-      });
-
-      // Historic Carrier Match
-      initial.push({
-        id: `hm_${nextId++}`,
-        name: 'Historic Carrier \u2014 New Rate',
-        eligibleSCACs: [],
-        locked: true,
-        isCurrentState: false,
-        isLowCost: false,
-        isHistoricMatch: true,
-      });
-    }
-
-    // Low Cost Award (always)
-    initial.push({
-      id: `lc_${nextId++}`,
-      name: 'Low Cost Award',
-      eligibleSCACs: [...allSCACs],
-      locked: false,
-      isCurrentState: false,
-      isLowCost: true,
-    });
-
-    return initial;
-  });
-
-  // Compute results for all scenarios
-  const computedScenarios = useMemo(() => {
-    return scenarios.map(s => {
-      let result;
-      if (s.isCurrentState) {
-        result = computeCurrentState(flatRows);
-      } else if (s.isHistoricMatch) {
-        result = computeHistoricCarrierMatch(flatRows);
-      } else {
-        result = computeScenario(flatRows, s.eligibleSCACs);
-      }
-      return { ...s, result };
-    });
-  }, [scenarios, flatRows]);
-
   const currentStateResult = useMemo(() => {
     const cs = computedScenarios.find(s => s.isCurrentState);
     return cs?.result || null;

@@ -47,7 +47,7 @@ function PanelCard({ title, count, accentColor, children }) {
 const fmtMoney = (v) => `$${Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const fmtPct = (v) => `${Number(v).toFixed(1)}%`;
 
-export default function AnalyticsDashboard({ flatRows, activeMarkups, onMarkupsChange, allSCACs }) {
+export default function AnalyticsDashboard({ flatRows, activeMarkups, onMarkupsChange, computedScenarios, allSCACs }) {
   const [analyticsView, setAnalyticsView] = useState('internal');
   const isCustomer = analyticsView === 'customer';
 
@@ -159,6 +159,7 @@ export default function AnalyticsDashboard({ flatRows, activeMarkups, onMarkupsC
           flatRows={flatRows}
           activeMarkups={activeMarkups}
           onMarkupsChange={onMarkupsChange}
+          computedScenarios={computedScenarios || []}
           allSCACs={allSCACs || []}
         />
       )}

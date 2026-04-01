@@ -2,7 +2,7 @@ import React, { useState, useMemo, useCallback } from 'react';
 import MarkupSlider from './MarkupSlider.jsx';
 import TargetSolver from './TargetSolver.jsx';
 import SensitivityChart from './SensitivityChart.jsx';
-import { computeYieldAnalysis, optimizePerScac } from '../../services/analyticsEngine.js';
+import { computeYieldAnalysis, optimizePerScac, computeScenario, computeCurrentState, computeHistoricCarrierMatch, filterRowsByScenario } from '../../services/analyticsEngine.js';
 import { applyMargin } from '../../services/ratingClient.js';
 
 function fmt$(v) {
@@ -28,12 +28,67 @@ function savingsColor(val) {
   return 'text-green-600';
 }
 
-export default function YieldOptimizer({ flatRows, activeMarkups, onMarkupsChange }) {
+export default function YieldOptimizer({ flatRows, activeMarkups, onMarkupsChange, allSCACs }) {
   const [mode, setMode] = useState('manual'); // 'manual' | 'solver'
   const [collapsed, setCollapsed] = useState(false);
   const [showLaneTable, setShowLaneTable] = useState(false);
   const [laneSortKey, setLaneSortKey] = useState('marginPct');
   const [laneSortAsc, setLaneSortAsc] = useState(true);
+  const [selectedScenario, setSelectedScenario] = useState('all'); // 'all' | 'lowCost' | 'currentState' | 'historicMatch' | custom SCAC list key
+  const [customScenarioSCACs, setCustomScenarioSCACs] = useState([]);
+  const [customScenarioName, setCustomScenarioName] = useState('');
+  const [showScenarioBuilder, setShowScenarioBuilder] = useState(false);
+
+  // Detect if historic data exists
+  const hasHistoric = useMemo(() => {
+    return flatRows.some(r => r.historicCarrier && r.historicCarrier.trim());
+  }, [flatRows]);
+
+  // Available preset scenarios
+  const scenarioOptions = useMemo(() => {
+    const options = [
+      { key: 'all', label: 'All Rates (no filter)' },
+      { key: 'lowCost', label: 'Low Cost Award' },
+    ];
+    if (hasHistoric) {
+      options.push({ key: 'currentState', label: 'Current State (historic carrier)' });
+      options.push({ key: 'historicMatch', label: 'Historic Carrier — New Rate' });
+    }
+    if (customScenarioName && customScenarioSCACs.length > 0) {
+      options.push({ key: 'custom', label: customScenarioName });
+    }
+    return options;
+  }, [hasHistoric, customScenarioName, customScenarioSCACs]);
+
+  // Compute the active scenario's filtered rows
+  const scenarioFilteredRows = useMemo(() => {
+    if (selectedScenario === 'all') return flatRows;
+
+    let scenarioResult;
+    if (selectedScenario === 'lowCost') {
+      const scacs = allSCACs.length > 0 ? allSCACs : [...new Set(flatRows.filter(r => r.hasRate).map(r => r.rate.carrierSCAC))];
+      scenarioResult = computeScenario(flatRows, scacs);
+    } else if (selectedScenario === 'currentState') {
+      scenarioResult = computeCurrentState(flatRows);
+    } else if (selectedScenario === 'historicMatch') {
+      scenarioResult = computeHistoricCarrierMatch(flatRows);
+    } else if (selectedScenario === 'custom' && customScenarioSCACs.length > 0) {
+      scenarioResult = computeScenario(flatRows, customScenarioSCACs);
+    } else {
+      return flatRows;
+    }
+
+    return filterRowsByScenario(flatRows, { result: scenarioResult });
+  }, [flatRows, selectedScenario, allSCACs, customScenarioSCACs]);
+
+  // Scenario summary for the info bar
+  const scenarioInfo = useMemo(() => {
+    if (selectedScenario === 'all') return null;
+    const total = new Set(flatRows.map(r => r.reference)).size;
+    const awarded = new Set(scenarioFilteredRows.map(r => r.reference)).size;
+    const carriers = new Set(scenarioFilteredRows.filter(r => r.hasRate).map(r => r.rate.carrierSCAC)).size;
+    return { total, awarded, unserviced: total - awarded, carriers };
+  }, [flatRows, scenarioFilteredRows, selectedScenario]);
 
   // Extract markup config
   const defaultMarkup = activeMarkups?.default || { type: '%', value: 15 };
@@ -69,8 +124,8 @@ export default function YieldOptimizer({ flatRows, activeMarkups, onMarkupsChang
 
   // Compute yield analysis using current markups
   const yield_ = useMemo(
-    () => computeYieldAnalysis(flatRows, activeMarkups, applyMargin),
-    [flatRows, activeMarkups]
+    () => computeYieldAnalysis(scenarioFilteredRows, activeMarkups, applyMargin),
+    [scenarioFilteredRows, activeMarkups]
   );
 
   const { totals, carrierRows, rows: laneRows } = yield_;
@@ -105,7 +160,7 @@ export default function YieldOptimizer({ flatRows, activeMarkups, onMarkupsChang
 
   const handleOptimizePerScac = useCallback(() => {
     const marginFloor = 8;
-    const newOverrides = optimizePerScac(flatRows, activeMarkups, marginFloor, applyMargin);
+    const newOverrides = optimizePerScac(scenarioFilteredRows, activeMarkups, marginFloor, applyMargin);
     if (newOverrides.length > 0) {
       onMarkupsChange({
         default: { ...defaultMarkup },
@@ -129,6 +184,16 @@ export default function YieldOptimizer({ flatRows, activeMarkups, onMarkupsChang
         <div className="flex items-center gap-3">
           <h3 className="text-sm font-semibold">Yield Optimizer</h3>
           <div className="flex gap-1" onClick={e => e.stopPropagation()}>
+            <select
+              value={selectedScenario}
+              onChange={e => setSelectedScenario(e.target.value)}
+              className="text-[10px] bg-white/20 text-white border border-white/30 rounded px-1.5 py-0.5 font-medium cursor-pointer hover:bg-white/30"
+              style={{ maxWidth: '180px' }}
+            >
+              {scenarioOptions.map(opt => (
+                <option key={opt.key} value={opt.key} className="text-gray-800">{opt.label}</option>
+              ))}
+            </select>
             <button
               onClick={() => setMode('manual')}
               className={`px-2 py-0.5 text-[10px] rounded font-medium transition-colors ${mode === 'manual' ? 'bg-[#39b6e6] text-white' : 'bg-white/20 text-white/80 hover:bg-white/30'}`}
@@ -148,6 +213,95 @@ export default function YieldOptimizer({ flatRows, activeMarkups, onMarkupsChang
 
       {!collapsed && (
         <div className="p-4">
+          {/* Scenario info bar */}
+          {scenarioInfo && (
+            <div className="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2 mb-3 flex items-center gap-4 text-xs">
+              <span className="font-semibold text-blue-800">
+                Scenario: {scenarioOptions.find(o => o.key === selectedScenario)?.label}
+              </span>
+              <span className="text-blue-700">
+                {scenarioInfo.awarded} of {scenarioInfo.total} lanes awarded
+                {scenarioInfo.unserviced > 0 && ` · ${scenarioInfo.unserviced} unserviced`}
+                {` · ${scenarioInfo.carriers} carriers`}
+              </span>
+              {selectedScenario !== 'all' && (
+                <button
+                  onClick={() => setSelectedScenario('all')}
+                  className="ml-auto text-blue-600 hover:text-blue-800 font-medium"
+                >
+                  Clear filter
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Custom scenario builder toggle */}
+          {selectedScenario === 'all' && allSCACs && allSCACs.length > 0 && (
+            <div className="mb-3">
+              <button
+                onClick={() => setShowScenarioBuilder(!showScenarioBuilder)}
+                className="text-[10px] text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1"
+              >
+                <span>{showScenarioBuilder ? '\u25BE' : '\u25B8'}</span>
+                Build Custom Carrier Mix
+              </button>
+              {showScenarioBuilder && (
+                <div className="mt-2 border border-gray-200 rounded-lg p-3 bg-gray-50">
+                  <div className="flex items-center gap-2 mb-2">
+                    <input
+                      type="text"
+                      placeholder="Scenario name"
+                      value={customScenarioName}
+                      onChange={e => setCustomScenarioName(e.target.value)}
+                      className="text-xs border border-gray-300 rounded px-2 py-1 w-40"
+                    />
+                    <button
+                      onClick={() => {
+                        if (customScenarioSCACs.length > 0 && customScenarioName.trim()) {
+                          setSelectedScenario('custom');
+                          setShowScenarioBuilder(false);
+                        }
+                      }}
+                      disabled={customScenarioSCACs.length === 0 || !customScenarioName.trim()}
+                      className="text-[10px] bg-[#39b6e6] hover:bg-[#2da0cc] disabled:bg-gray-300 text-white px-2.5 py-1 rounded font-medium"
+                    >
+                      Apply
+                    </button>
+                    <button
+                      onClick={() => setCustomScenarioSCACs([...allSCACs])}
+                      className="text-[10px] text-gray-500 hover:text-gray-700"
+                    >
+                      Select All
+                    </button>
+                    <button
+                      onClick={() => setCustomScenarioSCACs([])}
+                      className="text-[10px] text-gray-500 hover:text-gray-700"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {allSCACs.map(scac => (
+                      <label key={scac} className="flex items-center gap-1 text-[10px]">
+                        <input
+                          type="checkbox"
+                          checked={customScenarioSCACs.includes(scac)}
+                          onChange={() => {
+                            setCustomScenarioSCACs(prev =>
+                              prev.includes(scac) ? prev.filter(s => s !== scac) : [...prev, scac]
+                            );
+                          }}
+                          className="rounded border-gray-300"
+                        />
+                        <span className="font-medium text-gray-700">{scac}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="flex gap-6">
             {/* LEFT SIDE: Markup Controls (40%) */}
             <div className="w-2/5 space-y-3 border-r border-gray-200 pr-4">

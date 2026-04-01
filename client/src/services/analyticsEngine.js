@@ -1133,3 +1133,37 @@ export function computeCarrierFeedback(flatRows, selectedSCAC) {
     lanes: lanes.sort((a, b) => b.percentile - a.percentile),
   };
 }
+
+/**
+ * Filter flatRows to only the winning rows from a scenario's awards.
+ * Returns a subset of flatRows — one rate per reference, the one that
+ * won in the scenario.
+ */
+export function filterRowsByScenario(flatRows, scenario) {
+  if (!scenario || !scenario.result) return flatRows;
+
+  const { awards } = scenario.result;
+  if (!awards || Object.keys(awards).length === 0) return flatRows;
+
+  // Build a lookup: reference -> winning SCAC
+  const winnerMap = new Map();
+  for (const [ref, award] of Object.entries(awards)) {
+    winnerMap.set(ref, (award.scac || '').toUpperCase());
+  }
+
+  // Filter: keep only the row that matches the winning carrier for each ref
+  const seen = new Set();
+  const filtered = [];
+  for (const row of flatRows) {
+    const ref = row.reference || '';
+    const scac = (row.rate?.carrierSCAC || '').toUpperCase();
+    const winnerScac = winnerMap.get(ref);
+
+    if (winnerScac && scac === winnerScac && !seen.has(ref)) {
+      seen.add(ref);
+      filtered.push(row);
+    }
+  }
+
+  return filtered;
+}

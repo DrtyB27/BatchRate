@@ -15,31 +15,52 @@ function isRetryable(errorMessage) {
   return RETRYABLE_PATTERNS.some(p => msg.includes(p));
 }
 
-// ── Response-Time-Aware Auto-Tuner ──
-// Replaces the old error-rate-only adaptive backoff with proactive
-// response-time monitoring that detects degradation BEFORE stalls.
+// ── Spike-Aware Auto-Tuner ──
+// Detects bimodal SMC3 queue saturation pattern and adjusts both
+// concurrency AND delay. Uses spike rate as primary signal instead
+// of averages, which are misleading for bimodal distributions.
 class ResponseTimeAutoTuner {
   constructor(config) {
     this.maxConcurrency = config.maxConcurrency || 8;
-    this.targetMs = config.targetResponseMs || 2000;
-    this.warningMs = config.warningThresholdMs || 5000;
-    this.criticalMs = config.criticalThresholdMs || 15000;
     this.current = config.initialConcurrency || Math.min(2, config.maxConcurrency || 8);
-    this.window = [];
-    this.windowSize = 20;
-    this.adjustInterval = 10;
+    this.currentDelay = config.initialDelay || 0;
+    this.window = [];              // rolling window of recent response times
+    this.windowSize = 30;          // 30-result rolling window
+    this.adjustInterval = 8;       // re-evaluate every 8 results
     this.resultCount = 0;
     this.lastAdjustAt = 0;
     this.history = [];
-    this.baselineEstablished = false;
-    this.baselineAvg = 0;
+
+    // Spike detection
+    this.median = 0;
+    this.spikeThresholdMultiplier = 2.0;  // spike = response > 2× median
+    this.spikeRateTarget = 0.05;          // target <5% spike rate
+    this.spikeRateWarning = 0.10;         // >10% → throttle down
+    this.spikeRateCritical = 0.20;        // >20% → aggressive throttle
+
+    // Delay control
+    this.minDelay = 0;
+    this.maxDelay = 2000;
+    this.delayStep = 100;                 // adjust delay in 100ms increments
+
+    // Baseline learning phase
+    this.probeSize = 15;                  // learn from first 15 results
+    this.probeComplete = false;
+    this.baselineMedian = 0;
+
+    // Stability tracking — prevent oscillation
+    this.callsSinceLastThrottle = 0;
+    this.cooldownPeriod = 15;             // wait 15 results after throttle before scaling up
+    this.consecutiveLowSpike = 0;         // count consecutive low-spike intervals
 
     // Load from tuning profile if available
     if (config.profile) {
       this.current = config.profile.optimalConcurrency || this.current;
-      this.targetMs = config.profile.warningThresholdMs || this.targetMs;
-      this.baselineAvg = config.profile.baselineResponseMs || 0;
-      this.baselineEstablished = this.baselineAvg > 0;
+      this.baselineMedian = config.profile.baselineResponseMs || 0;
+      this.probeComplete = this.baselineMedian > 0;
+      if (this.baselineMedian > 0) {
+        this.median = this.baselineMedian;
+      }
     }
   }
 
@@ -47,11 +68,36 @@ class ResponseTimeAutoTuner {
     this.window.push(elapsedMs);
     if (this.window.length > this.windowSize) this.window.shift();
     this.resultCount++;
+    this.callsSinceLastThrottle++;
 
-    if (!this.baselineEstablished && this.window.length >= this.windowSize) {
-      this.baselineAvg = this.getAvg();
-      this.baselineEstablished = true;
+    // Update median
+    if (this.window.length >= 5) {
+      const sorted = [...this.window].sort((a, b) => a - b);
+      this.median = sorted[Math.floor(sorted.length / 2)];
     }
+
+    // Complete probe phase
+    if (!this.probeComplete && this.resultCount >= this.probeSize && this.median > 0) {
+      this.probeComplete = true;
+      this.baselineMedian = this.median;
+      this.history.push({
+        action: 'PROBE_COMPLETE',
+        atResult: this.resultCount,
+        baselineMedian: Math.round(this.baselineMedian),
+        timestamp: new Date().toISOString(),
+      });
+    }
+  }
+
+  getSpikeRate() {
+    if (this.window.length < 5 || this.median === 0) return 0;
+    const threshold = this.median * this.spikeThresholdMultiplier;
+    const spikes = this.window.filter(t => t > threshold).length;
+    return spikes / this.window.length;
+  }
+
+  getMedian() {
+    return this.median;
   }
 
   getAvg() {
@@ -67,54 +113,110 @@ class ResponseTimeAutoTuner {
   }
 
   shouldAdjust() {
-    return this.resultCount - this.lastAdjustAt >= this.adjustInterval
+    return this.probeComplete
+      && this.resultCount - this.lastAdjustAt >= this.adjustInterval
       && this.window.length >= 10;
   }
 
-  getOptimalConcurrency() {
-    if (!this.shouldAdjust()) return this.current;
+  // Returns { concurrency, delayMs } — adjusts both
+  getOptimalSettings() {
+    if (!this.shouldAdjust()) {
+      return { concurrency: this.current, delayMs: this.currentDelay };
+    }
     this.lastAdjustAt = this.resultCount;
 
-    const avg = this.getAvg();
-    const p95 = this.getP95();
-    const prevConcurrency = this.current;
+    const spikeRate = this.getSpikeRate();
+    const prevConc = this.current;
+    const prevDelay = this.currentDelay;
+    let action = 'HOLD';
 
-    if (avg > this.criticalMs || p95 > this.criticalMs * 1.5) {
+    if (spikeRate >= this.spikeRateCritical) {
+      // CRITICAL: >20% spikes — aggressive throttle
       this.current = 1;
-    } else if (avg > this.warningMs || p95 > this.warningMs * 2) {
-      this.current = Math.max(1, this.current - 2);
-    } else if (avg > this.targetMs * 1.5) {
+      this.currentDelay = Math.min(this.maxDelay, this.currentDelay + this.delayStep * 3);
+      this.callsSinceLastThrottle = 0;
+      this.consecutiveLowSpike = 0;
+      action = 'CRITICAL_THROTTLE';
+
+    } else if (spikeRate >= this.spikeRateWarning) {
+      // WARNING: >10% spikes — moderate throttle
       this.current = Math.max(1, this.current - 1);
-    } else if (avg > this.targetMs * 0.5) {
-      // On target — hold steady
-    } else if (avg < this.targetMs * 0.5 && p95 < this.targetMs) {
-      this.current = Math.min(this.maxConcurrency, this.current + 1);
+      this.currentDelay = Math.min(this.maxDelay, this.currentDelay + this.delayStep);
+      this.callsSinceLastThrottle = 0;
+      this.consecutiveLowSpike = 0;
+      action = 'THROTTLE_DOWN';
+
+    } else if (spikeRate <= this.spikeRateTarget) {
+      // GOOD: <5% spikes — consider scaling up
+      this.consecutiveLowSpike++;
+
+      if (this.consecutiveLowSpike >= 3 && this.callsSinceLastThrottle >= this.cooldownPeriod) {
+        // Stable for 3 consecutive intervals — try scaling up
+        if (this.currentDelay > this.minDelay) {
+          // Reduce delay first (cheaper than adding concurrency)
+          this.currentDelay = Math.max(this.minDelay, this.currentDelay - this.delayStep);
+          action = 'REDUCE_DELAY';
+        } else if (this.current < this.maxConcurrency) {
+          // Delay is already 0 — try adding a worker
+          this.current = Math.min(this.maxConcurrency, this.current + 1);
+          this.consecutiveLowSpike = 0; // reset so we re-evaluate after the change
+          action = 'SCALE_UP';
+        }
+      } else {
+        action = 'HOLD_GOOD';
+      }
+    } else {
+      // MARGINAL: 5-10% — hold steady, don't oscillate
+      this.consecutiveLowSpike = 0;
+      action = 'HOLD_MARGINAL';
     }
 
-    if (this.current !== prevConcurrency) {
+    // Record adjustment
+    if (this.current !== prevConc || this.currentDelay !== prevDelay || action.includes('THROTTLE') || action.includes('SCALE') || action.includes('REDUCE')) {
       this.history.push({
+        action,
         atResult: this.resultCount,
-        from: prevConcurrency,
-        to: this.current,
-        triggerAvg: Math.round(avg),
-        triggerP95: Math.round(p95),
+        spikeRate: Math.round(spikeRate * 100),
+        medianMs: Math.round(this.median),
+        fromConc: prevConc,
+        toConc: this.current,
+        fromDelay: prevDelay,
+        toDelay: this.currentDelay,
         timestamp: new Date().toISOString(),
       });
+
+      // Cap history at 100 entries
+      if (this.history.length > 100) {
+        this.history = this.history.slice(-100);
+      }
     }
 
-    return this.current;
+    return { concurrency: this.current, delayMs: this.currentDelay };
+  }
+
+  // Legacy compatibility — still called by existing code
+  getOptimalConcurrency() {
+    const settings = this.getOptimalSettings();
+    return settings.concurrency;
   }
 
   getState() {
     return {
+      type: 'spike-aware',
       current: this.current,
+      currentDelay: this.currentDelay,
       max: this.maxConcurrency,
-      target: this.targetMs,
+      medianMs: Math.round(this.median),
+      baselineMedian: Math.round(this.baselineMedian),
+      spikeRate: Math.round(this.getSpikeRate() * 100),
+      spikeThreshold: Math.round(this.median * this.spikeThresholdMultiplier),
       avgMs: Math.round(this.getAvg()),
       p95Ms: Math.round(this.getP95()),
-      baselineAvg: Math.round(this.baselineAvg),
+      probeComplete: this.probeComplete,
       adjustments: this.history.length,
       lastAdjustment: this.history[this.history.length - 1] || null,
+      consecutiveLowSpike: this.consecutiveLowSpike,
+      callsSinceLastThrottle: this.callsSinceLastThrottle,
       history: this.history,
     };
   }
@@ -244,6 +346,9 @@ export function createBatchExecutor(config) {
       autoTuneActive: !!tuner,
       autoTuneHistory: tuner?.history || [],
       tunerState: tuner?.getState() || null,
+      spikeRate: tuner ? tuner.getSpikeRate() : 0,
+      medianMs: tuner ? tuner.getMedian() : 0,
+      tunerDelay: tuner ? tuner.currentDelay : currentDelay,
     };
   }
 
@@ -503,18 +608,26 @@ export function createBatchExecutor(config) {
 
       updateAdaptiveBackoff(result.success);
 
-      // Auto-tuner: adjust concurrency based on response times
+      // Spike-aware auto-tuner: adjusts both concurrency AND delay
       if (tuner) {
         tuner.recordResult(elapsedMs);
-        const optimal = tuner.getOptimalConcurrency();
-        if (optimal !== currentConcurrency) {
-          currentConcurrency = optimal;
+        const settings = tuner.getOptimalSettings();
+
+        // Apply concurrency change
+        if (settings.concurrency !== currentConcurrency) {
+          const prevConc = currentConcurrency;
+          currentConcurrency = settings.concurrency;
           // If we need more workers, launch them
-          if (optimal > activeCount && queue.length > 0) {
-            for (let w = activeCount; w < optimal && queue.length > 0; w++) {
+          if (settings.concurrency > prevConc && queue.length > 0) {
+            for (let w = activeCount; w < settings.concurrency && queue.length > 0; w++) {
               workerPromises.push(workerLoop(w));
             }
           }
+        }
+
+        // Apply delay change
+        if (settings.delayMs !== currentDelay) {
+          currentDelay = settings.delayMs;
         }
       }
 

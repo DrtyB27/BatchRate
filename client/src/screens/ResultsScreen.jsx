@@ -266,6 +266,14 @@ export default function ResultsScreen({
   const flatRows = useMemo(() => flattenResults(results), [results]);
   const lowCostFlags = useMemo(() => computeLowCostFlags(flatRows), [flatRows]);
 
+  const allSCACs = useMemo(() => {
+    const scacs = new Set();
+    for (const r of flatRows) {
+      if (r.hasRate && r.rate?.carrierSCAC) scacs.add(r.rate.carrierSCAC);
+    }
+    return [...scacs].sort();
+  }, [flatRows]);
+
   // Summary stats
   const successCount = results.filter(r => r.success).length;
   const failedResults = results.filter(r => !r.success);
@@ -627,7 +635,7 @@ export default function ResultsScreen({
 
       {/* Content */}
       {viewMode === 'analytics' ? (
-        <AnalyticsDashboard flatRows={flatRows} activeMarkups={activeMarkups} onMarkupsChange={setActiveMarkups} />
+        <AnalyticsDashboard flatRows={flatRows} activeMarkups={activeMarkups} onMarkupsChange={setActiveMarkups} allSCACs={allSCACs} />
       ) : viewMode === 'scenarios' ? (
         <ScenarioBuilder flatRows={flatRows} activeMarkups={activeMarkups} />
       ) : viewMode === 'optimize' ? (

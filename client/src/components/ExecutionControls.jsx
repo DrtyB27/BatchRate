@@ -269,10 +269,10 @@ export default function ExecutionControls({ settings, onChange, onRun, onPause, 
                     />
                     <StepperControl
                       label="Per-Agent Conc"
-                      value={settings.concurrencyPerAgent || 2}
+                      value={settings.concurrencyPerAgent || 3}
                       options={PER_AGENT_CONC_OPTIONS}
                       onChange={v => update('concurrencyPerAgent', v)}
-                      tooltip="Concurrent requests per agent."
+                      tooltip="Recommended: 3. Each worker triggers ~10 carrier lookups simultaneously. Reduce to 2 if you observe server errors."
                     />
                     <StepperControl
                       label="Total Max Conc"

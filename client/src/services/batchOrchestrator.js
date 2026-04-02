@@ -9,6 +9,7 @@
 import { createBatchExecutor } from './batchExecutor.js';
 import { createAutoSaver } from './autoSave.js';
 import { createKeepAlive } from './keepAlive.js';
+import { CALL_TIMEOUT_MS } from './ratingClient.js';
 
 // ── Smart chunk sizing ──
 function calculateOptimalChunkSize(totalRows) {
@@ -255,13 +256,13 @@ export function createBatchOrchestrator(config) {
   const {
     chunkSize: userChunkSize,
     maxAgents = 5,
-    concurrencyPerAgent = 2,
+    concurrencyPerAgent = 3,
     totalMaxConcurrency = 8,
     delayMs = 0,
     retryAttempts = 1,
     adaptiveBackoff = true,
     adaptiveOrchestration = true,
-    timeoutMs = 30000,
+    timeoutMs = CALL_TIMEOUT_MS,
     staggerStartMs = 500,
     autoSavePerAgent = true,
     onResult,

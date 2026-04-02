@@ -11,47 +11,68 @@ const WORKER_URL = 'https://batchtool.ltlinsightgpt.workers.dev';
 const isLocalhost = ['localhost', '127.0.0.1'].includes(window.location.hostname);
 const PROXY_URL = isLocalhost ? '/api/rate' : WORKER_URL;
 
+export const CALL_TIMEOUT_MS = 20_000;
+const MAX_TIMEOUT_RETRIES = 1;
+
 /**
  * Posts XML to the 3G TMS Rating API (via proxy).
- * @returns {Promise<string>} Raw XML response string.
+ * Includes a 20s per-call timeout with one automatic retry on timeout.
+ * @returns {Promise<{text: string, timeoutRetry?: boolean}>} Raw XML response string + retry metadata.
  */
-export async function postToG3(xmlBody, credentials, timeoutMs = 30000) {
+export async function postToG3(xmlBody, credentials, timeoutMs = CALL_TIMEOUT_MS) {
   const { baseURL, username, password } = credentials;
 
   const encodedUsername = encodeURIComponent(username);
   const encodedPassword = encodeURIComponent(password);
   const targetUrl = `${baseURL}/web/services/rating/findRates?username=${encodedUsername}&password=${encodedPassword}`;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let timeoutRetried = false;
 
-  try {
-    const res = await fetch(PROXY_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: targetUrl, xmlBody }),
-      signal: controller.signal,
-    });
+  for (let attempt = 0; attempt <= MAX_TIMEOUT_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-    if (!res.ok) {
+    try {
+      const res = await fetch(PROXY_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: targetUrl, xmlBody }),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timer);
+
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`HTTP ${res.status}: ${text.substring(0, 500)}`);
+      }
+
       const text = await res.text();
-      throw new Error(`HTTP ${res.status}: ${text.substring(0, 500)}`);
-    }
+      // Return response text; attach retry flag if this was a retry
+      return timeoutRetried ? { text, timeoutRetry: true } : text;
+    } catch (err) {
+      clearTimeout(timer);
 
-    return await res.text();
-  } catch (err) {
-    if (err.name === 'AbortError') {
-      throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s`);
+      if (err.name === 'AbortError') {
+        if (attempt < MAX_TIMEOUT_RETRIES) {
+          // Single retry on timeout
+          timeoutRetried = true;
+          continue;
+        }
+        // Both attempts timed out
+        const timeoutErr = new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s (${MAX_TIMEOUT_RETRIES + 1} attempts)`);
+        timeoutErr.failureReason = 'TIMEOUT_EXHAUSTED';
+        timeoutErr.timeoutRetry = true;
+        throw timeoutErr;
+      }
+      if (err.message === 'Failed to fetch' || err.message.includes('NetworkError')) {
+        throw new Error(
+          'Network error — could not reach the proxy. ' +
+          'Check that the Cloudflare Worker is deployed and the URL is correct in ratingClient.js.'
+        );
+      }
+      throw err;
     }
-    if (err.message === 'Failed to fetch' || err.message.includes('NetworkError')) {
-      throw new Error(
-        'Network error — could not reach the proxy. ' +
-        'Check that the Cloudflare Worker is deployed and the URL is correct in ratingClient.js.'
-      );
-    }
-    throw err;
-  } finally {
-    clearTimeout(timeout);
   }
 }
 

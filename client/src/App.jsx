@@ -15,6 +15,7 @@ export default function App() {
   const [csvRows, setCsvRows] = useState(null);
   const [retryData, setRetryData] = useState(null); // { retryRows, existingResults, batchMeta }
   const [retryProgress, setRetryProgress] = useState(null);
+  const [loadingFile, setLoadingFile] = useState(false);
 
   // Lifted refs so ResultsScreen can access execution controls
   const orchestratorRef = useRef(null);
@@ -81,6 +82,7 @@ export default function App() {
   }, []);
 
   const handleLoadRun = useCallback(async (file) => {
+    setLoadingFile(true);
     try {
       const json = await readJsonFile(file);
       const validation = validateRunFile(json);
@@ -102,6 +104,8 @@ export default function App() {
       setScreen('results');
     } catch (err) {
       alert(`Failed to load run: ${err.message}`);
+    } finally {
+      setLoadingFile(false);
     }
   }, []);
 
@@ -284,6 +288,18 @@ export default function App() {
           </div>
         )}
       </header>
+
+      {loadingFile && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-xl shadow-2xl px-8 py-6 flex flex-col items-center gap-3">
+            <svg className="animate-spin h-8 w-8 text-[#39b6e6]" viewBox="0 0 24 24" fill="none">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            </svg>
+            <span className="text-sm font-medium text-gray-700">Loading run file...</span>
+          </div>
+        </div>
+      )}
 
       <div className="flex-1 flex flex-col overflow-hidden">
         {screen === 'credentials' && <CredentialScreen onConnected={handleConnected} onLoadRun={handleLoadRun} />}

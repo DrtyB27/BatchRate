@@ -4,8 +4,10 @@
  */
 
 import { buildRatingRequest } from './xmlBuilder.js';
-import { postToG3, applyMargin, sleep } from './ratingClient.js';
+import { postToG3, applyMargin, sleep, CALL_TIMEOUT_MS } from './ratingClient.js';
 import { parseRatingResponse } from './xmlParser.js';
+
+export const DEFAULT_INITIAL_DELAY_MS = 100;
 
 // Errors worth retrying (transient)
 const RETRYABLE_PATTERNS = ['timed out', 'timeout', 'abort', 'http 429', 'http 502', 'http 503', 'http 504', 'proxy error', 'proxy timeout', 'failed to fetch', 'networkerror'];
@@ -54,6 +56,7 @@ class ResponseTimeAutoTuner {
     this.consecutiveLowSpike = 0;         // count consecutive low-spike intervals
 
     // Load from tuning profile if available
+    // Always reset delay to baseline — never inherit persisted backoff state
     if (config.profile) {
       this.current = config.profile.optimalConcurrency || this.current;
       this.baselineMedian = config.profile.baselineResponseMs || 0;
@@ -61,6 +64,8 @@ class ResponseTimeAutoTuner {
       if (this.baselineMedian > 0) {
         this.median = this.baselineMedian;
       }
+      // Explicitly reset delay — profile may have been saved during a backoff period
+      this.currentDelay = config.initialDelay || 0;
     }
   }
 
@@ -237,7 +242,7 @@ export function createBatchExecutor(config) {
     warningThresholdMs = 5000,
     criticalThresholdMs = 15000,
     tuningProfile = null,
-    timeoutMs = 30000,
+    timeoutMs = CALL_TIMEOUT_MS,
     onResult,
     onProgress,
     onComplete,
@@ -406,7 +411,7 @@ export function createBatchExecutor(config) {
   }
 
   // ── Build result object with telemetry ──
-  function buildResult(row, rowIndex, parsed, xml, responseXml, elapsedMs, workerIdx, err, callStartTime, dispatchTimestamp, activeWorkerSnapshot, queueSnapshot) {
+  function buildResult(row, rowIndex, parsed, xml, responseXml, elapsedMs, workerIdx, err, callStartTime, dispatchTimestamp, activeWorkerSnapshot, queueSnapshot, timeoutRetry = false, failureReason = '') {
     const success = !err && parsed && parsed.rates.length > 0;
     const rateCount = success ? parsed.rates.length : 0;
     const ratesWithMargin = success
@@ -451,6 +456,8 @@ export function createBatchExecutor(config) {
       rateRequestXml: params.saveRequestXml && xml ? xml : '',
       rateResponseXml: params.saveResponseXml && responseXml ? responseXml : '',
       rates: ratesWithMargin,
+      timeoutRetry,
+      failureReason,
 
       // ── Telemetry ──
       telemetry: {
@@ -515,6 +522,17 @@ export function createBatchExecutor(config) {
       let responseXml = null;
       let parsed = null;
       let error = null;
+      let timeoutRetry = false;
+      let failureReason = '';
+
+      // Helper: unwrap postToG3 response (may be plain string or {text, timeoutRetry})
+      function unwrapResponse(resp) {
+        if (resp && typeof resp === 'object' && resp.text !== undefined) {
+          if (resp.timeoutRetry) timeoutRetry = true;
+          return resp.text;
+        }
+        return resp;
+      }
 
       try {
         const statuses = Array.isArray(params.contractStatus) && params.contractStatus.length > 1
@@ -531,7 +549,8 @@ export function createBatchExecutor(config) {
           for (const status of statuses) {
             const statusParams = { ...params, contractStatus: [status] };
             const reqXml = buildRatingRequest(row, statusParams, credentials);
-            const respXml = await postToG3(reqXml, credentials, timeoutMs);
+            const rawResp = await postToG3(reqXml, credentials, timeoutMs);
+            const respXml = unwrapResponse(rawResp);
             const parsedResp = parseRatingResponse(respXml);
 
             lastXml = reqXml;
@@ -557,11 +576,14 @@ export function createBatchExecutor(config) {
         } else {
           // Single status — normal path
           xml = buildRatingRequest(row, params, credentials);
-          responseXml = await postToG3(xml, credentials, timeoutMs);
+          const rawResp = await postToG3(xml, credentials, timeoutMs);
+          responseXml = unwrapResponse(rawResp);
           parsed = parseRatingResponse(responseXml);
         }
       } catch (err) {
         error = err;
+        if (err.timeoutRetry) timeoutRetry = true;
+        if (err.failureReason) failureReason = err.failureReason;
       }
 
       activeCount--;
@@ -593,7 +615,7 @@ export function createBatchExecutor(config) {
       }
 
       // Final result
-      const result = buildResult(row, rowIndex, parsed, xml, responseXml, elapsedMs, workerIdx, error, startTime, dispatchTimestamp, activeWorkerSnapshot, queueSnapshot);
+      const result = buildResult(row, rowIndex, parsed, xml, responseXml, elapsedMs, workerIdx, error, startTime, dispatchTimestamp, activeWorkerSnapshot, queueSnapshot, timeoutRetry, failureReason);
       results.push(result);
       completionTimestamps.push(Date.now());
 

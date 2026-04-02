@@ -150,6 +150,12 @@ export function deserializeRun(json) {
   delete metadata.username;
   delete metadata.password;
 
+  // Reset adaptive backoff state on resume — never carry forward persisted throttle state
+  // Only cumulative counters (cumulativeApiCalls, cumulativeSuccesses, cumulativeFailures) carry forward.
+  if (metadata.backoffState) {
+    delete metadata.backoffState;
+  }
+
   return {
     batchId: json.batchId,
     savedAt: json.savedAt,

@@ -8,8 +8,6 @@ import { CALL_TIMEOUT_MS } from '../services/ratingClient.js';
 import { DEFAULT_INITIAL_DELAY_MS } from '../services/batchExecutor.js';
 import { deduplicateRows, expandDedupedResults } from '../services/rateDeduplicator.js';
 
-const WEIGHT_FILTER_THRESHOLD_LBS = 10;
-
 export default function InputScreen({
   credentials, onBatchStart, onResultRow, onBatchEnd, onLoadRun,
   orchestratorRef, executorRef, retryData, onMergeResults, onRetryComplete, existingResults,
@@ -53,7 +51,7 @@ export default function InputScreen({
   const [multiProgress, setMultiProgress] = useState(null);
   const [dedupInfo, setDedupInfo] = useState(null);
   const [resumeInfo, setResumeInfo] = useState(null); // resume-from-partial dialog
-  const [skippedLowWeight, setSkippedLowWeight] = useState([]); // rows skipped due to ≤10 lbs
+  const [invalidInputRows, setInvalidInputRows] = useState([]); // rows with unparseable numeric fields
   const [resumeToast, setResumeToast] = useState(null); // session resume notification
   const loadInputRef = useRef(null);
   const dedupGroupsRef = useRef(null);
@@ -87,16 +85,51 @@ export default function InputScreen({
   const runBatchWithRows = (rowsToRun, isRetry = false) => {
     if (!rowsToRun || rowsToRun.length === 0) return;
 
-    // ── Pre-filter: skip shipments ≤ 10 lbs ──
-    const rateable = rowsToRun.filter(s => parseFloat(s['Net Wt Lb']) > WEIGHT_FILTER_THRESHOLD_LBS);
-    const skipped = rowsToRun.filter(s => parseFloat(s['Net Wt Lb']) <= WEIGHT_FILTER_THRESHOLD_LBS);
-    setSkippedLowWeight(skipped);
+    // ── Sanitize numeric CSV fields (strip commas, dollar signs, whitespace) ──
+    const NUMERIC_FIELDS = ['Net Wt Lb', 'Gross Wt Lb', 'Historic Cost', 'Pcs', 'Ttl HUs',
+      'Net Vol CuFt', 'Gross Vol CuFt', 'Lgth Ft', 'Hght Ft', 'Dpth Ft',
+      'Net Wt Lb.2', 'Net Wt Lb.3', 'Net Wt Lb.4', 'Net Wt Lb.5',
+      'Gross Wt Lb.2', 'Gross Wt Lb.3', 'Gross Wt Lb.4', 'Gross Wt Lb.5',
+      'Pcs.2', 'Pcs.3', 'Pcs.4', 'Pcs.5',
+      'Ttl HUs.2', 'Ttl HUs.3', 'Ttl HUs.4', 'Ttl HUs.5'];
 
-    // Emit skipped rows as results immediately (not sent to API)
-    for (let i = 0; i < skipped.length; i++) {
-      const row = skipped[i];
-      const skippedResult = {
-        rowIndex: -1, // will be set by caller context
+    function sanitizeNumeric(raw) {
+      if (raw === null || raw === undefined || raw === '') return '';
+      return String(raw).replace(/[$,\s]/g, '').trim();
+    }
+
+    const sanitizedRows = rowsToRun.map(row => {
+      const cleaned = { ...row };
+      // Preserve raw weight for failure classification
+      cleaned._rawNetWtLb = row['Net Wt Lb'] || '';
+      for (const field of NUMERIC_FIELDS) {
+        if (cleaned[field] !== undefined && cleaned[field] !== '') {
+          cleaned[field] = sanitizeNumeric(cleaned[field]);
+        }
+      }
+      return cleaned;
+    });
+
+    // ── Pre-batch validation: flag rows with unparseable weight ──
+    const validRows = [];
+    const invalid = [];
+    for (let i = 0; i < sanitizedRows.length; i++) {
+      const row = sanitizedRows[i];
+      const weightStr = row['Net Wt Lb'];
+      const weight = parseFloat(weightStr);
+      if (!weightStr || isNaN(weight) || weight <= 0) {
+        invalid.push({ index: i, row, reason: `Invalid weight value: "${rowsToRun[i]['Net Wt Lb']}"` });
+      } else {
+        validRows.push(row);
+      }
+    }
+    setInvalidInputRows(invalid);
+
+    // Emit invalid rows as results immediately (not sent to API)
+    for (const inv of invalid) {
+      const row = inv.row;
+      const invalidResult = {
+        rowIndex: -1,
         reference: row['Reference'] || '',
         origCity: row['Orig City'] || '',
         origState: row['Org State'] || '',
@@ -114,37 +147,37 @@ export default function InputScreen({
         historicCarrier: row['Historic Carrier'] || '',
         historicCost: parseFloat(row['Historic Cost']) || 0,
         success: false,
-        ratingStatus: 'SKIPPED_LOW_WEIGHT',
-        ratingMessage: 'Weight ≤ 10 lbs — below carrier minimum; not submitted to API',
-        ratingNote: 'Weight ≤ 10 lbs — below carrier minimum; not submitted to API',
+        ratingStatus: 'INVALID_INPUT',
+        ratingMessage: inv.reason,
+        ratingNote: inv.reason,
+        failureReason: 'INVALID_INPUT',
         elapsedMs: 0,
         rateCount: 0,
         rates: [],
-        batchPosition: i,
+        batchPosition: inv.index,
         startedAt: new Date().toISOString(),
         completedAt: new Date().toISOString(),
         batchTimestamp: new Date().toISOString(),
-        skippedLowWeight: true,
         telemetry: { elapsedMs: 0 },
       };
-      if (isRetry) retryResultsRef.current.push(skippedResult);
-      onResultRow(skippedResult);
+      if (isRetry) retryResultsRef.current.push(invalidResult);
+      onResultRow(invalidResult);
     }
 
-    // If all rows were skipped, complete immediately
-    if (rateable.length === 0) {
-      onBatchStart(params, skipped.length, { batchId: crypto.randomUUID(), batchStartTime: new Date().toISOString(), skippedLowWeight: skipped.length }, isRetry ? null : rowsToRun);
-      if (onBatchEnd) onBatchEnd({ batchEndTime: new Date().toISOString(), executionSummary: { totalRows: 0, succeeded: 0, failed: 0, skippedLowWeight: skipped.length } });
+    // If all rows were invalid, complete immediately
+    if (validRows.length === 0) {
+      onBatchStart(params, invalid.length, { batchId: crypto.randomUUID(), batchStartTime: new Date().toISOString(), invalidInputCount: invalid.length }, isRetry ? null : rowsToRun);
+      if (onBatchEnd) onBatchEnd({ batchEndTime: new Date().toISOString(), executionSummary: { totalRows: 0, succeeded: 0, failed: 0, invalidInputCount: invalid.length } });
       return;
     }
 
     // ── Deduplication ──
     const dedupPrecision = execSettings.dedup || 'off';
-    const { uniqueRows, groups, stats: dedupStats } = deduplicateRows(rateable, dedupPrecision);
-    const useDedup = dedupPrecision !== 'off' && uniqueRows.length < rateable.length;
-    const rowsToRate = useDedup ? uniqueRows : rateable;
+    const { uniqueRows, groups, stats: dedupStats } = deduplicateRows(validRows, dedupPrecision);
+    const useDedup = dedupPrecision !== 'off' && uniqueRows.length < validRows.length;
+    const rowsToRate = useDedup ? uniqueRows : validRows;
     dedupGroupsRef.current = useDedup ? groups : null;
-    originalCsvRef.current = rateable;
+    originalCsvRef.current = validRows;
     setDedupInfo(useDedup ? dedupStats : null);
 
     const batchId = crypto.randomUUID();
@@ -162,7 +195,7 @@ export default function InputScreen({
       executionMode: 'multi',
       dedup: useDedup ? dedupStats : null,
       isRetry,
-      skippedLowWeight: skipped.length,
+      invalidInputCount: invalid.length,
     };
 
     if (isRetry) {
@@ -211,7 +244,7 @@ export default function InputScreen({
     const orchestrator = createBatchOrchestrator({
       chunkSize: execSettings.chunkSize || 400,
       maxAgents: execSettings.maxAgents || 5,
-      concurrencyPerAgent: execSettings.concurrencyPerAgent || 2,
+      concurrencyPerAgent: execSettings.concurrencyPerAgent || 3,
       totalMaxConcurrency: execSettings.totalMaxConcurrency || 8,
       delayMs: execSettings.delayMs,
       retryAttempts: execSettings.retryAttempts,
@@ -409,14 +442,13 @@ export default function InputScreen({
           </div>
         )}
 
-        {/* Skipped low-weight banner */}
-        {skippedLowWeight.length > 0 && (
+        {/* Invalid input banner */}
+        {invalidInputRows.length > 0 && (
           <div className="bg-amber-50 border border-amber-300 rounded-lg px-3 py-2 text-xs text-amber-700 mb-2 flex items-center gap-2">
             <svg className="w-4 h-4 text-amber-500 shrink-0" fill="currentColor" viewBox="0 0 20 20">
               <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
             </svg>
-            <span className="font-semibold">{skippedLowWeight.length} shipment{skippedLowWeight.length !== 1 ? 's' : ''} skipped (&le; 10 lbs)</span>
-            <span>&mdash; not submitted to API</span>
+            <span className="font-semibold">{invalidInputRows.length} row{invalidInputRows.length !== 1 ? 's' : ''} skipped &mdash; invalid input (see export for details)</span>
           </div>
         )}
 

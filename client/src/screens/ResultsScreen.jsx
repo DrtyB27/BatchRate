@@ -361,8 +361,8 @@ export default function ResultsScreen({
 
   // Summary stats
   const successCount = results.filter(r => r.success).length;
-  const skippedCount = results.filter(r => r.ratingStatus === 'SKIPPED_LOW_WEIGHT').length;
-  const failedResults = results.filter(r => !r.success && r.ratingStatus !== 'SKIPPED_LOW_WEIGHT');
+  const invalidInputCount = results.filter(r => r.ratingStatus === 'INVALID_INPUT').length;
+  const failedResults = results.filter(r => !r.success && r.ratingStatus !== 'INVALID_INPUT');
   const noRateCount = failedResults.filter(r => !r.ratingMessage?.includes('failed') && !r.ratingMessage?.includes('timed out')).length;
   const failedCount = failedResults.filter(r => r.ratingMessage?.includes('failed') || r.ratingMessage?.includes('timed out')).length;
   const totalElapsed = results.reduce((sum, r) => sum + (r.elapsedMs || 0), 0);
@@ -675,7 +675,7 @@ export default function ResultsScreen({
       <div className="bg-gray-50 border-b border-gray-200 px-6 py-2 flex gap-6 text-xs shrink-0">
         <span><strong>Total Rows:</strong> {totalRows}</span>
         <span className="text-green-700"><strong>Successful:</strong> {successCount}</span>
-        {skippedCount > 0 && <span className="text-amber-500"><strong>Skipped (&le;10 lbs):</strong> {skippedCount}</span>}
+        {invalidInputCount > 0 && <span className="text-amber-500"><strong>Invalid Input:</strong> {invalidInputCount}</span>}
         <span className="text-amber-600"><strong>No Rates:</strong> {noRateCount}</span>
         <span className="text-red-600"><strong>Failed:</strong> {failedCount}</span>
         <span><strong>Avg Time/Row:</strong> {avgTime}ms</span>

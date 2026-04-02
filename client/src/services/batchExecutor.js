@@ -410,6 +410,28 @@ export function createBatchExecutor(config) {
     }
   }
 
+  // ── Failure message classification ──
+  function classifyFailureMessage(ratingMessage, requestWeightLbs, rawWeight) {
+    if (!ratingMessage) return '';
+    if (ratingMessage.includes('Weight must specify')) {
+      const correctWeight = parseFloat(String(rawWeight).replace(/,/g, ''));
+      if (!isNaN(correctWeight) && correctWeight !== requestWeightLbs && correctWeight > requestWeightLbs * 10) {
+        return 'WEIGHT_PARSE_ERROR';
+      }
+      return 'WEIGHT_BELOW_MINIMUM';
+    }
+    if (ratingMessage.includes('No contracted rates')) {
+      return 'NO_COVERAGE';
+    }
+    if (ratingMessage.includes('timed out') || ratingMessage.includes('timeout')) {
+      return 'TIMEOUT_EXHAUSTED';
+    }
+    if (ratingMessage.includes('HTTP 5') || ratingMessage.includes('proxy') || ratingMessage.includes('Network error')) {
+      return 'API_ERROR';
+    }
+    return 'API_ERROR';
+  }
+
   // ── Build result object with telemetry ──
   function buildResult(row, rowIndex, parsed, xml, responseXml, elapsedMs, workerIdx, err, callStartTime, dispatchTimestamp, activeWorkerSnapshot, queueSnapshot, timeoutRetry = false, failureReason = '') {
     const success = !err && parsed && parsed.rates.length > 0;
@@ -457,7 +479,13 @@ export function createBatchExecutor(config) {
       rateResponseXml: params.saveResponseXml && responseXml ? responseXml : '',
       rates: ratesWithMargin,
       timeoutRetry,
-      failureReason,
+      failureReason: !success && !failureReason
+        ? classifyFailureMessage(
+            err ? err.message : (parsed?.ratingMessage || ''),
+            parseFloat(row['Net Wt Lb']) || 0,
+            row._rawNetWtLb || row['Net Wt Lb'] || ''
+          )
+        : failureReason,
 
       // ── Telemetry ──
       telemetry: {

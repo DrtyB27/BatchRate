@@ -397,6 +397,7 @@ export default function ResultsScreen({
       targetRows: totalRows,
       isComplete: isComplete,
       csvRows: csvRows,
+      slim: true,
     });
     downloadRunFile(jsonStr, batchMeta?.batchId);
   };
@@ -596,13 +597,16 @@ export default function ResultsScreen({
         )}
 
         {/* Save/Load/Combine */}
-        <button
-          onClick={handleSaveRun}
-          disabled={results.length === 0}
-          className="text-xs bg-[#002144] hover:bg-[#003366] disabled:bg-gray-300 text-white px-3 py-1.5 rounded font-medium transition-colors"
-        >
-          Save Run
-        </button>
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={handleSaveRun}
+            disabled={results.length === 0}
+            className="text-xs bg-[#002144] hover:bg-[#003366] disabled:bg-gray-300 text-white px-3 py-1.5 rounded font-medium transition-colors"
+          >
+            Save Run
+          </button>
+          <span className="text-[10px] text-gray-400" title="Saved files are slimmed (telemetry removed, top 4 rates kept) for faster loading">slim</span>
+        </div>
         {retryCount > 0 && hasCsvRows && (
           <button
             onClick={handleSaveAndRetry}

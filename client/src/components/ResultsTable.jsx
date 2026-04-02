@@ -1,6 +1,8 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { isMinimumRated } from '../services/analyticsEngine.js';
 import { applyMargin } from '../services/ratingClient.js';
+
+const PAGE_SIZE = 500;
 
 /**
  * Flatten results into one row per carrier per shipment.
@@ -142,6 +144,7 @@ export default function ResultsTable({ flatRows, lowCostFlags, viewMode, onRowCl
   const [sortCol, setSortCol] = useState('reference');
   const [sortDir, setSortDir] = useState('asc');
   const [filters, setFilters] = useState({});
+  const [page, setPage] = useState(0);
 
   const visibleCols = useMemo(() => {
     return COLUMNS.filter(col => {
@@ -188,6 +191,14 @@ export default function ResultsTable({ flatRows, lowCostFlags, viewMode, onRowCl
     return rows;
   }, [flatRows, filters, sortCol, sortDir, activeMarkups]);
 
+  // Reset page when data, filters, or sort change
+  useEffect(() => { setPage(0); }, [flatRows, filters, sortCol, sortDir]);
+
+  const totalPages = Math.ceil(filteredRows.length / PAGE_SIZE);
+  const pagedRows = filteredRows.length > PAGE_SIZE
+    ? filteredRows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
+    : filteredRows;
+
   const handleSort = (key) => {
     if (sortCol === key) {
       setSortDir(prev => prev === 'asc' ? 'desc' : 'asc');
@@ -229,7 +240,7 @@ export default function ResultsTable({ flatRows, lowCostFlags, viewMode, onRowCl
           </tr>
         </thead>
         <tbody>
-          {filteredRows.map((row, idx) => {
+          {pagedRows.map((row, idx) => {
             const flags = lowCostFlags.get(row) || {};
             const isError = !row.hasRate;
 
@@ -289,6 +300,44 @@ export default function ResultsTable({ flatRows, lowCostFlags, viewMode, onRowCl
       </table>
       {filteredRows.length === 0 && (
         <div className="text-center text-gray-400 py-8 text-sm">No results yet</div>
+      )}
+      {filteredRows.length > PAGE_SIZE && (
+        <div className="sticky bottom-0 bg-white border-t border-gray-200 px-4 py-2 flex items-center justify-center gap-3 text-xs">
+          <button
+            onClick={() => setPage(0)}
+            disabled={page === 0}
+            className="px-2 py-1 rounded bg-gray-200 hover:bg-gray-300 disabled:opacity-40 disabled:cursor-not-allowed font-medium"
+          >
+            &laquo;
+          </button>
+          <button
+            onClick={() => setPage(p => Math.max(0, p - 1))}
+            disabled={page === 0}
+            className="px-2 py-1 rounded bg-gray-200 hover:bg-gray-300 disabled:opacity-40 disabled:cursor-not-allowed font-medium"
+          >
+            &lsaquo;
+          </button>
+          <span className="text-gray-600 font-medium">
+            Page {page + 1} of {totalPages}
+          </span>
+          <button
+            onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
+            disabled={page >= totalPages - 1}
+            className="px-2 py-1 rounded bg-gray-200 hover:bg-gray-300 disabled:opacity-40 disabled:cursor-not-allowed font-medium"
+          >
+            &rsaquo;
+          </button>
+          <button
+            onClick={() => setPage(totalPages - 1)}
+            disabled={page >= totalPages - 1}
+            className="px-2 py-1 rounded bg-gray-200 hover:bg-gray-300 disabled:opacity-40 disabled:cursor-not-allowed font-medium"
+          >
+            &raquo;
+          </button>
+          <span className="text-gray-400 ml-2">
+            ({filteredRows.length.toLocaleString()} rows)
+          </span>
+        </div>
       )}
     </div>
   );

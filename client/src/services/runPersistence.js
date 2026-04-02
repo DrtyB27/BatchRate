@@ -28,10 +28,25 @@ export function stripXmlBodies(results) {
 }
 
 // ============================================================
+// Slim a result for smaller file saves
+// ============================================================
+export function slimResult(r) {
+  const { telemetry, ...rest } = r;
+  if (rest.rates && rest.rates.length > 4) {
+    const sorted = [...rest.rates].sort((a, b) => (a.totalCharge ?? Infinity) - (b.totalCharge ?? Infinity));
+    rest.rates = sorted.slice(0, 4);
+  }
+  return rest;
+}
+
+// ============================================================
 // Serialize a run to JSON
 // ============================================================
 export function serializeRun(results, batchParams, batchMeta, yieldConfig, options = {}) {
-  const strippedResults = stripXmlBodies(results);
+  let strippedResults = stripXmlBodies(results);
+  if (options.slim) {
+    strippedResults = strippedResults.map(slimResult);
+  }
   const safeMeta = stripCredentials({
     ...(batchMeta || {}),
     contractStatus: batchParams?.contractStatus,
@@ -236,10 +251,48 @@ export function readJsonFile(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
-      try {
-        resolve(JSON.parse(reader.result));
-      } catch {
-        reject(new Error('Invalid JSON file'));
+      const text = reader.result;
+
+      // Use a Web Worker for parsing when available to avoid blocking the UI
+      if (typeof Worker !== 'undefined') {
+        try {
+          const worker = new Worker(
+            new URL('../workers/jsonParser.worker.js', import.meta.url),
+            { type: 'module' }
+          );
+          worker.onmessage = (e) => {
+            worker.terminate();
+            if (e.data.ok) {
+              resolve(e.data.data);
+            } else {
+              reject(new Error(e.data.error || 'Invalid JSON file'));
+            }
+          };
+          worker.onerror = () => {
+            worker.terminate();
+            // Fall back to synchronous parse if worker fails to load
+            try {
+              resolve(JSON.parse(text));
+            } catch {
+              reject(new Error('Invalid JSON file'));
+            }
+          };
+          worker.postMessage(text);
+        } catch {
+          // Worker construction failed — synchronous fallback
+          try {
+            resolve(JSON.parse(text));
+          } catch {
+            reject(new Error('Invalid JSON file'));
+          }
+        }
+      } else {
+        // No Worker support — synchronous fallback
+        try {
+          resolve(JSON.parse(text));
+        } catch {
+          reject(new Error('Invalid JSON file'));
+        }
       }
     };
     reader.onerror = () => reject(new Error('Failed to read file'));

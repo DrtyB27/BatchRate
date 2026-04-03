@@ -1,11 +1,12 @@
 import React, { useState, useMemo, useRef } from 'react';
 import { deduplicateRows } from '../services/rateDeduplicator.js';
 import { readProfileFile, validateProfile } from '../services/tuningProfile.js';
+import { parseRecommendedConfig } from '../services/performanceEngine.js';
 
 const CONCURRENCY_OPTIONS = [1, 2, 3, 4, 5, 6, 8];
 const DELAY_OPTIONS = [0, 50, 100, 150, 200, 300, 500];
 const RETRY_OPTIONS = [0, 1, 2, 3];
-const CHUNK_SIZE_OPTIONS = [200, 300, 400, 500, 700, 1000];
+const CHUNK_SIZE_OPTIONS = [200, 300, 400, 500, 576, 700, 1000];
 const MAX_AGENTS_OPTIONS = [2, 3, 4, 5, 6, 8];
 const PER_AGENT_CONC_OPTIONS = [1, 2, 3, 4];
 const TOTAL_CONC_OPTIONS = [4, 6, 8, 10, 12];
@@ -72,6 +73,9 @@ export default function ExecutionControls({ settings, onChange, onRun, onPause, 
   const [profileInfo, setProfileInfo] = useState(null); // { profile, filename }
   const [profileError, setProfileError] = useState(null);
   const profileInputRef = useRef(null);
+  const [perfReportConfig, setPerfReportConfig] = useState(null); // { config, filename }
+  const [perfReportError, setPerfReportError] = useState(null);
+  const perfReportInputRef = useRef(null);
 
   const update = (key, val) => onChange({ ...settings, [key]: val });
 
@@ -211,7 +215,7 @@ export default function ExecutionControls({ settings, onChange, onRun, onPause, 
                     type="button"
                     onClick={() => update('dedup', d)}
                     className={`text-[10px] px-2 py-0.5 rounded font-medium transition-colors ${
-                      (settings.dedup || 'off') === d
+                      (settings.dedup || '5-digit') === d
                         ? 'bg-[#002144] text-white'
                         : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
                     }`}
@@ -258,7 +262,7 @@ export default function ExecutionControls({ settings, onChange, onRun, onPause, 
                       value={settings.chunkSize || 400}
                       options={CHUNK_SIZE_OPTIONS}
                       onChange={v => update('chunkSize', v)}
-                      tooltip="Rows per agent."
+                      tooltip="Rows per chunk. Server degrades after ~576 rows. Recommended: 576. A 45s pause is inserted between chunks."
                     />
                     <StepperControl
                       label="Max Agents"
@@ -319,7 +323,7 @@ export default function ExecutionControls({ settings, onChange, onRun, onPause, 
                   {rowCount > 0 && (
                     <p className="text-[10px] text-gray-500 bg-gray-50 rounded px-2 py-1">
                       {estimatedCalls.toLocaleString()} calls &divide; {settings.chunkSize || 400} = {Math.ceil(estimatedCalls / (settings.chunkSize || 400))} agents.
-                      Up to {Math.min(settings.maxAgents || 5, Math.floor((settings.totalMaxConcurrency || 8) / (settings.concurrencyPerAgent || 2)))} active simultaneously.
+                      Up to {Math.min(settings.maxAgents || 5, Math.floor((settings.totalMaxConcurrency || 8) / (settings.concurrencyPerAgent || 3)))} active simultaneously.
                     </p>
                   )}
                 </div>
@@ -393,6 +397,86 @@ export default function ExecutionControls({ settings, onChange, onRun, onPause, 
               )}
               {profileError && (
                 <div className="text-[10px] text-red-600 bg-red-50 rounded px-2 py-1">{profileError}</div>
+              )}
+            </div>
+          )}
+
+          {/* PerfReport Import */}
+          {showAdvanced && (
+            <div className="bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-semibold text-emerald-800">Import PerfReport</span>
+                {perfReportConfig && (
+                  <button
+                    onClick={() => setPerfReportConfig(null)}
+                    className="text-[10px] text-emerald-500 hover:text-emerald-700"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+              {perfReportConfig ? (
+                <div className="text-[10px] text-emerald-700 space-y-1">
+                  <div className="font-medium">Applied from: {perfReportConfig.filename}</div>
+                  <div>Concurrency: {perfReportConfig.config.concurrency} | Chunk: {perfReportConfig.config.chunkSize} | Agents: {perfReportConfig.config.maxAgents} | Delay: {perfReportConfig.config.delayMs}ms</div>
+                  {perfReportConfig.config.source.avgResponseMs && (
+                    <div>Prior run avg: {Math.round(perfReportConfig.config.source.avgResponseMs)}ms ({perfReportConfig.config.source.totalRows} rows)</div>
+                  )}
+                  {perfReportConfig.config.reasoning.length > 0 && (
+                    <details className="mt-1">
+                      <summary className="cursor-pointer text-emerald-600 hover:text-emerald-800">Reasoning</summary>
+                      <ul className="list-disc list-inside mt-1 space-y-0.5 text-emerald-600">
+                        {perfReportConfig.config.reasoning.map((r, i) => <li key={i}>{r}</li>)}
+                      </ul>
+                    </details>
+                  )}
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => perfReportInputRef.current?.click()}
+                    className="text-[10px] bg-emerald-100 hover:bg-emerald-200 text-emerald-700 font-medium px-2.5 py-1 rounded transition-colors"
+                  >
+                    Load PerfReport
+                  </button>
+                  <input
+                    ref={perfReportInputRef}
+                    type="file"
+                    accept=".json"
+                    className="hidden"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      e.target.value = '';
+                      try {
+                        const text = await file.text();
+                        const reportJson = JSON.parse(text);
+                        const config = parseRecommendedConfig(reportJson);
+                        if (!config) throw new Error('Not a valid PerfReport (missing nextRunConfig)');
+                        // Apply recommended settings
+                        onChange({
+                          ...settings,
+                          concurrency: config.concurrency,
+                          delayMs: config.delayMs,
+                          chunkSize: config.chunkSize,
+                          maxAgents: config.maxAgents,
+                          autoTune: config.autoTune,
+                          autoTuneTarget: config.autoTuneTarget,
+                          totalMaxConcurrency: config.concurrency,
+                        });
+                        setPerfReportConfig({ config, filename: file.name });
+                        setPerfReportError(null);
+                      } catch (err) {
+                        setPerfReportError(err.message);
+                        setTimeout(() => setPerfReportError(null), 4000);
+                      }
+                    }}
+                  />
+                  <span className="text-[10px] text-emerald-500">Load a PerfReport JSON to auto-configure settings from prior run</span>
+                </div>
+              )}
+              {perfReportError && (
+                <div className="text-[10px] text-red-600 bg-red-50 rounded px-2 py-1">{perfReportError}</div>
               )}
             </div>
           )}

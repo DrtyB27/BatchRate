@@ -1245,3 +1245,32 @@ export function formatInternalSummary(report) {
 
   return lines.join('\n');
 }
+
+// ============================================================
+// Parse PerfReport JSON → recommended execution settings
+// ============================================================
+
+/**
+ * Extract recommended execution settings from a PerfReport JSON.
+ * Returns null if the file is not a valid PerfReport.
+ */
+export function parseRecommendedConfig(reportJson) {
+  if (!reportJson || !reportJson.nextRunConfig) return null;
+
+  const nc = reportJson.nextRunConfig;
+  return {
+    concurrency: nc.concurrency || 4,
+    delayMs: nc.delayMs || 0,
+    chunkSize: nc.chunkSize || 400,
+    maxAgents: nc.maxAgents || 5,
+    autoTune: nc.autoTune !== false,
+    autoTuneTarget: nc.targetResponseMs || 2000,
+    reasoning: nc.reasoning || [],
+    source: {
+      batchId: reportJson.runSummary?.batchId || null,
+      generatedAt: reportJson.generatedAt || null,
+      totalRows: reportJson.runSummary?.targetRows || null,
+      avgResponseMs: reportJson.runSummary?.avgResponseMs || null,
+    },
+  };
+}

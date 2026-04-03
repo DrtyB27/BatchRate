@@ -471,6 +471,7 @@ export default function InputScreen({
             onCancelAgent={(id) => orchestratorRef.current?.cancelAgent(id)}
             onRetryAgent={(id) => orchestratorRef.current?.retryAgent(id)}
             onRetryAllFailed={() => orchestratorRef.current?.retryAllFailed()}
+            onSkipPause={() => orchestratorRef.current?.skipPause()}
           />
         )}
 

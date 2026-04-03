@@ -71,14 +71,14 @@ function AgentRow({ agent, onPause, onResume, onCancel, onRetry }) {
   );
 }
 
-export default function MultiAgentProgress({ progress, onPauseAll, onResumeAll, onCancelAll, onPauseAgent, onResumeAgent, onCancelAgent, onRetryAgent, onRetryAllFailed }) {
+export default function MultiAgentProgress({ progress, onPauseAll, onResumeAll, onCancelAll, onPauseAgent, onResumeAgent, onCancelAgent, onRetryAgent, onRetryAllFailed, onSkipPause }) {
   const [expanded, setExpanded] = useState(true);
 
   if (!progress || !progress.isMultiAgent) return null;
 
   const { totalRows, totalCompleted, totalSucceeded, totalFailed, agents,
     overallThroughput, estimatedRemaining, elapsedMs, activeAgents,
-    queuedAgents, completedAgents, failedAgents, state } = progress;
+    queuedAgents, completedAgents, failedAgents, state, interChunkPause } = progress;
 
   const pct = totalRows > 0 ? (totalCompleted / totalRows) * 100 : 0;
   const successPct = totalRows > 0 ? (totalSucceeded / totalRows) * 100 : 0;
@@ -114,6 +114,26 @@ export default function MultiAgentProgress({ progress, onPauseAll, onResumeAll, 
           <div className="text-green-700"><span className="text-gray-500">Success:</span> <strong>{totalSucceeded}</strong></div>
           <div className="text-red-600"><span className="text-gray-500">Failed:</span> <strong>{totalFailed}</strong></div>
         </div>
+
+        {/* Inter-chunk pause banner */}
+        {interChunkPause && (
+          <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 flex items-center gap-3">
+            <svg className="w-4 h-4 text-amber-500 shrink-0 animate-pulse" fill="currentColor" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-1-4a1 1 0 10-2 0v4a1 1 0 001 1h3a1 1 0 100-2h-2V6z" clipRule="evenodd" />
+            </svg>
+            <span className="text-xs text-amber-700 font-medium">
+              Chunk {interChunkPause.chunkIndex} of {interChunkPause.totalChunks} complete &mdash; pausing {Math.round(interChunkPause.pauseMs / 1000)}s before next chunk ({Math.round(interChunkPause.remainingMs / 1000)}s remaining)
+            </span>
+            {onSkipPause && (
+              <button
+                onClick={onSkipPause}
+                className="text-[10px] bg-amber-200 hover:bg-amber-300 text-amber-800 px-2 py-0.5 rounded font-medium transition-colors ml-auto shrink-0"
+              >
+                Run next chunk now
+              </button>
+            )}
+          </div>
+        )}
 
         <div className="flex items-center gap-2 text-xs text-gray-500">
           <span className="bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-medium">{agents.length} agents</span>

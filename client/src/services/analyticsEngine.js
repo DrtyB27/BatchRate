@@ -25,7 +25,7 @@ export function isMinimumRated(rate) {
 // ============================================================
 // Find the low-cost carrier per reference (lowest totalCharge)
 // ============================================================
-function getLowCostByReference(flatRows) {
+export function getLowCostByReference(flatRows) {
   const groups = {};
   for (const row of flatRows) {
     if (!row.hasRate || row.rate.validRate === 'false') continue;
@@ -36,14 +36,8 @@ function getLowCostByReference(flatRows) {
 
   const winners = {};
   for (const [ref, rows] of Object.entries(groups)) {
-    // Guard: a carrier qualifying as both historic and low-cost must only
-    // contribute once per load to prevent cost multiplication.
-    const seenScacs = new Set();
     let best = null;
     for (const r of rows) {
-      const scac = (r.rate.carrierSCAC || '').toUpperCase();
-      if (seenScacs.has(scac)) continue;
-      seenScacs.add(scac);
       const tc = r.rate.totalCharge ?? Infinity;
       if (!best || tc < (best.rate.totalCharge ?? Infinity)) {
         best = r;

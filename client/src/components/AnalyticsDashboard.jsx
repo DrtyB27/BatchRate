@@ -6,6 +6,7 @@ import {
   computeDiscountHeatmap,
   buildAnalyticsCsv,
   buildAnalyticsXlsx,
+  getLowCostByReference,
 } from '../services/analyticsEngine.js';
 import { applyMargin } from '../services/ratingClient.js';
 import CarrierRankingPanel from './analytics/CarrierRankingPanel.jsx';
@@ -55,14 +56,16 @@ export default function AnalyticsDashboard({ flatRows, activeMarkups, onMarkupsC
   const spend = useMemo(() => computeSpendAward(flatRows), [flatRows]);
   const heatmap = useMemo(() => computeDiscountHeatmap(flatRows), [flatRows]);
 
-  // Margin KPIs (internal view only)
+  // Margin KPIs (internal view only) — use low-cost winner per reference
+  // to avoid counting every carrier quote (which inflates cost ~Nx).
   const marginKpis = useMemo(() => {
     if (!activeMarkups) return null;
+    const winners = getLowCostByReference(flatRows);
     let totalCost = 0;
     let totalRevenue = 0;
     let count = 0;
-    for (const r of flatRows) {
-      if (!r.hasRate || r.rate?.totalCharge == null) continue;
+    for (const r of Object.values(winners)) {
+      if (r.rate?.totalCharge == null) continue;
       const cost = Number(r.rate.totalCharge);
       const m = applyMargin(cost, r.rate.carrierSCAC, activeMarkups);
       totalCost += cost;

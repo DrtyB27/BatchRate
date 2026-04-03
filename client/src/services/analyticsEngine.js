@@ -36,8 +36,14 @@ function getLowCostByReference(flatRows) {
 
   const winners = {};
   for (const [ref, rows] of Object.entries(groups)) {
+    // Guard: a carrier qualifying as both historic and low-cost must only
+    // contribute once per load to prevent cost multiplication.
+    const seenScacs = new Set();
     let best = null;
     for (const r of rows) {
+      const scac = (r.rate.carrierSCAC || '').toUpperCase();
+      if (seenScacs.has(scac)) continue;
+      seenScacs.add(scac);
       const tc = r.rate.totalCharge ?? Infinity;
       if (!best || tc < (best.rate.totalCharge ?? Infinity)) {
         best = r;
@@ -59,8 +65,15 @@ export function computeCarrierRanking(flatRows) {
   const totalUniqueRefs = uniqueRefs.size;
 
   const byCarrier = {};
+  // Guard: a carrier qualifying as both historic and low-cost must only
+  // contribute once per load to prevent cost multiplication.
+  const seenPerRef = {};
   for (const row of validRows) {
     const scac = row.rate.carrierSCAC || 'UNKNOWN';
+    const ref = row.reference || '';
+    const dedupKey = `${ref}|${scac}`;
+    if (seenPerRef[dedupKey]) continue;
+    seenPerRef[dedupKey] = true;
     if (!byCarrier[scac]) {
       byCarrier[scac] = { scac, name: row.rate.carrierName || '', rows: [], wins: 0 };
     }
@@ -146,9 +159,16 @@ export function computeLaneComparison(flatRows, filter = 'all') {
   }
 
   const groups = {};
+  // Guard: a carrier qualifying as both historic and low-cost must only
+  // contribute once per load to prevent cost multiplication.
+  const seenPerRef = {};
   for (const row of validRows) {
     const laneKey = getLaneKey(row);
     const scac = row.rate.carrierSCAC || 'UNKNOWN';
+    const ref = row.reference || '';
+    const dedupKey = `${ref}|${scac}`;
+    if (seenPerRef[dedupKey]) continue;
+    seenPerRef[dedupKey] = true;
     const key = `${laneKey}||${scac}`;
     if (!groups[key]) {
       groups[key] = { laneKey, scac, carrierName: row.rate.carrierName || '', rows: [] };
@@ -222,9 +242,16 @@ export function computeDiscountHeatmap(flatRows) {
   const carriers = new Set();
   const groups = {};
 
+  // Guard: a carrier qualifying as both historic and low-cost must only
+  // contribute once per load to prevent cost multiplication.
+  const seenPerRef = {};
   for (const row of validRows) {
     const laneKey = getLaneKey(row);
     const scac = row.rate.carrierSCAC || 'UNKNOWN';
+    const ref = row.reference || '';
+    const dedupKey = `${ref}|${scac}`;
+    if (seenPerRef[dedupKey]) continue;
+    seenPerRef[dedupKey] = true;
     lanes.add(laneKey);
     carriers.add(scac);
     const key = `${laneKey}||${scac}`;
@@ -600,8 +627,14 @@ export function computeScenario(flatRows, eligibleSCACs) {
       unserviced.push(ref);
       continue;
     }
+    // Guard: a carrier qualifying as both historic and low-cost must only
+    // contribute once per load to prevent cost multiplication.
+    const seenScacs = new Set();
     let best = null;
     for (const r of candidates) {
+      const scac = (r.rate.carrierSCAC || '').toUpperCase();
+      if (seenScacs.has(scac)) continue;
+      seenScacs.add(scac);
       const tc = r.rate.totalCharge ?? Infinity;
       if (!best || tc < (best.rate.totalCharge ?? Infinity)) best = r;
     }
@@ -1045,10 +1078,17 @@ export function computeCarrierFeedback(flatRows, selectedSCAC) {
   const validRows = flatRows.filter(r => r.hasRate && r.rate.validRate !== 'false');
 
   // Group by lane + carrier
+  // Guard: a carrier qualifying as both historic and low-cost must only
+  // contribute once per load to prevent cost multiplication.
+  const seenPerRef = {};
   const laneCarriers = {};
   for (const row of validRows) {
-    const lk = getLaneKey(row);
     const scac = (row.rate.carrierSCAC || '').toUpperCase();
+    const ref = row.reference || '';
+    const dedupKey = `${ref}|${scac}`;
+    if (seenPerRef[dedupKey]) continue;
+    seenPerRef[dedupKey] = true;
+    const lk = getLaneKey(row);
     if (!laneCarriers[lk]) laneCarriers[lk] = {};
     if (!laneCarriers[lk][scac]) laneCarriers[lk][scac] = { charges: [], weights: [], count: 0 };
     laneCarriers[lk][scac].charges.push(row.rate.totalCharge || 0);

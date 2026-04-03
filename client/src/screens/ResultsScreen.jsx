@@ -449,7 +449,11 @@ export default function ResultsScreen({
 
   const handleSaveAndRetry = () => {
     // Download 1: Save run JSON (partial)
-    const jsonStr = serializeRun(results, batchParams, batchMeta, activeMarkups);
+    const jsonStr = serializeRun(results, batchParams, batchMeta, activeMarkups, {
+      targetRows: totalRows,
+      isComplete: isComplete,
+      csvRows: csvRows,
+    });
     const batchIdShort = (batchMeta?.batchId || 'unknown').slice(0, 8);
     const ts = timestamp();
 
@@ -571,8 +575,8 @@ export default function ResultsScreen({
                     style={{ width: `${retryProgress.total > 0 ? (retryProgress.completed / retryProgress.total) * 100 : 0}%` }}
                   />
                 </div>
-                <span className="text-xs text-amber-800 font-semibold w-32 text-right">
-                  Retrying: {retryProgress.completed}/{retryProgress.total}
+                <span className="text-xs text-amber-800 font-semibold w-40 text-right">
+                  {retryProgress.state === 'AUTO_PAUSED' ? 'Paused (throttled)' : `Retrying: ${retryProgress.completed}/${retryProgress.total}`}
                 </span>
               </div>
               {retryProgress.failed > 0 && (

@@ -1071,9 +1071,7 @@ export function computeCarrierFeedback(flatRows, selectedSCAC) {
   const scacUpper = selectedSCAC.toUpperCase();
   const validRows = flatRows.filter(r => r.hasRate && r.rate.validRate !== 'false');
 
-  // Group by lane + carrier
-  // Guard: a carrier qualifying as both historic and low-cost must only
-  // contribute once per load to prevent cost multiplication.
+  // Group by lane + carrier, collecting discount and min-charge data
   const seenPerRef = {};
   const laneCarriers = {};
   for (const row of validRows) {
@@ -1084,10 +1082,18 @@ export function computeCarrierFeedback(flatRows, selectedSCAC) {
     seenPerRef[dedupKey] = true;
     const lk = getLaneKey(row);
     if (!laneCarriers[lk]) laneCarriers[lk] = {};
-    if (!laneCarriers[lk][scac]) laneCarriers[lk][scac] = { charges: [], weights: [], count: 0 };
-    laneCarriers[lk][scac].charges.push(row.rate.totalCharge || 0);
-    laneCarriers[lk][scac].weights.push(parseFloat(row.inputNetWt) || 0);
-    laneCarriers[lk][scac].count++;
+    if (!laneCarriers[lk][scac]) {
+      laneCarriers[lk][scac] = { charges: [], weights: [], count: 0, discounts: [], minCount: 0 };
+    }
+    const d = laneCarriers[lk][scac];
+    d.charges.push(row.rate.totalCharge || 0);
+    d.weights.push(parseFloat(row.inputNetWt) || 0);
+    d.count++;
+    if (row.rate.isMinimumRated) {
+      d.minCount++;
+    } else if (row.rate.tariffDiscountPct != null) {
+      d.discounts.push(row.rate.tariffDiscountPct);
+    }
   }
 
   const lanes = [];
@@ -1127,18 +1133,30 @@ export function computeCarrierFeedback(flatRows, selectedSCAC) {
     else if (percentile >= 50) tier = 'Top 50%';
     else tier = 'Bottom 50%';
 
+    // Discount and min-charge for this carrier on this lane
+    const avgDiscount = myData.discounts.length > 0
+      ? Math.round((myData.discounts.reduce((a, b) => a + b, 0) / myData.discounts.length) * 10) / 10
+      : null;
+    const minCount = myData.minCount;
+    const nonMinCount = myData.count - minCount;
+
     lanes.push({
       laneKey: lk,
       shipments: myData.count,
       avgWeight: Math.round(myAvgWeight),
       theirRate: Math.round(myAvg * 100) / 100,
+      bestRate: Math.round(bestRate * 100) / 100,
       rank: myRank,
       totalCarriers,
       percentile: Math.round(percentile * 10) / 10,
       tier,
       gapPct: Math.round(gapPct * 10) / 10,
+      gapDollar: Math.round((myAvg - bestRate) * 100) / 100,
       status,
       isWinner: myRank === 1,
+      avgDiscount,
+      minCount,
+      nonMinCount,
     });
 
     percentiles.push({ percentile, weight: myData.count });
@@ -1152,18 +1170,33 @@ export function computeCarrierFeedback(flatRows, selectedSCAC) {
 
   const wins = lanes.filter(l => l.isWinner).length;
 
+  // Aggregate discount/min stats for summary card
+  const allDiscounts = lanes.filter(l => l.avgDiscount != null).map(l => l.avgDiscount);
+  const totalMinCount = lanes.reduce((s, l) => s + l.minCount, 0);
+  const totalNonMinCount = lanes.reduce((s, l) => s + l.nonMinCount, 0);
+  const totalShipments = lanes.reduce((s, l) => s + l.shipments, 0);
+
   return {
     scac: selectedSCAC,
     carrierName: validRows.find(r =>
       (r.rate.carrierSCAC || '').toUpperCase() === scacUpper
     )?.rate.carrierName || selectedSCAC,
     totalLanes: lanes.length,
-    totalShipments: lanes.reduce((s, l) => s + l.shipments, 0),
+    totalShipments,
     wins,
     overallPercentile: Math.round(overallPercentile * 10) / 10,
     overallTier: overallPercentile >= 90 ? 'Top 10%'
       : overallPercentile >= 75 ? 'Top 25%'
       : overallPercentile >= 50 ? 'Top 50%' : 'Bottom 50%',
+    // Discount/min aggregates
+    avgDiscount: allDiscounts.length > 0
+      ? Math.round((allDiscounts.reduce((a, b) => a + b, 0) / allDiscounts.length) * 10) / 10
+      : null,
+    totalMinCount,
+    totalNonMinCount,
+    minFloorRate: totalShipments > 0
+      ? Math.round((totalMinCount / totalShipments) * 1000) / 10
+      : 0,
     lanes: lanes.sort((a, b) => b.percentile - a.percentile),
   };
 }

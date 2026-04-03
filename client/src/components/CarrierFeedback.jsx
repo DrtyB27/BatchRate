@@ -260,21 +260,27 @@ export default function CarrierFeedback({ flatRows }) {
     lines.push(`Total Lanes Rated: ${feedback.totalLanes}`);
     lines.push(`Low Cost Wins: ${feedback.wins} of ${feedback.totalLanes} lanes`);
     lines.push(`Overall Competitiveness: ${feedback.overallTier} (${feedback.overallPercentile}th percentile)`);
+    lines.push(`Avg Discount (non-min only): ${feedback.avgDiscount != null ? `${feedback.avgDiscount}%` : 'N/A'}`);
+    lines.push(`Min Floor Rate: ${feedback.totalMinCount} of ${feedback.totalShipments} shipments (${feedback.minFloorRate}%)`);
     lines.push('');
 
     // Column headers
     lines.push([
-      'Lane', '# Shipments', 'Avg Weight (lbs)', 'Your Avg Rate ($)',
-      'Percentile Rank', 'Tier', 'vs Best Rate (%)', 'Status'
+      'Lane', '# Shipments', 'Avg Weight (lbs)', 'Avg Discount %', 'Min Count',
+      'Your Avg Rate ($)', 'Low Cost ($)', '$ vs Best', '% vs Best',
+      'Percentile Rank', 'Tier', 'Status'
     ].map(escCsv).join(','));
 
     // Data rows
     for (const l of feedback.lanes) {
       lines.push([
-        l.laneKey, l.shipments, l.avgWeight, l.theirRate,
-        `${l.percentile}%`, l.tier,
+        l.laneKey, l.shipments, l.avgWeight,
+        l.avgDiscount != null ? `${l.avgDiscount}%` : '',
+        l.minCount || '',
+        l.theirRate, l.bestRate,
+        l.isWinner ? '$0.00' : `+$${l.gapDollar.toFixed(2)}`,
         l.isWinner ? '0.0%' : `+${l.gapPct}%`,
-        l.status,
+        `${l.percentile}%`, l.tier, l.status,
       ].map(escCsv).join(','));
     }
 
@@ -369,6 +375,29 @@ export default function CarrierFeedback({ flatRows }) {
                       {feedback.overallPercentile}th percentile
                     </div>
                   </div>
+                  <div>
+                    <div className="text-[10px] text-gray-400 uppercase">Avg Discount</div>
+                    {feedback.avgDiscount != null
+                      ? <span className={`inline-block px-1.5 py-0.5 rounded text-[11px] font-semibold ${discountStoplightCls(feedback.avgDiscount)}`}>
+                          {fmtPct(feedback.avgDiscount)}
+                        </span>
+                      : <span className="text-gray-300">&mdash;</span>
+                    }
+                    <div className="text-[10px] text-gray-400 mt-0.5">
+                      {feedback.totalNonMinCount} non-min lanes
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-gray-400 uppercase">Min Floor Rate</div>
+                    <div className={`font-bold ${minFloorColor(feedback.minFloorRate)}`}>
+                      {feedback.totalMinCount > 0 ? fmtPct(feedback.minFloorRate) : <span className="text-gray-300">&mdash;</span>}
+                    </div>
+                    {feedback.totalMinCount > 0 && (
+                      <div className="text-[10px] text-gray-400 mt-0.5">
+                        {feedback.totalMinCount} of {feedback.totalShipments} shipments
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
@@ -387,22 +416,25 @@ export default function CarrierFeedback({ flatRows }) {
                         Lane{arrow('laneKey')}
                       </th>
                       <th className={`${thCls} text-right`} onClick={() => handleSort('shipments')}>
-                        Shipments{arrow('shipments')}
+                        Ship.{arrow('shipments')}
                       </th>
-                      <th className={`${thCls} text-right`} onClick={() => handleSort('avgWeight')}>
-                        Avg Weight{arrow('avgWeight')}
+                      <th className={`${thCls} text-right`} onClick={() => handleSort('avgDiscount')}>
+                        Discount{arrow('avgDiscount')}
+                      </th>
+                      <th className={`${thCls} text-right`} onClick={() => handleSort('minCount')}>
+                        Min{arrow('minCount')}
                       </th>
                       <th className={`${thCls} text-right`} onClick={() => handleSort('theirRate')}>
                         Your Rate{arrow('theirRate')}
                       </th>
-                      <th className={`${thCls} text-center`} onClick={() => handleSort('percentile')}>
-                        Percentile{arrow('percentile')}
-                      </th>
-                      <th className={`${thCls} text-center`} onClick={() => handleSort('tier')}>
-                        Tier{arrow('tier')}
+                      <th className={`${thCls} text-right`} onClick={() => handleSort('bestRate')}>
+                        Low Cost{arrow('bestRate')}
                       </th>
                       <th className={`${thCls} text-right`} onClick={() => handleSort('gapPct')}>
                         vs Best{arrow('gapPct')}
+                      </th>
+                      <th className={`${thCls} text-center`} onClick={() => handleSort('tier')}>
+                        Tier{arrow('tier')}
                       </th>
                       <th className={thCls} onClick={() => handleSort('status')}>
                         Status{arrow('status')}
@@ -414,21 +446,38 @@ export default function CarrierFeedback({ flatRows }) {
                       <tr key={l.laneKey} className="border-b border-gray-100 hover:bg-gray-50/50">
                         <td className="py-2 px-3 font-mono text-[#002144]">{l.laneKey}</td>
                         <td className="py-2 px-3 text-right">{l.shipments}</td>
-                        <td className="py-2 px-3 text-right">{l.avgWeight.toLocaleString()} lbs</td>
+                        {/* Discount stoplight — non-min shipments only */}
+                        <td className="py-2 px-3 text-right">
+                          {l.avgDiscount != null
+                            ? <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold ${discountStoplightCls(l.avgDiscount)}`}>
+                                {fmtPct(l.avgDiscount)}
+                              </span>
+                            : <span className="text-gray-300">&mdash;</span>
+                          }
+                        </td>
+                        {/* Min charge count */}
+                        <td className="py-2 px-3 text-right">
+                          {l.minCount > 0
+                            ? <span className="text-amber-600 font-medium">{l.minCount}</span>
+                            : <span className="text-gray-300">&mdash;</span>
+                          }
+                        </td>
                         <td className="py-2 px-3 text-right font-medium">
                           ${l.theirRate.toLocaleString(undefined, { minimumFractionDigits: 2 })}
                         </td>
-                        <td className="py-2 px-3 text-center font-medium">{l.percentile}%</td>
+                        <td className="py-2 px-3 text-right text-gray-500">
+                          ${l.bestRate.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                        </td>
+                        <td className={`py-2 px-3 text-right font-medium ${deltaColor(l.gapPct)}`}>
+                          {l.isWinner
+                            ? <span>Best</span>
+                            : <span>+{fmtMoney(l.gapDollar)} / +{fmtPct(l.gapPct)}</span>
+                          }
+                        </td>
                         <td className="py-2 px-3 text-center">
                           <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold ${TIER_COLORS[l.tier] || 'bg-gray-100'}`}>
                             {l.tier}
                           </span>
-                        </td>
-                        <td className="py-2 px-3 text-right">
-                          {l.isWinner
-                            ? <span className="text-green-600 font-semibold">Best</span>
-                            : <span className="text-amber-600">+{l.gapPct}%</span>
-                          }
                         </td>
                         <td className="py-2 px-3">
                           <span className={STATUS_COLORS[l.status] || 'text-red-600'}>

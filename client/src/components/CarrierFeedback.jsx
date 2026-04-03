@@ -23,12 +23,11 @@ function escCsv(val) {
 const fmtMoney = (v) => `$${Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const fmtPct = (v) => `${Number(v).toFixed(1)}%`;
 
-// Color helpers for the summary table
-function discountColor(val) {
-  if (val == null) return 'text-gray-400';
-  if (val >= 70) return 'text-green-700';
-  if (val >= 60) return 'text-amber-600';
-  return 'text-red-600';
+// Discount stoplight — matches LaneComparisonPanel thresholds
+function discountStoplightCls(pct) {
+  if (pct < 50) return 'bg-red-100 text-red-800';
+  if (pct <= 65) return 'bg-yellow-100 text-yellow-800';
+  return 'bg-green-100 text-green-800';
 }
 
 function deltaColor(pct) {
@@ -43,10 +42,17 @@ function winRateColor(pct) {
   return 'text-red-600';
 }
 
-function minChargePctColor(pct) {
-  if (pct > 35) return 'text-red-600';
-  if (pct > 15) return 'text-amber-600';
-  return 'text-gray-600';
+function minFloorColor(pct) {
+  if (pct > 40) return 'text-red-600 font-semibold';
+  if (pct > 20) return 'text-amber-600';
+  return 'text-green-700';
+}
+
+function minDeltaColor(pct) {
+  if (pct == null) return 'text-gray-400';
+  if (pct <= 5) return 'text-green-700';
+  if (pct <= 10) return 'text-amber-600';
+  return 'text-red-600';
 }
 
 // ── Summary Comparison Table ────────────────────────────────
@@ -73,28 +79,38 @@ function CarrierSummaryTable({ summary, onSelectCarrier }) {
     else { setSortKey(key); setSortAsc(false); }
   };
 
-  const thCls = 'py-2 px-3 font-semibold text-gray-600 text-left cursor-pointer hover:bg-gray-100 select-none whitespace-nowrap';
+  const thCls = 'py-2 px-2 font-semibold text-gray-600 text-left cursor-pointer hover:bg-gray-100 select-none whitespace-nowrap text-[11px]';
   const arrow = (key) => sortKey === key ? (sortAsc ? ' \u25B2' : ' \u25BC') : '';
 
   return (
     <div className="space-y-3">
       {/* Banner */}
-      <div className="bg-[#002144] text-white rounded-lg px-4 py-3 flex items-center gap-4 flex-wrap text-xs"
+      <div className="bg-[#002144] text-white rounded-lg px-4 py-3 text-xs"
            style={{ fontFamily: "'Montserrat', Arial, sans-serif" }}>
-        <span className="font-semibold">
-          Low-Cost Target Coverage: {summary.totalRefs.toLocaleString()} lanes rated across {summary.totalCarriers} carriers
-        </span>
-        {summary.topWinners.length > 0 && (
-          <span className="text-[#39b6e6]">
-            Cheapest by lane:{' '}
-            {summary.topWinners.map((w, i) => (
-              <span key={w.scac}>
-                {i > 0 && '  '}
-                <span className="font-bold">{w.scac}</span> ({fmtPct(w.pct)})
-              </span>
-            ))}
+        <div className="flex items-center gap-4 flex-wrap">
+          <span className="font-semibold">
+            Low-Cost Target Coverage: {summary.totalRefs.toLocaleString()} lanes rated across {summary.totalCarriers} carriers
           </span>
-        )}
+          {summary.topWinners.length > 0 && (
+            <span className="text-[#39b6e6]">
+              Cheapest by lane:{' '}
+              {summary.topWinners.map((w, i) => (
+                <span key={w.scac}>
+                  {i > 0 && '  '}
+                  <span className="font-bold">{w.scac}</span> ({fmtPct(w.pct)})
+                </span>
+              ))}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-4 mt-1.5 text-gray-300">
+          <span>Discount shown on non-minimum lanes only.</span>
+          {summary.highMinFloorCount > 0 && (
+            <span className="text-amber-300">
+              {summary.highMinFloorCount} carrier{summary.highMinFloorCount > 1 ? 's have' : ' has'} &gt;40% of lanes hitting minimum floor.
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Comparison table */}
@@ -112,14 +128,17 @@ function CarrierSummaryTable({ summary, onSelectCarrier }) {
                 <th className={`${thCls} text-right`} onClick={() => handleSort('avgDiscount')}>
                   Avg Discount{arrow('avgDiscount')}
                 </th>
-                <th className={`${thCls} text-right`} onClick={() => handleSort('minChargePct')}>
-                  Min Charge %{arrow('minChargePct')}
+                <th className={`${thCls} text-right`} onClick={() => handleSort('nonMinCount')}>
+                  Non-Min Lanes{arrow('nonMinCount')}
+                </th>
+                <th className={`${thCls} text-right`} onClick={() => handleSort('minFloorRate')}>
+                  Min Floor Rate{arrow('minFloorRate')}
+                </th>
+                <th className={`${thCls} text-right`} onClick={() => handleSort('avgMinDeltaPct')}>
+                  Avg Min vs Low Cost{arrow('avgMinDeltaPct')}
                 </th>
                 <th className={`${thCls} text-right`} onClick={() => handleSort('avgDelta')}>
                   Avg $ vs Low Cost{arrow('avgDelta')}
-                </th>
-                <th className={`${thCls} text-right`} onClick={() => handleSort('avgDeltaPct')}>
-                  Avg % vs Low Cost{arrow('avgDeltaPct')}
                 </th>
                 <th className={`${thCls} text-right`} onClick={() => handleSort('winRate')}>
                   Win Rate{arrow('winRate')}
@@ -131,27 +150,51 @@ function CarrierSummaryTable({ summary, onSelectCarrier }) {
                 <tr key={r.scac}
                     className="border-b border-gray-100 hover:bg-blue-50/40 cursor-pointer"
                     onClick={() => onSelectCarrier(r.scac)}>
-                  <td className="py-2 px-3">
+                  <td className="py-2 px-2">
                     <div className="font-semibold text-[#002144]">{r.scac}</div>
                     <div className="text-[10px] text-gray-400 truncate max-w-[140px]">{r.carrierName}</div>
                   </td>
-                  <td className="py-2 px-3 text-right">{r.laneCount.toLocaleString()}</td>
-                  <td className={`py-2 px-3 text-right font-medium ${discountColor(r.avgDiscount)}`}>
-                    {r.hasDiscount ? fmtPct(r.avgDiscount) : <span className="text-gray-300">&mdash;</span>}
-                  </td>
-                  <td className={`py-2 px-3 text-right font-medium ${minChargePctColor(r.minChargePct)}`}>
-                    {r.minChargeCount > 0
-                      ? <span>{fmtPct(r.minChargePct)} <span className="text-gray-400">({r.minChargeCount})</span></span>
+                  <td className="py-2 px-2 text-right">{r.laneCount.toLocaleString()}</td>
+                  {/* Discount stoplight — non-minimum lanes only */}
+                  <td className="py-2 px-2 text-right">
+                    {r.hasDiscount
+                      ? <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold ${discountStoplightCls(r.avgDiscount)}`}>
+                          {fmtPct(r.avgDiscount)}
+                        </span>
                       : <span className="text-gray-300">&mdash;</span>
                     }
                   </td>
-                  <td className={`py-2 px-3 text-right font-medium ${deltaColor(r.avgDeltaPct)}`}>
-                    {r.avgDelta === 0 ? '$0.00' : `+${fmtMoney(r.avgDelta)}`}
+                  {/* Non-min lane count + percentage */}
+                  <td className="py-2 px-2 text-right">
+                    <span>{r.nonMinCount.toLocaleString()}</span>
+                    <span className="text-gray-400 ml-1">({fmtPct(r.nonMinPct)})</span>
                   </td>
-                  <td className={`py-2 px-3 text-right font-medium ${deltaColor(r.avgDeltaPct)}`}>
-                    {r.avgDeltaPct === 0 ? '0.0%' : `+${fmtPct(r.avgDeltaPct)}`}
+                  {/* Min floor rate */}
+                  <td className={`py-2 px-2 text-right font-medium ${minFloorColor(r.minFloorRate)}`}>
+                    {r.atMinCount > 0
+                      ? <span>{fmtPct(r.minFloorRate)} <span className="text-gray-400 font-normal">({r.atMinCount})</span></span>
+                      : <span className="text-gray-300 font-normal">&mdash;</span>
+                    }
                   </td>
-                  <td className={`py-2 px-3 text-right font-medium ${winRateColor(r.winRate)}`}>
+                  {/* Avg min vs low cost — $ and % */}
+                  <td className={`py-2 px-2 text-right font-medium ${minDeltaColor(r.avgMinDeltaPct)}`}>
+                    {r.avgMinDelta != null
+                      ? <span>
+                          +{fmtMoney(r.avgMinDelta)}
+                          <span className="text-gray-400 font-normal ml-1">/ +{fmtPct(r.avgMinDeltaPct)}</span>
+                        </span>
+                      : <span className="text-gray-300 font-normal">&mdash;</span>
+                    }
+                  </td>
+                  {/* Avg $ vs low cost */}
+                  <td className={`py-2 px-2 text-right font-medium ${deltaColor(r.avgDeltaPct)}`}>
+                    {r.avgDelta === 0
+                      ? '$0.00'
+                      : <span>+{fmtMoney(r.avgDelta)} <span className="text-gray-400 font-normal">/ +{fmtPct(r.avgDeltaPct)}</span></span>
+                    }
+                  </td>
+                  {/* Win rate */}
+                  <td className={`py-2 px-2 text-right font-medium ${winRateColor(r.winRate)}`}>
                     {fmtPct(r.winRate)}
                   </td>
                 </tr>

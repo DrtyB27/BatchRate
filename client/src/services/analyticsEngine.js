@@ -1219,8 +1219,14 @@ export function computeCarrierFeedbackSummary(flatRows) {
           scac,
           carrierName: carrierNames[scac],
           laneCount: 0,
-          discounts: [],
-          minChargeCount: 0,
+          // Discount — only from non-minimum lanes (min overrides discount)
+          discountsNonMin: [],
+          nonMinCount: 0,
+          // Minimum charge tracking
+          atMinCount: 0,
+          minDeltas: [],     // delta vs low-cost for min-floor lanes
+          minDeltaPcts: [],
+          // Overall cost comparison
           deltas: [],
           deltaPcts: [],
           winCount: 0,
@@ -1229,14 +1235,22 @@ export function computeCarrierFeedbackSummary(flatRows) {
 
       const s = stats[scac];
       s.laneCount++;
-      if (data.tariffDiscountPct != null) s.discounts.push(data.tariffDiscountPct);
-      if (data.isMinimumRated) s.minChargeCount++;
 
       const delta = lowCost > 0 ? data.totalCharge - lowCost : 0;
       const deltaPct = lowCost > 0 ? (delta / lowCost) * 100 : 0;
       s.deltas.push(delta);
       s.deltaPcts.push(deltaPct);
       if (delta === 0) s.winCount++;
+
+      if (data.isMinimumRated) {
+        s.atMinCount++;
+        // Track how the minimum-floor charge compares to low-cost target
+        s.minDeltas.push(delta);
+        s.minDeltaPcts.push(deltaPct);
+      } else {
+        s.nonMinCount++;
+        if (data.tariffDiscountPct != null) s.discountsNonMin.push(data.tariffDiscountPct);
+      }
     }
   }
 
@@ -1246,14 +1260,27 @@ export function computeCarrierFeedbackSummary(flatRows) {
     scac: s.scac,
     carrierName: s.carrierName,
     laneCount: s.laneCount,
-    avgDiscount: s.discounts.length > 0
-      ? Math.round((s.discounts.reduce((a, b) => a + b, 0) / s.discounts.length) * 10) / 10
+    // Discount avg from non-minimum lanes only
+    avgDiscount: s.discountsNonMin.length > 0
+      ? Math.round((s.discountsNonMin.reduce((a, b) => a + b, 0) / s.discountsNonMin.length) * 10) / 10
       : null,
-    hasDiscount: s.discounts.length > 0,
-    minChargeCount: s.minChargeCount,
-    minChargePct: s.laneCount > 0
-      ? Math.round((s.minChargeCount / s.laneCount) * 1000) / 10
+    hasDiscount: s.discountsNonMin.length > 0,
+    nonMinCount: s.nonMinCount,
+    nonMinPct: s.laneCount > 0
+      ? Math.round((s.nonMinCount / s.laneCount) * 1000) / 10
       : 0,
+    // Minimum floor stats
+    atMinCount: s.atMinCount,
+    minFloorRate: s.laneCount > 0
+      ? Math.round((s.atMinCount / s.laneCount) * 1000) / 10
+      : 0,
+    avgMinDelta: s.minDeltas.length > 0
+      ? Math.round((s.minDeltas.reduce((a, b) => a + b, 0) / s.minDeltas.length) * 100) / 100
+      : null,
+    avgMinDeltaPct: s.minDeltaPcts.length > 0
+      ? Math.round((s.minDeltaPcts.reduce((a, b) => a + b, 0) / s.minDeltaPcts.length) * 10) / 10
+      : null,
+    // Overall cost comparison
     avgDelta: s.laneCount > 0
       ? Math.round((s.deltas.reduce((a, b) => a + b, 0) / s.laneCount) * 100) / 100
       : 0,
@@ -1274,7 +1301,9 @@ export function computeCarrierFeedbackSummary(flatRows) {
     .slice(0, 5)
     .map(r => ({ scac: r.scac, pct: r.winRate }));
 
-  return { rows, totalRefs, totalCarriers: rows.length, topWinners };
+  const highMinFloorCount = rows.filter(r => r.minFloorRate > 40).length;
+
+  return { rows, totalRefs, totalCarriers: rows.length, topWinners, highMinFloorCount };
 }
 
 /**

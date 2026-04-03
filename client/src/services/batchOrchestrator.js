@@ -11,6 +11,10 @@ import { createAutoSaver } from './autoSave.js';
 import { createKeepAlive } from './keepAlive.js';
 import { CALL_TIMEOUT_MS } from './ratingClient.js';
 
+// ── Constants ──
+export const INTER_CHUNK_PAUSE_MS = 45_000;  // 45s pause between server chunks
+export const MIN_ROWS_PER_AGENT = 50;        // never spawn an agent for fewer than 50 rows
+
 // ── Smart chunk sizing ──
 function calculateOptimalChunkSize(totalRows) {
   if (totalRows <= 400) return totalRows;
@@ -18,6 +22,15 @@ function calculateOptimalChunkSize(totalRows) {
   if (totalRows <= 2000) return 500;
   if (totalRows <= 5000) return 700;
   return 1000;
+}
+
+/**
+ * Compute effective agent count respecting min-rows-per-agent constraint.
+ */
+export function computeAgentCount(totalRows, userMaxAgents = 8) {
+  if (totalRows <= 0) return 0;
+  const byMinRows = Math.floor(totalRows / MIN_ROWS_PER_AGENT);
+  return Math.max(1, Math.min(userMaxAgents, byMinRows, totalRows));
 }
 
 // ── Adaptive Orchestrator Tuner ──
@@ -255,7 +268,7 @@ class AdaptiveOrchestratorTuner {
 export function createBatchOrchestrator(config) {
   const {
     chunkSize: userChunkSize,
-    maxAgents = 5,
+    maxAgents: userMaxAgents = 5,
     concurrencyPerAgent = 3,
     totalMaxConcurrency = 8,
     delayMs = 0,
@@ -265,6 +278,7 @@ export function createBatchOrchestrator(config) {
     timeoutMs = CALL_TIMEOUT_MS,
     staggerStartMs = 500,
     autoSavePerAgent = true,
+    interChunkPauseMs = INTER_CHUNK_PAUSE_MS,
     onResult,
     onAgentProgress,
     onProgress,
@@ -273,11 +287,21 @@ export function createBatchOrchestrator(config) {
   } = config;
 
   // ── State ──
-  let state = 'IDLE'; // IDLE | RUNNING | PAUSED | COMPLETE | CANCELLED
+  let state = 'IDLE'; // IDLE | RUNNING | PAUSED | COMPLETE | CANCELLED | INTER_CHUNK_PAUSE
   const agents = [];       // { agentId, startIndex, endIndex, rows, executor, state, progress, autoSaver }
   const agentQueue = [];   // agents waiting for a concurrency slot
   let activeAgentCount = 0;
+  // Apply min-rows-per-agent constraint to cap agent count
+  const maxAgents = userMaxAgents;
   let maxActiveAgents = Math.min(maxAgents, Math.floor(totalMaxConcurrency / concurrencyPerAgent));
+
+  // Inter-chunk pause state
+  let interChunkPauseTimer = null;
+  let interChunkPauseStart = 0;
+  let interChunkPauseDuration = 0;
+  let currentChunkIndex = 0;
+  let totalChunks = 0;
+  let interChunkPauseSkipped = false;
   let startTimeMs = 0;
   let tuner = null;
   let remainingRowsRef = null;
@@ -336,6 +360,14 @@ export function createBatchOrchestrator(config) {
       state,
       isMultiAgent: true,
       tunerState: tuner ? tuner.getState() : null,
+      // Inter-chunk pause info
+      interChunkPause: state === 'INTER_CHUNK_PAUSE' ? {
+        chunkIndex: currentChunkIndex,
+        totalChunks,
+        pauseMs: interChunkPauseDuration,
+        elapsedMs: Date.now() - interChunkPauseStart,
+        remainingMs: Math.max(0, interChunkPauseDuration - (Date.now() - interChunkPauseStart)),
+      } : null,
     };
   }
 
@@ -415,7 +447,10 @@ export function createBatchOrchestrator(config) {
           masterAutoSaver.saveNow(allResults, paramsRef, { batchId: agents[0]?.agentId?.replace('agent-', 'batch-') });
         }
 
-        launchNextQueued();
+        // Try inter-chunk pause before launching next; fall back to immediate launch
+        if (!maybeInterChunkPause()) {
+          launchNextQueued();
+        }
         checkAllComplete();
       },
     });
@@ -441,6 +476,9 @@ export function createBatchOrchestrator(config) {
   }
 
   function launchNextQueued() {
+    // Don't launch during inter-chunk pause
+    if (state === 'INTER_CHUNK_PAUSE') return;
+
     while (agentQueue.length > 0) {
       // Ask tuner if we should launch another
       if (tuner && !tuner.shouldLaunchNext(activeAgentCount)) break;
@@ -452,6 +490,50 @@ export function createBatchOrchestrator(config) {
         break; // stagger — one at a time
       }
     }
+  }
+
+  // Inter-chunk pause: when all active agents are done and there are queued agents,
+  // pause before launching the next wave
+  function maybeInterChunkPause() {
+    if (interChunkPauseMs <= 0 || agentQueue.length === 0 || activeAgentCount > 0) {
+      return false;
+    }
+
+    currentChunkIndex++;
+    state = 'INTER_CHUNK_PAUSE';
+    interChunkPauseStart = Date.now();
+    interChunkPauseDuration = interChunkPauseMs;
+    emitProgress();
+
+    // Emit progress updates during the pause for countdown
+    const countdownInterval = setInterval(() => {
+      if (state !== 'INTER_CHUNK_PAUSE') {
+        clearInterval(countdownInterval);
+        return;
+      }
+      emitProgress();
+    }, 1000);
+
+    interChunkPauseTimer = setTimeout(() => {
+      clearInterval(countdownInterval);
+      if (state === 'INTER_CHUNK_PAUSE') {
+        state = 'RUNNING';
+        emitProgress();
+        launchNextQueued();
+      }
+    }, interChunkPauseMs);
+
+    return true;
+  }
+
+  function skipInterChunkPause() {
+    if (state !== 'INTER_CHUNK_PAUSE') return;
+    clearTimeout(interChunkPauseTimer);
+    interChunkPauseTimer = null;
+    interChunkPauseSkipped = true;
+    state = 'RUNNING';
+    emitProgress();
+    launchNextQueued();
   }
 
   // Re-chunk remaining rows after calibration and launch new agents
@@ -502,7 +584,8 @@ export function createBatchOrchestrator(config) {
 
   function checkAllComplete() {
     const allDone = agents.every(a => a.state === 'complete' || a.state === 'failed' || a.state === 'stalled' || a.state === 'cancelled');
-    if (allDone && state === 'RUNNING') {
+    if (allDone && agentQueue.length === 0 && (state === 'RUNNING' || state === 'INTER_CHUNK_PAUSE')) {
+      if (interChunkPauseTimer) clearTimeout(interChunkPauseTimer);
       state = 'COMPLETE';
 
       // Stop keep-alive and master auto-save
@@ -561,8 +644,16 @@ export function createBatchOrchestrator(config) {
       agents.length = 0;
       agentQueue.length = 0;
       activeAgentCount = 0;
+      interChunkPauseTimer = null;
+      interChunkPauseStart = 0;
+      interChunkPauseDuration = 0;
+      currentChunkIndex = 0;
+      interChunkPauseSkipped = false;
 
       const effectiveChunkSize = userChunkSize || calculateOptimalChunkSize(csvRows.length);
+
+      // Apply min-rows-per-agent constraint
+      const effectiveMaxAgents = computeAgentCount(csvRows.length, maxAgents);
 
       startTimeMs = Date.now();
       state = 'RUNNING';
@@ -577,7 +668,7 @@ export function createBatchOrchestrator(config) {
       if (adaptiveOrchestration && csvRows.length > 200) {
         tuner = new AdaptiveOrchestratorTuner(csvRows.length, {
           chunkSize: effectiveChunkSize,
-          maxAgents,
+          maxAgents: effectiveMaxAgents,
           concurrencyPerAgent,
           totalMaxConcurrency,
           delayMs,
@@ -603,6 +694,7 @@ export function createBatchOrchestrator(config) {
         // Remaining rows stored but not chunked yet
         remainingRowsRef = csvRows.slice(probeSize);
         remainingStartIndex = probeSize;
+        totalChunks = 1; // probe counts as first chunk; will be recalculated after calibration
       } else {
         // Standard mode: split into chunks upfront
         for (let i = 0; i < csvRows.length; i += effectiveChunkSize) {
@@ -619,6 +711,7 @@ export function createBatchOrchestrator(config) {
             autoSaver: null,
           });
         }
+        totalChunks = agents.length;
       }
 
       // Start keep-alive (once for all agents)
@@ -636,6 +729,9 @@ export function createBatchOrchestrator(config) {
         () => paramsRef,
         () => ({ batchId: `batch-${startTimeMs}` }),
       );
+
+      // Update maxActiveAgents with effective cap
+      maxActiveAgents = Math.min(effectiveMaxAgents, Math.floor(totalMaxConcurrency / concurrencyPerAgent));
 
       if (tuner) {
         // Launch only the probe agent
@@ -687,7 +783,12 @@ export function createBatchOrchestrator(config) {
       emitProgress();
     },
 
+    skipPause() {
+      skipInterChunkPause();
+    },
+
     cancel() {
+      if (interChunkPauseTimer) clearTimeout(interChunkPauseTimer);
       state = 'CANCELLED';
       agents.forEach(a => {
         if (a.executor && (a.state === 'running' || a.state === 'paused')) {

@@ -410,9 +410,29 @@ export function createBatchExecutor(config) {
     }
   }
 
+  // ── Throttle detection signatures ──
+  const THROTTLE_SIGNATURES = [
+    /throttl/i,
+    /rate.?limit/i,
+    /too many requests/i,
+    /service unavailable/i,
+    /503/,
+    /429/,
+  ];
+
+  // Consecutive throttle counter for forced pause
+  let consecutiveThrottles = 0;
+  const THROTTLE_EXTRA_DELAY_MS = 5000;
+  const CONSECUTIVE_THROTTLE_PAUSE_THRESHOLD = 3;
+
   // ── Failure message classification ──
-  function classifyFailureMessage(ratingMessage, requestWeightLbs, rawWeight) {
+  function classifyFailureMessage(ratingMessage, requestWeightLbs, rawWeight, httpStatus) {
     if (!ratingMessage) return '';
+
+    // Check for throttle signatures first
+    if (httpStatus === 429 || httpStatus === 503) return 'THROTTLE_RESPONSE';
+    if (THROTTLE_SIGNATURES.some(re => re.test(ratingMessage))) return 'THROTTLE_RESPONSE';
+
     if (ratingMessage.includes('Weight must specify')) {
       const correctWeight = parseFloat(String(rawWeight).replace(/,/g, ''));
       if (!isNaN(correctWeight) && correctWeight !== requestWeightLbs && correctWeight > requestWeightLbs * 10) {
@@ -429,7 +449,7 @@ export function createBatchExecutor(config) {
     if (ratingMessage.includes('HTTP 5') || ratingMessage.includes('proxy') || ratingMessage.includes('Network error')) {
       return 'API_ERROR';
     }
-    return 'API_ERROR';
+    return 'UNKNOWN';
   }
 
   // ── Build result object with telemetry ──
@@ -651,9 +671,28 @@ export function createBatchExecutor(config) {
       if (result.success) {
         successCounter++;
         consecutiveFailures = 0;
+        consecutiveThrottles = 0; // reset throttle streak on success
       } else {
         failureCounter++;
         consecutiveFailures++;
+
+        // ── Throttle hard backoff ──
+        if (result.failureReason === 'THROTTLE_RESPONSE') {
+          consecutiveThrottles++;
+          // Immediate hard backoff: add fixed 5s on top of current delay
+          currentDelay = currentDelay + THROTTLE_EXTRA_DELAY_MS;
+
+          // If 3+ consecutive throttles, force-pause the entire batch
+          if (consecutiveThrottles >= CONSECUTIVE_THROTTLE_PAUSE_THRESHOLD && state === 'RUNNING') {
+            state = 'AUTO_PAUSED';
+            backoffTriggered = true;
+            if (onResult) onResult(result);
+            if (onProgress) onProgress(buildProgress());
+            break;
+          }
+        } else {
+          consecutiveThrottles = 0;
+        }
       }
 
       updateAdaptiveBackoff(result.success);

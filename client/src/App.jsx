@@ -20,7 +20,7 @@ export default function App() {
   // Lifted refs so ResultsScreen can access execution controls
   const orchestratorRef = useRef(null);
   const executorRef = useRef(null);
-  const retryExecutorRef = useRef(null);
+
 
   const handleConnected = useCallback((creds) => {
     setCredentials(creds);
@@ -184,7 +184,7 @@ export default function App() {
     // Import executor dynamically to avoid circular deps
     import('./services/batchExecutor.js').then(({ createBatchExecutor }) => {
       const executor = createBatchExecutor({
-        concurrency: 2,
+        concurrency: 4,
         delayMs: 200,
         retryAttempts: 2,
         adaptiveBackoff: true,
@@ -211,11 +211,12 @@ export default function App() {
         },
         onComplete: () => {
           setRetryProgress(null);
-          retryExecutorRef.current = null;
+          executorRef.current = null;
         },
       });
 
-      retryExecutorRef.current = executor;
+      // Store in executorRef (not retryExecutorRef) so Resume/Cancel buttons work
+      executorRef.current = executor;
       setRetryProgress({ completed: 0, total: retryRows.length, succeeded: 0, failed: 0, state: 'RUNNING' });
       executor.start(retryRows, batchParams, credentials);
     });

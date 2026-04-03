@@ -70,10 +70,11 @@ export function serializeRun(results, batchParams, batchMeta, yieldConfig, optio
     },
     results: strippedResults,
     batchStatus: {
-      isComplete: options.isComplete ?? (results.length >= (options.targetRows || results.length)),
+      // Use ?? (not ||) so targetRows=0 doesn't silently fall back to results.length
+      isComplete: options.isComplete ?? (options.targetRows > 0 && results.length >= options.targetRows),
       succeededCount: results.filter(r => r.success).length,
       failedCount: results.filter(r => !r.success).length,
-      missingCount: Math.max(0, (options.targetRows || results.length) - results.length),
+      missingCount: Math.max(0, (options.targetRows ?? results.length) - results.length),
     },
   };
 

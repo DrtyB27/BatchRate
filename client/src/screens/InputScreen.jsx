@@ -32,14 +32,14 @@ export default function InputScreen({
     strategy: 'balanced',
     dedup: '5-digit',
     executionMode: 'multi',
-    concurrency: 4,
-    delayMs: 0,
+    concurrency: 2,
+    delayMs: 200,
     retryAttempts: 1,
     adaptiveBackoff: true,
     autoTune: true,
-    autoTuneTarget: 2000,
-    chunkSize: 400,
-    maxAgents: 5,
+    autoTuneTarget: 10559,
+    chunkSize: 88,
+    maxAgents: 8,
     concurrencyPerAgent: 3,
     totalMaxConcurrency: 8,
     staggerStartMs: 500,
@@ -242,15 +242,15 @@ export default function InputScreen({
 
     // Always use multi-agent orchestrator (auto-sizes chunks for small batches)
     const orchestrator = createBatchOrchestrator({
-      chunkSize: execSettings.chunkSize || 400,
-      maxAgents: execSettings.maxAgents || 5,
+      chunkSize: execSettings.chunkSize || 88,
+      maxAgents: execSettings.maxAgents || 8,
       concurrencyPerAgent: execSettings.concurrencyPerAgent || 3,
       totalMaxConcurrency: execSettings.totalMaxConcurrency || 8,
       delayMs: execSettings.delayMs,
       retryAttempts: execSettings.retryAttempts,
       adaptiveBackoff: execSettings.adaptiveBackoff,
-      autoTune: execSettings.autoTune || false,
-      autoTuneTarget: execSettings.autoTuneTarget || 2000,
+      autoTune: execSettings.autoTune !== false,
+      autoTuneTarget: execSettings.autoTuneTarget || 10559,
       timeoutMs: CALL_TIMEOUT_MS,
       staggerStartMs: execSettings.staggerStartMs || 500,
       autoSavePerAgent: true,
@@ -283,7 +283,7 @@ export default function InputScreen({
     const totalCsvRows = resumeInfo.totalCsvRows;
 
     // Reset adaptive backoff state to baseline for the new session
-    setExecSettings(prev => ({ ...prev, delayMs: 0 }));
+    setExecSettings(prev => ({ ...prev, delayMs: 200 }));
 
     setResumeInfo(null);
 

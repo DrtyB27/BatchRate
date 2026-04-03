@@ -1259,12 +1259,12 @@ export function parseRecommendedConfig(reportJson) {
 
   const nc = reportJson.nextRunConfig;
   return {
-    concurrency: nc.concurrency || 4,
-    delayMs: nc.delayMs || 0,
-    chunkSize: nc.chunkSize || 400,
-    maxAgents: nc.maxAgents || 5,
+    concurrency: nc.concurrency || 2,
+    delayMs: nc.delayMs || 200,
+    chunkSize: nc.chunkSize || 88,
+    maxAgents: nc.maxAgents || 8,
     autoTune: nc.autoTune !== false,
-    autoTuneTarget: nc.targetResponseMs || 2000,
+    autoTuneTarget: nc.targetResponseMs || 10559,
     reasoning: nc.reasoning || [],
     source: {
       batchId: reportJson.runSummary?.batchId || null,

@@ -51,11 +51,11 @@ class AdaptiveOrchestratorTuner {
     this.calibrated = false;
 
     // Computed optimal values (set after calibration)
-    this.optimalChunkSize = config.chunkSize || 200;
+    this.optimalChunkSize = config.chunkSize || 88;
     this.optimalMaxAgents = 1;
     this.optimalConcPerAgent = 2; // conservative start
     this.optimalMaxActiveAgents = 1;
-    this.optimalDelayMs = config.delayMs || 0;
+    this.optimalDelayMs = config.delayMs || 200;
 
     // Monitoring
     this.rollingWindow = []; // last 30 response times across ALL agents
@@ -268,10 +268,10 @@ class AdaptiveOrchestratorTuner {
 export function createBatchOrchestrator(config) {
   const {
     chunkSize: userChunkSize,
-    maxAgents: userMaxAgents = 5,
+    maxAgents: userMaxAgents = 8,
     concurrencyPerAgent = 3,
     totalMaxConcurrency = 8,
-    delayMs = 0,
+    delayMs = 200,
     retryAttempts = 1,
     adaptiveBackoff = true,
     adaptiveOrchestration = true,

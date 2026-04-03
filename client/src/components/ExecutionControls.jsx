@@ -6,12 +6,12 @@ import { parseRecommendedConfig } from '../services/performanceEngine.js';
 const CONCURRENCY_OPTIONS = [1, 2, 3, 4, 5, 6, 8];
 const DELAY_OPTIONS = [0, 50, 100, 150, 200, 300, 500];
 const RETRY_OPTIONS = [0, 1, 2, 3];
-const CHUNK_SIZE_OPTIONS = [200, 300, 400, 500, 576, 700, 1000];
+const CHUNK_SIZE_OPTIONS = [88, 200, 300, 400, 500, 576, 700, 1000];
 const MAX_AGENTS_OPTIONS = [2, 3, 4, 5, 6, 8];
 const PER_AGENT_CONC_OPTIONS = [1, 2, 3, 4];
 const TOTAL_CONC_OPTIONS = [4, 6, 8, 10, 12];
 const STAGGER_OPTIONS = [250, 500, 1000, 1500, 2000];
-const TARGET_RESPONSE_OPTIONS = [1000, 1500, 2000, 3000, 5000];
+const TARGET_RESPONSE_OPTIONS = [1000, 1500, 2000, 3000, 5000, 10559];
 
 // Strategy presets
 const STRATEGIES = {
@@ -96,7 +96,7 @@ export default function ExecutionControls({ settings, onChange, onRun, onPause, 
 
   const estimatedCalls = dedupStats.uniqueScenarios || rowCount;
   // Rough time estimate: assume 500ms/call at optimal concurrency
-  const effectiveConc = settings.autoTune ? Math.min(4, settings.concurrency || 4) : (settings.concurrency || 4);
+  const effectiveConc = settings.autoTune ? Math.min(2, settings.concurrency || 2) : (settings.concurrency || 2);
   const estSeconds = estimatedCalls > 0 ? Math.round(estimatedCalls * 0.5 / effectiveConc) : 0;
   const estMinutes = estSeconds >= 60 ? `${Math.floor(estSeconds / 60)}m ${estSeconds % 60}s` : `${estSeconds}s`;
 
@@ -245,7 +245,7 @@ export default function ExecutionControls({ settings, onChange, onRun, onPause, 
               {settings.autoTune && (
                 <StepperControl
                   label="Target resp"
-                  value={settings.autoTuneTarget || 2000}
+                  value={settings.autoTuneTarget || 10559}
                   options={TARGET_RESPONSE_OPTIONS}
                   onChange={v => update('autoTuneTarget', v)}
                   tooltip="Target response time in ms. Auto-tuner adjusts concurrency to stay below this."
@@ -259,14 +259,14 @@ export default function ExecutionControls({ settings, onChange, onRun, onPause, 
                   <div className="flex flex-wrap gap-x-6 gap-y-2">
                     <StepperControl
                       label="Chunk Size"
-                      value={settings.chunkSize || 400}
+                      value={settings.chunkSize || 88}
                       options={CHUNK_SIZE_OPTIONS}
                       onChange={v => update('chunkSize', v)}
-                      tooltip="Rows per chunk. Server degrades after ~576 rows. Recommended: 576. A 45s pause is inserted between chunks."
+                      tooltip="Rows per chunk. Server degrades after ~576 rows. Recommended: 88. A 45s pause is inserted between chunks."
                     />
                     <StepperControl
                       label="Max Agents"
-                      value={settings.maxAgents || 5}
+                      value={settings.maxAgents || 8}
                       options={MAX_AGENTS_OPTIONS}
                       onChange={v => update('maxAgents', v)}
                       tooltip="Maximum number of simultaneous agents."
@@ -322,8 +322,8 @@ export default function ExecutionControls({ settings, onChange, onRun, onPause, 
                   </div>
                   {rowCount > 0 && (
                     <p className="text-[10px] text-gray-500 bg-gray-50 rounded px-2 py-1">
-                      {estimatedCalls.toLocaleString()} calls &divide; {settings.chunkSize || 400} = {Math.ceil(estimatedCalls / (settings.chunkSize || 400))} agents.
-                      Up to {Math.min(settings.maxAgents || 5, Math.floor((settings.totalMaxConcurrency || 8) / (settings.concurrencyPerAgent || 3)))} active simultaneously.
+                      {estimatedCalls.toLocaleString()} calls &divide; {settings.chunkSize || 88} = {Math.ceil(estimatedCalls / (settings.chunkSize || 88))} agents.
+                      Up to {Math.min(settings.maxAgents || 8, Math.floor((settings.totalMaxConcurrency || 8) / (settings.concurrencyPerAgent || 3)))} active simultaneously.
                     </p>
                   )}
                 </div>

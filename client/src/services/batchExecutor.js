@@ -7,7 +7,7 @@ import { buildRatingRequest } from './xmlBuilder.js';
 import { postToG3, applyMargin, sleep, CALL_TIMEOUT_MS } from './ratingClient.js';
 import { parseRatingResponse } from './xmlParser.js';
 
-export const DEFAULT_INITIAL_DELAY_MS = 100;
+export const DEFAULT_INITIAL_DELAY_MS = 200;
 
 // Errors worth retrying (transient)
 const RETRYABLE_PATTERNS = ['timed out', 'timeout', 'abort', 'http 429', 'http 502', 'http 503', 'http 504', 'proxy error', 'proxy timeout', 'failed to fetch', 'networkerror'];
@@ -232,15 +232,15 @@ class ResponseTimeAutoTuner {
  */
 export function createBatchExecutor(config) {
   const {
-    concurrency = 4,
-    delayMs = 0,
+    concurrency = 2,
+    delayMs = 200,
     retryAttempts = 1,
     retryDelayMs = 1000,
     adaptiveBackoff = true,
-    autoTune = false,
-    autoTuneTarget = 2000,
-    warningThresholdMs = 5000,
-    criticalThresholdMs = 15000,
+    autoTune = true,
+    autoTuneTarget = 10559,
+    warningThresholdMs = 26067,
+    criticalThresholdMs = 49065,
     tuningProfile = null,
     timeoutMs = CALL_TIMEOUT_MS,
     onResult,

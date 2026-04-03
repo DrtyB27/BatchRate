@@ -1168,6 +1168,115 @@ export function computeCarrierFeedback(flatRows, selectedSCAC) {
   };
 }
 
+// ============================================================
+// CARRIER FEEDBACK SUMMARY — multi-carrier comparison table
+// ============================================================
+export function computeCarrierFeedbackSummary(flatRows) {
+  const validRows = flatRows.filter(r => r.hasRate && r.rate.validRate !== 'false');
+
+  // Group by reference + carrier, dedup, collect per-carrier per-reference data
+  const seenPerRef = {};
+  const refCarriers = {};   // ref -> { scac -> { totalCharge, discount, isMin } }
+  const carrierNames = {};
+
+  for (const row of validRows) {
+    const scac = (row.rate.carrierSCAC || '').toUpperCase();
+    const ref = row.reference || '';
+    const dedupKey = `${ref}|${scac}`;
+    if (seenPerRef[dedupKey]) continue;
+    seenPerRef[dedupKey] = true;
+
+    if (!carrierNames[scac]) carrierNames[scac] = row.rate.carrierName || scac;
+
+    if (!refCarriers[ref]) refCarriers[ref] = {};
+    refCarriers[ref][scac] = {
+      totalCharge: row.rate.totalCharge ?? null,
+      tariffDiscountPct: row.rate.tariffDiscountPct ?? null,
+      isMinimumRated: !!row.rate.isMinimumRated,
+      tariffNet: row.rate.tariffNet ?? null,
+    };
+  }
+
+  // Find low-cost winner per reference
+  const lowCostByRef = {};
+  for (const [ref, carriers] of Object.entries(refCarriers)) {
+    let best = Infinity;
+    for (const data of Object.values(carriers)) {
+      if (data.totalCharge != null && data.totalCharge < best) best = data.totalCharge;
+    }
+    if (best < Infinity) lowCostByRef[ref] = best;
+  }
+
+  // Accumulate per-carrier stats
+  const stats = {};
+  for (const [ref, carriers] of Object.entries(refCarriers)) {
+    const lowCost = lowCostByRef[ref];
+    for (const [scac, data] of Object.entries(carriers)) {
+      if (data.totalCharge == null) continue;
+
+      if (!stats[scac]) {
+        stats[scac] = {
+          scac,
+          carrierName: carrierNames[scac],
+          laneCount: 0,
+          discounts: [],
+          minChargeCount: 0,
+          deltas: [],
+          deltaPcts: [],
+          winCount: 0,
+        };
+      }
+
+      const s = stats[scac];
+      s.laneCount++;
+      if (data.tariffDiscountPct != null) s.discounts.push(data.tariffDiscountPct);
+      if (data.isMinimumRated) s.minChargeCount++;
+
+      const delta = lowCost > 0 ? data.totalCharge - lowCost : 0;
+      const deltaPct = lowCost > 0 ? (delta / lowCost) * 100 : 0;
+      s.deltas.push(delta);
+      s.deltaPcts.push(deltaPct);
+      if (delta === 0) s.winCount++;
+    }
+  }
+
+  const totalRefs = Object.keys(lowCostByRef).length;
+
+  const rows = Object.values(stats).map(s => ({
+    scac: s.scac,
+    carrierName: s.carrierName,
+    laneCount: s.laneCount,
+    avgDiscount: s.discounts.length > 0
+      ? Math.round((s.discounts.reduce((a, b) => a + b, 0) / s.discounts.length) * 10) / 10
+      : null,
+    hasDiscount: s.discounts.length > 0,
+    minChargeCount: s.minChargeCount,
+    minChargePct: s.laneCount > 0
+      ? Math.round((s.minChargeCount / s.laneCount) * 1000) / 10
+      : 0,
+    avgDelta: s.laneCount > 0
+      ? Math.round((s.deltas.reduce((a, b) => a + b, 0) / s.laneCount) * 100) / 100
+      : 0,
+    avgDeltaPct: s.laneCount > 0
+      ? Math.round((s.deltaPcts.reduce((a, b) => a + b, 0) / s.laneCount) * 10) / 10
+      : 0,
+    winCount: s.winCount,
+    winRate: s.laneCount > 0
+      ? Math.round((s.winCount / s.laneCount) * 1000) / 10
+      : 0,
+  }));
+
+  rows.sort((a, b) => b.winRate - a.winRate);
+
+  // Top winners for banner
+  const topWinners = rows
+    .filter(r => r.winCount > 0)
+    .slice(0, 5)
+    .map(r => ({ scac: r.scac, pct: r.winRate }));
+
+  return { rows, totalRefs, totalCarriers: rows.length, topWinners };
+}
+
 /**
  * Filter flatRows to only the winning rows from a scenario's awards.
  * Returns a subset of flatRows — one rate per reference, the one that

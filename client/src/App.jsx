@@ -16,10 +16,12 @@ export default function App() {
   const [retryData, setRetryData] = useState(null); // { retryRows, existingResults, batchMeta }
   const [retryProgress, setRetryProgress] = useState(null);
   const [loadingFile, setLoadingFile] = useState(false);
+  const [pendingAutoResume, setPendingAutoResume] = useState(false);
 
   // Lifted refs so ResultsScreen can access execution controls
   const orchestratorRef = useRef(null);
   const executorRef = useRef(null);
+  const autoResumeTriggered = useRef(false);
 
 
   const handleConnected = useCallback((creds) => {
@@ -49,6 +51,7 @@ export default function App() {
     setLoadedFromFile(false);
     setCsvRows(null);
     setRetryData(null);
+    setPendingAutoResume(false);
   }, []);
 
   const handleBatchStart = useCallback((params, rowCount, meta, rows) => {
@@ -76,6 +79,7 @@ export default function App() {
     setLoadedFromFile(false);
     setCsvRows(null);
     setRetryData(null);
+    setPendingAutoResume(false);
     orchestratorRef.current = null;
     executorRef.current = null;
     setScreen('input');
@@ -93,11 +97,13 @@ export default function App() {
       setBatchMeta({ batchId: run.batchId, ...run.metadata });
       setBatchParams(run.metadata);
       setLoadedFromFile(true);
+      autoResumeTriggered.current = false;
 
       // Handle resumable files with pending rows
       if (run.pendingRows && run.pendingRows.length > 0) {
         setCsvRows(run.pendingRows);
         setTotalRows(run.targetRows || (run.results.length + run.pendingRows.length));
+        setPendingAutoResume(true);
       } else {
         setTotalRows(run.results.length);
       }
@@ -238,6 +244,65 @@ export default function App() {
       executorRef.current.cancel();
     }
   }, []);
+
+  // Auto-resume: when a file with pending rows is loaded and credentials
+  // are available, automatically start processing without user interaction.
+  useEffect(() => {
+    if (!pendingAutoResume || !credentials || screen !== 'results') return;
+    if (!csvRows || csvRows.length === 0 || !batchParams) return;
+    if (executorRef.current || orchestratorRef.current) return;
+    if (autoResumeTriggered.current) return;
+
+    autoResumeTriggered.current = true;
+    setPendingAutoResume(false);
+
+    // Snapshot current results to derive pending rows
+    const currentResults = results;
+    const succeededRefs = new Set(
+      currentResults.filter(r => r.success).map(r => r.reference)
+    );
+    const retryRows = csvRows.filter(row =>
+      !succeededRefs.has(row['Reference'] || '')
+    );
+    if (retryRows.length === 0) return;
+
+    import('./services/batchExecutor.js').then(({ createBatchExecutor }) => {
+      const executor = createBatchExecutor({
+        concurrency: 4, // capped for resume to avoid server overload
+        delayMs: 200,
+        retryAttempts: 2,
+        adaptiveBackoff: true,
+        timeoutMs: 60000,
+        saveXml: false,
+        onResult: (result) => {
+          setResults(prev => {
+            const withoutOldFail = prev.filter(r =>
+              r.reference !== result.reference || r.success
+            );
+            return [...withoutOldFail, result];
+          });
+        },
+        onProgress: (progress) => {
+          setRetryProgress({
+            completed: progress.completed,
+            total: retryRows.length,
+            succeeded: progress.succeeded,
+            failed: progress.failed,
+            state: progress.state,
+          });
+        },
+        onComplete: () => {
+          setRetryProgress(null);
+          executorRef.current = null;
+          autoResumeTriggered.current = false;
+        },
+      });
+
+      executorRef.current = executor;
+      setRetryProgress({ completed: 0, total: retryRows.length, succeeded: 0, failed: 0, state: 'RUNNING' });
+      executor.start(retryRows, batchParams, credentials);
+    });
+  }, [pendingAutoResume, credentials, screen, csvRows, batchParams, results]);
 
   // beforeunload: warn when batch is running or partial results unsaved
   useEffect(() => {

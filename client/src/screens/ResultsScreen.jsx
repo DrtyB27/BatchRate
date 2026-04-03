@@ -506,8 +506,11 @@ export default function ResultsScreen({
               }
             </span>
             {loadedFromFile && hasCsvRows && !isComplete && (
-              <span className="text-blue-700 font-medium text-xs ml-2">
-                (Resumable — {csvRows.length} pending rows ready to rate)
+              <span className={`${retryProgress ? 'text-green-700' : 'text-blue-700'} font-medium text-xs ml-2`}>
+                {retryProgress
+                  ? `Auto-resuming — processing ${retryProgress.total} pending rows...`
+                  : `(Resumable — ${csvRows.length} pending rows ready to rate)`
+                }
               </span>
             )}
             <div className="flex-1" />

@@ -34,7 +34,7 @@ const MIN_NODE_HEIGHT = 6;
 const MIN_STROKE = 1.5;
 const NODE_WIDTH = 16;
 const LABEL_GAP = 8;
-const NODE_GAP = 8;
+const NODE_GAP = 4;
 
 function fmtMoney(v) {
   if (v >= 1e6) return '$' + (v / 1e6).toFixed(2) + 'M';
@@ -114,7 +114,7 @@ function collapseData(data) {
  * Compute layout positions for Sankey nodes and links.
  */
 function computeLayout(data, width, height) {
-  const padding = { top: 10, bottom: 10, left: 160, right: 160 };
+  const padding = { top: 10, bottom: 10, left: 140, right: 140 };
   const usableHeight = height - padding.top - padding.bottom;
   const usableWidth = width - padding.left - padding.right;
 
@@ -219,8 +219,12 @@ export default function CarrierSankey({ data, width: propWidth, height: propHeig
   const collapsed = useMemo(() => collapseData(data), [data]);
 
   const nodeCount = collapsed ? collapsed.nodes.length : 0;
-  const height = propHeight || Math.min(1200, Math.max(500, nodeCount * 32));
-  const width = propWidth || 900;
+  const maxSide = collapsed ? Math.max(
+    collapsed.nodes.filter(n => n.side === 'left' || n.side === 'both').length,
+    collapsed.nodes.filter(n => n.side === 'right' || n.side === 'both').length
+  ) : 0;
+  const height = propHeight || Math.max(400, maxSide * 48);
+  const width = propWidth || 1100;
 
   // Build stable carrier → color map from left side (sorted by flow desc)
   const carrierColorMap = useMemo(() => {

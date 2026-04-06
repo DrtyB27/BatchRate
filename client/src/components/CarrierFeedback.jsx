@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useCallback } from 'react';
 import { computeCarrierFeedback, computeCarrierFeedbackSummary, getLowCostByReference, getLaneKey } from '../services/analyticsEngine.js';
+import { generateCarrierFeedbackPdf } from '../services/pdfExport.js';
 
 const TIER_COLORS = {
   'Top 10%':    'bg-green-100 text-green-800',
@@ -477,7 +478,19 @@ export default function CarrierFeedback({ flatRows, computedScenarios }) {
     a.download = `BRAT_Feedback_${feedback.scac}_${ts}.csv`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [feedback]);
+
+    // Also generate PDF
+    const scenarioName = selectedScenarioId
+      ? availableScenarios.find(s => s.id === selectedScenarioId)?.name
+      : null;
+    const pdf = generateCarrierFeedbackPdf({
+      feedback,
+      awardContext: awardContext[feedback.scac],
+      scenarioName,
+      laneAwardStatus,
+    });
+    pdf.save(`BRAT_Feedback_${feedback.scac}_${ts}.pdf`);
+  }, [feedback, awardContext, laneAwardStatus, selectedScenarioId, availableScenarios]);
 
   if (allSCACs.length === 0) {
     return (
@@ -536,7 +549,7 @@ export default function CarrierFeedback({ flatRows, computedScenarios }) {
           className="text-xs bg-[#002144] hover:bg-[#003366] disabled:bg-gray-300 text-white px-3 py-1.5 rounded font-medium transition-colors"
           style={{ fontFamily: "'Montserrat', Arial, sans-serif" }}
         >
-          Export Carrier Feedback CSV
+          Export PDF + CSV
         </button>
       </div>
 

@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { detectSampleWeeks, computeAnnualAward, computeCarrierSummary, computeSankeyData } from '../services/analyticsEngine.js';
+import { generateAnnualAwardPdf, downloadBlob } from '../services/pdfExport.js';
 import CarrierSankey from './CarrierSankey.jsx';
 
 function fmt$(v) {
@@ -197,6 +198,29 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
     URL.revokeObjectURL(url);
   };
 
+  const handleExportWithPdf = () => {
+    const ts = new Date().toISOString().slice(0, 10);
+    const scenarioName = selectedScenarioId
+      ? availableScenarios.find(s => s.id === selectedScenarioId)?.name
+      : null;
+
+    // Generate PDF
+    const doc = generateAnnualAwardPdf({
+      sampleWeeks,
+      annualizationFactor,
+      scenarioName,
+      originFilter: selectedOrigins,
+      csTotals,
+      carrierSummary,
+      customerLanes,
+      customerSummary,
+    });
+    doc.save(`AnnualAward_Summary_${sampleWeeks}wk_${ts}.pdf`);
+
+    // Also trigger CSV download
+    handleExportCsv();
+  };
+
   const deltaColor = (v) => v < 0 ? 'text-green-700' : v > 0 ? 'text-red-600' : 'text-gray-700';
   const netLaneColor = (v) => v > 0 ? 'text-green-700' : v < 0 ? 'text-red-600' : 'text-gray-500';
   const netLanePrefix = (v) => v > 0 ? '+' + v : String(v);
@@ -226,10 +250,11 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
               {customerShareMode ? 'Exit Share Mode' : 'Customer Share'}
             </button>
             <button
-              onClick={handleExportCsv}
+              onClick={handleExportWithPdf}
               className="px-3 py-1.5 text-xs font-medium bg-[#002144] text-white rounded hover:bg-[#002144]/90"
+              title="Downloads PDF summary + CSV data"
             >
-              Export CSV
+              Export PDF + CSV
             </button>
           </div>
         </div>

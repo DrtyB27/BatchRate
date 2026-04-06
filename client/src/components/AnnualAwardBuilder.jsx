@@ -483,8 +483,8 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
               className="w-full flex items-center justify-between px-4 py-3 hover:bg-gray-50 transition-colors"
             >
               <div>
-                <span className="text-sm font-bold text-[#002144]">Freight Flow — Incumbent → Awarded</span>
-                <span className="text-xs text-gray-400 ml-2">Carrier-to-carrier freight migration</span>
+                <span className="text-sm font-bold text-[#002144]">Freight Flow — Historic → Award</span>
+                <span className="text-xs text-gray-400 ml-2">Left = what was being paid, Right = what will be paid</span>
               </div>
               <svg className={`w-4 h-4 text-gray-400 transform transition-transform ${showSankey ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />

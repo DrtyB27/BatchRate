@@ -416,8 +416,8 @@ export default function CarrierSankey({ data, width: propWidth, height: propHeig
 
       {/* Column labels */}
       <div className="flex justify-between px-2 mt-1 text-xs font-medium text-gray-400 uppercase tracking-wide" style={{ maxWidth: width }}>
-        <span style={{ paddingLeft: 140 }}>Incumbent</span>
-        <span style={{ paddingRight: 140 }}>Awarded</span>
+        <span style={{ paddingLeft: 140 }}>Historic Carrier (was paying)</span>
+        <span style={{ paddingRight: 140 }}>Award Carrier (will pay)</span>
       </div>
 
       {/* Legend */}

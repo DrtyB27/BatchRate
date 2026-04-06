@@ -297,14 +297,22 @@ export function generateCarrierFeedbackPdf({
     { label: 'Min Floor Rate', value: feedback.totalMinCount > 0 ? (feedback.minFloorRate + '%') : '—' },
   ]);
 
-  // Award summary if available
+  // Award summary — historic vs new, side by side
   if (ac.awardedLanes != null) {
     y = drawKpiRow(doc, y, [
+      { label: 'Historic Lanes', value: ac.incumbentLanes || 0 },
+      { label: 'Historic Spend', value: ac.incumbentAnnSpend > 0 ? fmtMoney(ac.incumbentAnnSpend) : '—' },
       { label: 'Awarded Lanes', value: ac.awardedLanes, color: NAVY },
-      { label: 'Proj. Spend', value: fmtMoney(ac.awardSpend), color: NAVY },
+      { label: 'Proj. Spend', value: fmtMoney(ac.projectedAnnSpend), color: NAVY },
+      { label: 'Savings vs Displaced', value: ac.deltaVsDisplaced != null ? fmtMoney(ac.deltaVsDisplaced) : '—',
+        color: ac.deltaVsDisplaced < 0 ? GREEN : ac.deltaVsDisplaced > 0 ? RED : GRAY },
+    ]);
+    y = drawKpiRow(doc, y, [
       { label: 'Retained', value: ac.retainedLanes, color: GREEN },
       { label: 'Won (New)', value: ac.wonLanes, color: [37, 99, 235] },
       { label: 'Lost', value: ac.lostLanes, color: ac.lostLanes > 0 ? RED : GRAY },
+      { label: 'Net Change', value: (ac.netLaneChange > 0 ? '+' : '') + ac.netLaneChange,
+        color: ac.netLaneChange > 0 ? GREEN : ac.netLaneChange < 0 ? RED : GRAY },
     ]);
   }
 

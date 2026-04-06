@@ -224,7 +224,7 @@ function CarrierSummaryTable({ summary, onSelectCarrier, awardContext }) {
                       <td className="py-2 px-2 text-right text-green-700">{ac?.retainedLanes || 0}</td>
                       <td className={`py-2 px-2 text-right ${(ac?.wonLanes || 0) > 0 ? 'text-green-700 font-medium' : 'text-gray-400'}`}>{ac?.wonLanes || 0}</td>
                       <td className={`py-2 px-2 text-right ${(ac?.lostLanes || 0) > 0 ? 'text-red-600 font-medium' : 'text-gray-400'}`}>{ac?.lostLanes || 0}</td>
-                      <td className="py-2 px-2 text-right font-medium text-[#002144]">{ac?.awardSpend > 0 ? fmtCompact$(ac.awardSpend) : '—'}</td>
+                      <td className="py-2 px-2 text-right font-medium text-[#002144]">{ac?.projectedAnnSpend > 0 ? fmtCompact$(ac.projectedAnnSpend) : '—'}</td>
                     </>
                   )}
                 </tr>
@@ -272,14 +272,7 @@ export default function CarrierFeedback({ flatRows, computedScenarios }) {
 
     const ctx = {};
     for (const c of carriers) {
-      ctx[c.scac] = {
-        awardedLanes: c.awardedLanes,
-        incumbentLanes: c.incumbentLanes,
-        retainedLanes: c.retainedLanes,
-        wonLanes: c.wonLanes,
-        lostLanes: c.lostLanes,
-        awardSpend: c.projectedAnnSpend,
-      };
+      ctx[c.scac] = c; // pass the full carrier summary object
     }
     return ctx;
   }, [flatRows, computedScenarios, selectedScenarioId]);
@@ -539,55 +532,93 @@ export default function CarrierFeedback({ flatRows, computedScenarios }) {
               </div>
             </div>
 
-            {/* Award Summary Card */}
+            {/* Award Summary — Historic vs New Award side-by-side */}
             {awardContext[selectedSCAC] && (() => {
               const ac = awardContext[selectedSCAC];
-              const netChange = ac.awardedLanes - ac.incumbentLanes;
+              const netChange = ac.netLaneChange;
+              const deltaColor = ac.deltaVsDisplaced < 0 ? 'text-green-700' : ac.deltaVsDisplaced > 0 ? 'text-red-600' : 'text-gray-500';
               return (
                 <div className="bg-white border border-gray-200 rounded-lg p-4">
-                  <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">
-                    Expected Award — {feedback.scac}
+                  <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wide mb-3">
+                    Award Summary — {feedback.scac}
                     <span className="ml-2 font-normal text-gray-400">
                       ({selectedScenarioId ? availableScenarios.find(s => s.id === selectedScenarioId)?.name : 'Low-Cost Winners'})
                     </span>
                   </h4>
-                  <div className="flex gap-4 flex-wrap text-sm">
-                    <div className="bg-[#002144]/5 rounded-lg px-3 py-2 text-center min-w-[80px]">
-                      <div className="text-[10px] text-gray-400 uppercase">Awarded</div>
-                      <div className="font-bold text-[#002144] text-lg">{ac.awardedLanes}</div>
-                      <div className="text-[10px] text-gray-400">lanes</div>
-                    </div>
-                    <div className="bg-[#002144]/5 rounded-lg px-3 py-2 text-center min-w-[80px]">
-                      <div className="text-[10px] text-gray-400 uppercase">Proj. Spend</div>
-                      <div className="font-bold text-[#002144] text-lg">{fmtCompact$(ac.awardSpend)}</div>
-                      <div className="text-[10px] text-gray-400">annual est.</div>
-                    </div>
-                    <div className="rounded-lg px-3 py-2 text-center min-w-[80px] bg-green-50">
-                      <div className="text-[10px] text-green-600 uppercase">Retained</div>
-                      <div className="font-bold text-green-700 text-lg">{ac.retainedLanes}</div>
-                      <div className="text-[10px] text-green-500">kept from historic</div>
-                    </div>
-                    <div className="rounded-lg px-3 py-2 text-center min-w-[80px] bg-blue-50">
-                      <div className="text-[10px] text-blue-600 uppercase">Won</div>
-                      <div className="font-bold text-blue-700 text-lg">{ac.wonLanes}</div>
-                      <div className="text-[10px] text-blue-500">new freight</div>
-                    </div>
-                    <div className={`rounded-lg px-3 py-2 text-center min-w-[80px] ${ac.lostLanes > 0 ? 'bg-red-50' : 'bg-gray-50'}`}>
-                      <div className={`text-[10px] uppercase ${ac.lostLanes > 0 ? 'text-red-600' : 'text-gray-400'}`}>Lost</div>
-                      <div className={`font-bold text-lg ${ac.lostLanes > 0 ? 'text-red-600' : 'text-gray-400'}`}>{ac.lostLanes}</div>
-                      <div className={`text-[10px] ${ac.lostLanes > 0 ? 'text-red-400' : 'text-gray-300'}`}>historic freight</div>
-                    </div>
-                    <div className="rounded-lg px-3 py-2 text-center min-w-[80px] bg-gray-50">
-                      <div className="text-[10px] text-gray-400 uppercase">Incumbent</div>
-                      <div className="font-bold text-gray-600 text-lg">{ac.incumbentLanes}</div>
-                      <div className="text-[10px] text-gray-400">historic lanes</div>
-                    </div>
-                    <div className="rounded-lg px-3 py-2 text-center min-w-[80px] bg-gray-50">
-                      <div className="text-[10px] text-gray-400 uppercase">Net Change</div>
-                      <div className={`font-bold text-lg ${netChange > 0 ? 'text-green-700' : netChange < 0 ? 'text-red-600' : 'text-gray-500'}`}>
-                        {netChange > 0 ? '+' : ''}{netChange}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    {/* Historic (Before) */}
+                    <div className="rounded-lg border border-gray-200 p-3">
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="inline-block w-2.5 h-2.5 rounded-full bg-gray-400" />
+                        <span className="text-xs font-bold text-gray-500 uppercase">Historic (Before)</span>
                       </div>
-                      <div className="text-[10px] text-gray-400">lanes</div>
+                      <div className="space-y-1.5 text-sm">
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">Lanes</span>
+                          <span className="font-bold text-gray-700">{ac.incumbentLanes}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">Annual Spend</span>
+                          <span className="font-bold text-gray-700">{ac.incumbentAnnSpend > 0 ? fmtCompact$(ac.incumbentAnnSpend) : '—'}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* New Award (After) */}
+                    <div className="rounded-lg border-2 border-[#39b6e6] bg-[#39b6e6]/5 p-3">
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="inline-block w-2.5 h-2.5 rounded-full bg-[#39b6e6]" />
+                        <span className="text-xs font-bold text-[#002144] uppercase">New Award</span>
+                      </div>
+                      <div className="space-y-1.5 text-sm">
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">Lanes</span>
+                          <span className="font-bold text-[#002144]">{ac.awardedLanes}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">Proj. Annual Spend</span>
+                          <span className="font-bold text-[#002144]">{fmtCompact$(ac.projectedAnnSpend)}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">Displaced Historic</span>
+                          <span className="font-medium text-gray-600">{ac.displacedHistoricSpend > 0 ? fmtCompact$(ac.displacedHistoricSpend) : '—'}</span>
+                        </div>
+                        {ac.deltaVsDisplaced != null && (
+                          <div className="flex justify-between border-t border-gray-200 pt-1">
+                            <span className="text-gray-500">Savings vs Historic</span>
+                            <span className={`font-bold ${deltaColor}`}>
+                              {fmtCompact$(ac.deltaVsDisplaced)} ({fmtPct(ac.deltaVsDisplacedPct)})
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Lane Movement */}
+                    <div className="rounded-lg border border-gray-200 p-3">
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="text-xs font-bold text-gray-500 uppercase">Lane Movement</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2 text-sm">
+                        <div className="text-center bg-green-50 rounded px-2 py-1.5">
+                          <div className="text-[10px] text-green-600 uppercase">Retained</div>
+                          <div className="font-bold text-green-700 text-lg">{ac.retainedLanes}</div>
+                        </div>
+                        <div className="text-center bg-blue-50 rounded px-2 py-1.5">
+                          <div className="text-[10px] text-blue-600 uppercase">Won</div>
+                          <div className="font-bold text-blue-700 text-lg">{ac.wonLanes}</div>
+                        </div>
+                        <div className={`text-center rounded px-2 py-1.5 ${ac.lostLanes > 0 ? 'bg-red-50' : 'bg-gray-50'}`}>
+                          <div className={`text-[10px] uppercase ${ac.lostLanes > 0 ? 'text-red-600' : 'text-gray-400'}`}>Lost</div>
+                          <div className={`font-bold text-lg ${ac.lostLanes > 0 ? 'text-red-600' : 'text-gray-400'}`}>{ac.lostLanes}</div>
+                        </div>
+                        <div className="text-center bg-gray-50 rounded px-2 py-1.5">
+                          <div className="text-[10px] text-gray-400 uppercase">Net</div>
+                          <div className={`font-bold text-lg ${netChange > 0 ? 'text-green-700' : netChange < 0 ? 'text-red-600' : 'text-gray-500'}`}>
+                            {netChange > 0 ? '+' : ''}{netChange}
+                          </div>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>

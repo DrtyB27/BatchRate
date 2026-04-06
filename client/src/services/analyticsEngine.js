@@ -1372,3 +1372,196 @@ export function filterRowsByScenario(flatRows, scenario) {
 
   return filtered;
 }
+
+// ============================================================
+// Annual Award Estimator — sample-week detection + annualization
+// ============================================================
+
+/**
+ * Detect unique sample weeks from pickup dates in flatRows.
+ * Returns { weeks: number, dateRange: { min, max }, pickupDates: Date[] }
+ * A "week" is a Monday-aligned ISO week.  Falls back to 1 if no dates found.
+ */
+export function detectSampleWeeks(flatRows) {
+  const dates = [];
+  const seen = new Set();
+  for (const row of flatRows) {
+    const ref = row.reference || '';
+    if (seen.has(ref)) continue;
+    seen.add(ref);
+    const raw = row.pickupDate;
+    if (!raw) continue;
+    const d = new Date(raw);
+    if (!isNaN(d.getTime())) dates.push(d);
+  }
+
+  if (dates.length === 0) return { weeks: 1, dateRange: null, pickupDates: [] };
+
+  dates.sort((a, b) => a - b);
+  const min = dates[0];
+  const max = dates[dates.length - 1];
+
+  // Count distinct ISO weeks
+  const weekSet = new Set();
+  for (const d of dates) {
+    const thu = new Date(d);
+    thu.setDate(thu.getDate() - ((thu.getDay() + 6) % 7) + 3);
+    const yr = thu.getFullYear();
+    const jan4 = new Date(yr, 0, 4);
+    const wk = Math.ceil(((thu - jan4) / 86400000 + jan4.getDay() + 1) / 7);
+    weekSet.add(`${yr}-W${wk}`);
+  }
+
+  return {
+    weeks: Math.max(1, weekSet.size),
+    dateRange: { min, max },
+    pickupDates: dates,
+  };
+}
+
+/**
+ * Compute annualized award estimates per lane per carrier.
+ *
+ * @param {Array}  flatRows       - standard flat rows
+ * @param {Object} scenarioAwards - awards object from a computedScenario.result
+ *                                  (optional — seeds carrier assignment per ref)
+ * @param {number} sampleWeeks    - how many weeks the sample covers
+ * @returns {Object} { lanes, carriers, totals }
+ *
+ * Each lane: { laneKey, shipments, annualShipments, sampleSpend, annualSpend,
+ *              carrierSCAC, carrierName, historicSpend, annualHistoric, delta, deltaPct }
+ * carriers:  [{ scac, carrierName, lanes, shipments, annualShipments, sampleSpend,
+ *               annualSpend, historicSpend, annualHistoric, delta, deltaPct }]
+ * totals:    { shipments, annualShipments, sampleSpend, annualSpend,
+ *              historicSpend, annualHistoric, delta, deltaPct }
+ */
+export function computeAnnualAward(flatRows, scenarioAwards, sampleWeeks) {
+  const weeksInYear = 52;
+  const factor = weeksInYear / Math.max(1, sampleWeeks);
+
+  // Determine winning carrier per reference
+  // If scenarioAwards provided, use those; otherwise use low-cost winners
+  let winnersByRef;
+  if (scenarioAwards && Object.keys(scenarioAwards).length > 0) {
+    // Build from scenario awards — map ref -> flat row for the winning carrier
+    winnersByRef = {};
+    const rowIndex = {};
+    for (const row of flatRows) {
+      if (!row.hasRate || row.rate.validRate === 'false') continue;
+      const key = `${row.reference}|${(row.rate.carrierSCAC || '').toUpperCase()}`;
+      if (!rowIndex[key]) rowIndex[key] = row;
+    }
+    for (const [ref, award] of Object.entries(scenarioAwards)) {
+      const key = `${ref}|${(award.scac || '').toUpperCase()}`;
+      const row = rowIndex[key];
+      if (row) winnersByRef[ref] = row;
+    }
+  } else {
+    winnersByRef = getLowCostByReference(flatRows);
+  }
+
+  // Group winners by lane + carrier
+  const laneCarrierMap = {};
+  for (const [ref, row] of Object.entries(winnersByRef)) {
+    const laneKey = getLaneKey(row);
+    const scac = row.rate.carrierSCAC || 'UNKNOWN';
+    const groupKey = `${laneKey}|||${scac}`;
+    if (!laneCarrierMap[groupKey]) {
+      laneCarrierMap[groupKey] = {
+        laneKey,
+        carrierSCAC: scac,
+        carrierName: row.rate.carrierName || '',
+        shipments: 0,
+        sampleSpend: 0,
+        historicSpend: 0,
+      };
+    }
+    const g = laneCarrierMap[groupKey];
+    g.shipments++;
+    g.sampleSpend += row.rate.totalCharge ?? 0;
+    g.historicSpend += row.historicCost ? parseFloat(row.historicCost) || 0 : 0;
+  }
+
+  // Build lane rows with annualized projections
+  const lanes = Object.values(laneCarrierMap).map(g => {
+    const annualShipments = Math.round(g.shipments * factor);
+    const annualSpend = g.sampleSpend * factor;
+    const annualHistoric = g.historicSpend * factor;
+    const delta = annualHistoric > 0 ? annualSpend - annualHistoric : 0;
+    const deltaPct = annualHistoric > 0 ? (delta / annualHistoric) * 100 : 0;
+
+    return {
+      laneKey: g.laneKey,
+      shipments: g.shipments,
+      annualShipments,
+      sampleSpend: g.sampleSpend,
+      annualSpend,
+      carrierSCAC: g.carrierSCAC,
+      carrierName: g.carrierName,
+      historicSpend: g.historicSpend,
+      annualHistoric,
+      delta,
+      deltaPct,
+    };
+  });
+
+  lanes.sort((a, b) => b.annualSpend - a.annualSpend);
+
+  // Carrier-level aggregation
+  const carrierMap = {};
+  for (const l of lanes) {
+    if (!carrierMap[l.carrierSCAC]) {
+      carrierMap[l.carrierSCAC] = {
+        scac: l.carrierSCAC,
+        carrierName: l.carrierName,
+        lanes: 0,
+        shipments: 0,
+        annualShipments: 0,
+        sampleSpend: 0,
+        annualSpend: 0,
+        historicSpend: 0,
+        annualHistoric: 0,
+      };
+    }
+    const c = carrierMap[l.carrierSCAC];
+    c.lanes++;
+    c.shipments += l.shipments;
+    c.annualShipments += l.annualShipments;
+    c.sampleSpend += l.sampleSpend;
+    c.annualSpend += l.annualSpend;
+    c.historicSpend += l.historicSpend;
+    c.annualHistoric += l.annualHistoric;
+  }
+
+  const carriers = Object.values(carrierMap).map(c => ({
+    ...c,
+    delta: c.annualHistoric > 0 ? c.annualSpend - c.annualHistoric : 0,
+    deltaPct: c.annualHistoric > 0 ? ((c.annualSpend - c.annualHistoric) / c.annualHistoric) * 100 : 0,
+  }));
+  carriers.sort((a, b) => b.annualSpend - a.annualSpend);
+
+  // Totals
+  const totShipments = lanes.reduce((s, l) => s + l.shipments, 0);
+  const totAnnualShip = lanes.reduce((s, l) => s + l.annualShipments, 0);
+  const totSampleSpend = lanes.reduce((s, l) => s + l.sampleSpend, 0);
+  const totAnnualSpend = lanes.reduce((s, l) => s + l.annualSpend, 0);
+  const totHistoric = lanes.reduce((s, l) => s + l.historicSpend, 0);
+  const totAnnualHistoric = lanes.reduce((s, l) => s + l.annualHistoric, 0);
+  const totDelta = totAnnualHistoric > 0 ? totAnnualSpend - totAnnualHistoric : 0;
+  const totDeltaPct = totAnnualHistoric > 0 ? (totDelta / totAnnualHistoric) * 100 : 0;
+
+  return {
+    lanes,
+    carriers,
+    totals: {
+      shipments: totShipments,
+      annualShipments: totAnnualShip,
+      sampleSpend: totSampleSpend,
+      annualSpend: totAnnualSpend,
+      historicSpend: totHistoric,
+      annualHistoric: totAnnualHistoric,
+      delta: totDelta,
+      deltaPct: totDeltaPct,
+    },
+  };
+}

@@ -6,6 +6,7 @@ import ScenarioBuilder from '../components/ScenarioBuilder.jsx';
 import OptimizationDashboard from '../components/OptimizationDashboard.jsx';
 import BatchPerformance from '../components/BatchPerformance.jsx';
 import CarrierFeedback from '../components/CarrierFeedback.jsx';
+import AnnualAwardBuilder from '../components/AnnualAwardBuilder.jsx';
 import CombineRunsDialog from '../components/CombineRunsDialog.jsx';
 import { serializeRun, downloadRunFile } from '../services/runPersistence.js';
 import {
@@ -729,6 +730,13 @@ export default function ResultsScreen({
         >
           Carrier Feedback
         </button>
+        <button
+          className={viewBtnCls('annual')}
+          onClick={() => setViewMode('annual')}
+          disabled={results.length === 0}
+        >
+          Annual Award
+        </button>
       </div>
 
       {/* Content */}
@@ -756,6 +764,8 @@ export default function ResultsScreen({
         <BatchPerformance results={results} batchMeta={batchMeta} totalRows={totalRows} onRetryInPlace={onRetryInPlace} retryProgress={retryProgress} />
       ) : viewMode === 'feedback' ? (
         <CarrierFeedback flatRows={flatRows} />
+      ) : viewMode === 'annual' ? (
+        <AnnualAwardBuilder flatRows={flatRows} computedScenarios={computedScenarios} />
       ) : (
         <ResultsTable
           flatRows={flatRows}

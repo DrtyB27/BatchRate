@@ -546,25 +546,29 @@ export default function CarrierFeedback({ flatRows, computedScenarios, sampleWee
                     </span>
                   </h4>
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    {/* Historic (Before) */}
+                    {/* Before — what was being paid on the lanes this carrier is now awarded */}
                     <div className="rounded-lg border border-gray-200 p-3">
                       <div className="flex items-center gap-2 mb-2">
                         <span className="inline-block w-2.5 h-2.5 rounded-full bg-gray-400" />
-                        <span className="text-xs font-bold text-gray-500 uppercase">Historic (Before)</span>
+                        <span className="text-xs font-bold text-gray-500 uppercase">Before (Historic)</span>
                       </div>
                       <div className="space-y-1.5 text-sm">
                         <div className="flex justify-between">
-                          <span className="text-gray-500">Lanes</span>
-                          <span className="font-bold text-gray-700">{ac.incumbentLanes}</span>
+                          <span className="text-gray-500">Awarded Lanes</span>
+                          <span className="font-bold text-gray-700">{ac.awardedLanes}</span>
                         </div>
                         <div className="flex justify-between">
-                          <span className="text-gray-500">Annual Spend</span>
-                          <span className="font-bold text-gray-700">{ac.incumbentAnnSpend > 0 ? fmtCompact$(ac.incumbentAnnSpend) : '—'}</span>
+                          <span className="text-gray-500">Was Paying</span>
+                          <span className="font-bold text-gray-700">{ac.displacedHistoricSpend > 0 ? fmtCompact$(ac.displacedHistoricSpend) : '—'}</span>
+                        </div>
+                        <div className="flex justify-between text-xs text-gray-400 border-t border-gray-100 pt-1">
+                          <span>Was Incumbent</span>
+                          <span>{ac.incumbentLanes} lanes / {ac.incumbentAnnSpend > 0 ? fmtCompact$(ac.incumbentAnnSpend) : '—'}</span>
                         </div>
                       </div>
                     </div>
 
-                    {/* New Award (After) */}
+                    {/* After — projected cost at this carrier's rates */}
                     <div className="rounded-lg border-2 border-[#39b6e6] bg-[#39b6e6]/5 p-3">
                       <div className="flex items-center gap-2 mb-2">
                         <span className="inline-block w-2.5 h-2.5 rounded-full bg-[#39b6e6]" />
@@ -572,20 +576,16 @@ export default function CarrierFeedback({ flatRows, computedScenarios, sampleWee
                       </div>
                       <div className="space-y-1.5 text-sm">
                         <div className="flex justify-between">
-                          <span className="text-gray-500">Lanes</span>
+                          <span className="text-gray-500">Awarded Lanes</span>
                           <span className="font-bold text-[#002144]">{ac.awardedLanes}</span>
                         </div>
                         <div className="flex justify-between">
                           <span className="text-gray-500">Proj. Annual Spend</span>
                           <span className="font-bold text-[#002144]">{fmtCompact$(ac.projectedAnnSpend)}</span>
                         </div>
-                        <div className="flex justify-between">
-                          <span className="text-gray-500">Displaced Historic</span>
-                          <span className="font-medium text-gray-600">{ac.displacedHistoricSpend > 0 ? fmtCompact$(ac.displacedHistoricSpend) : '—'}</span>
-                        </div>
                         {ac.deltaVsDisplaced != null && (
                           <div className="flex justify-between border-t border-gray-200 pt-1">
-                            <span className="text-gray-500">Savings vs Historic</span>
+                            <span className="text-gray-500">Savings vs Before</span>
                             <span className={`font-bold ${deltaColor}`}>
                               {fmtCompact$(ac.deltaVsDisplaced)} ({fmtPct(ac.deltaVsDisplacedPct)})
                             </span>

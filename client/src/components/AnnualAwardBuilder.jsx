@@ -36,6 +36,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
   const [showSankey, setShowSankey] = useState(true);
   const [selectedOrigins, setSelectedOrigins] = useState([]); // origState[] filter
   const [originDropdownOpen, setOriginDropdownOpen] = useState(false);
+  const [customerShareMode, setCustomerShareMode] = useState(false); // hides internal views
 
   const sampleWeeks = weeksOverride !== '' ? Math.max(1, parseInt(weeksOverride, 10) || 1) : detected.weeks;
   const annualizationFactor = 52 / Math.max(1, sampleWeeks);
@@ -206,76 +207,98 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
       <div className="max-w-7xl mx-auto space-y-4">
         {/* Header */}
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-bold text-[#002144]">Annual Award Estimator</h2>
-          <button
-            onClick={handleExportCsv}
-            className="px-3 py-1.5 text-xs font-medium bg-[#002144] text-white rounded hover:bg-[#002144]/90"
-          >
-            Export CSV
-          </button>
+          <h2 className="text-lg font-bold text-[#002144]">
+            {customerShareMode ? 'Freight Award Summary' : 'Annual Award Estimator'}
+          </h2>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                setCustomerShareMode(v => {
+                  if (!v) setViewLevel('customer');
+                  return !v;
+                });
+              }}
+              className={`px-3 py-1.5 text-xs font-medium rounded border ${customerShareMode
+                ? 'bg-[#39b6e6] text-white border-[#39b6e6]'
+                : 'bg-white text-gray-600 border-gray-300 hover:border-[#39b6e6]'}`}
+              title="Toggle customer-facing view — hides internal controls"
+            >
+              {customerShareMode ? 'Exit Share Mode' : 'Customer Share'}
+            </button>
+            <button
+              onClick={handleExportCsv}
+              className="px-3 py-1.5 text-xs font-medium bg-[#002144] text-white rounded hover:bg-[#002144]/90"
+            >
+              Export CSV
+            </button>
+          </div>
         </div>
 
         {/* Controls */}
         <div className="bg-white rounded-lg border border-gray-200 p-4 flex flex-wrap items-end gap-4">
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">Sample Weeks</label>
-            <div className="flex items-center gap-2">
-              <input
-                type="number"
-                min="1"
-                max="52"
-                value={weeksOverride !== '' ? weeksOverride : detected.weeks}
-                onChange={(e) => setWeeksOverride(e.target.value)}
-                className="w-20 px-2 py-1 text-sm border border-gray-300 rounded"
-              />
-              {weeksOverride !== '' && (
-                <button
-                  onClick={() => setWeeksOverride('')}
-                  className="text-xs text-[#39b6e6] hover:underline"
-                >
-                  Reset (detected: {detected.weeks})
-                </button>
+          {!customerShareMode && (
+            <>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Sample Weeks</label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min="1"
+                  max="52"
+                  value={weeksOverride !== '' ? weeksOverride : detected.weeks}
+                  onChange={(e) => setWeeksOverride(e.target.value)}
+                  className="w-20 px-2 py-1 text-sm border border-gray-300 rounded"
+                />
+                {weeksOverride !== '' && (
+                  <button
+                    onClick={() => setWeeksOverride('')}
+                    className="text-xs text-[#39b6e6] hover:underline"
+                  >
+                    Reset (detected: {detected.weeks})
+                  </button>
+                )}
+              </div>
+              {detected.dateRange && (
+                <p className="text-xs text-gray-400 mt-1">
+                  Pickup dates: {detected.dateRange.min.toLocaleDateString()} – {detected.dateRange.max.toLocaleDateString()}
+                </p>
               )}
             </div>
-            {detected.dateRange && (
-              <p className="text-xs text-gray-400 mt-1">
-                Pickup dates: {detected.dateRange.min.toLocaleDateString()} – {detected.dateRange.max.toLocaleDateString()}
-              </p>
-            )}
-          </div>
 
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">Seed from Scenario</label>
-            <select
-              value={selectedScenarioId}
-              onChange={(e) => setSelectedScenarioId(e.target.value)}
-              className="px-2 py-1 text-sm border border-gray-300 rounded"
-            >
-              <option value="">Low-Cost Winners</option>
-              {availableScenarios.map(s => (
-                <option key={s.id} value={s.id}>{s.name}</option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">View</label>
-            <div className="flex gap-1">
-              {[
-                { key: 'carrier', label: 'By Carrier' },
-                { key: 'lane', label: 'By Lane' },
-                { key: 'customer', label: 'Customer View' },
-              ].map(v => (
-                <button
-                  key={v.key}
-                  className={`px-2 py-1 text-xs rounded ${viewLevel === v.key ? 'bg-[#39b6e6] text-white' : 'bg-gray-200 text-gray-700'}`}
-                  onClick={() => setViewLevel(v.key)}
-                >
-                  {v.label}
-                </button>
-              ))}
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Seed from Scenario</label>
+              <select
+                value={selectedScenarioId}
+                onChange={(e) => setSelectedScenarioId(e.target.value)}
+                className="px-2 py-1 text-sm border border-gray-300 rounded"
+              >
+                <option value="">Low-Cost Winners</option>
+                {availableScenarios.map(s => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
+                ))}
+              </select>
             </div>
-          </div>
+
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">View</label>
+              <div className="flex gap-1">
+                {[
+                  { key: 'carrier', label: 'By Carrier' },
+                  { key: 'lane', label: 'By Lane' },
+                  { key: 'customer', label: 'Customer View' },
+                ].map(v => (
+                  <button
+                    key={v.key}
+                    className={`px-2 py-1 text-xs rounded ${viewLevel === v.key ? 'bg-[#39b6e6] text-white' : 'bg-gray-200 text-gray-700'}`}
+                    onClick={() => setViewLevel(v.key)}
+                  >
+                    {v.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            </>
+          )}
 
           {/* Origin filter */}
           <div className="relative">
@@ -324,9 +347,11 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
             </div>
           )}
 
-          <div className="text-xs text-gray-500">
-            Annualization factor: <strong>{annualizationFactor.toFixed(1)}x</strong> ({sampleWeeks} wk &rarr; 52 wk)
-          </div>
+          {!customerShareMode && (
+            <div className="text-xs text-gray-500">
+              Annualization factor: <strong>{annualizationFactor.toFixed(1)}x</strong> ({sampleWeeks} wk &rarr; 52 wk)
+            </div>
+          )}
         </div>
 
         {/* KPI Bar — switches based on view */}
@@ -350,24 +375,50 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
               </div>
             ))}
           </div>
-        ) : (
+        ) : viewLevel === 'lane' ? (
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             {[
-              { label: 'Annual Shipments (est)', value: fmtNum(totals.annualShipments) },
-              { label: 'Annual Spend (est)', value: fmt$(totals.annualSpend) },
-              { label: 'Annual Historic Spend', value: totals.annualHistoric > 0 ? fmt$(totals.annualHistoric) : 'N/A' },
-              { label: 'Annual Delta', value: totals.annualHistoric > 0 ? `${fmt$(totals.delta)} (${fmtPct(totals.deltaPct)})` : 'N/A', color: totals.annualHistoric > 0 ? deltaColor(totals.delta) : '' },
+              { label: 'Annual Shipments (est)', value: fmtNum(csTotals.annualShipments) },
+              { label: 'Annual Spend (est)', value: fmtCompact$(csTotals.projectedAnnSpend) },
+              { label: 'Displaced Historic', value: csTotals.displacedHistoricSpend > 0 ? fmtCompact$(csTotals.displacedHistoricSpend) : 'N/A' },
+              {
+                label: 'Annual Delta',
+                sublabel: 'vs Displaced Historic',
+                value: csTotals.deltaVsDisplaced != null ? `${fmtCompact$(csTotals.deltaVsDisplaced)} (${fmtPct(csTotals.deltaVsDisplacedPct)})` : 'N/A',
+                color: csTotals.deltaVsDisplaced != null ? deltaColor(csTotals.deltaVsDisplaced) : '',
+              },
             ].map((kpi, i) => (
               <div key={i} className="bg-white rounded-lg border border-gray-200 p-3">
                 <p className="text-xs text-gray-500">{kpi.label}</p>
+                {kpi.sublabel && <p className="text-[10px] text-gray-400">{kpi.sublabel}</p>}
                 <p className={`text-lg font-bold ${kpi.color || 'text-[#002144]'}`}>{kpi.value}</p>
               </div>
             ))}
           </div>
-        )}
+        ) : null}
 
         {/* Customer View KPIs */}
         {viewLevel === 'customer' && (
+          <>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            {[
+              { label: 'Annual Shipments (est)', value: fmtNum(csTotals.annualShipments) },
+              { label: 'Projected Annual Spend', value: fmtCompact$(csTotals.projectedAnnSpend) },
+              { label: 'Displaced Historic', value: csTotals.displacedHistoricSpend > 0 ? fmtCompact$(csTotals.displacedHistoricSpend) : 'N/A' },
+              {
+                label: 'Annual Delta',
+                sublabel: 'vs Displaced Historic',
+                value: csTotals.deltaVsDisplaced != null ? `${fmtCompact$(csTotals.deltaVsDisplaced)} (${fmtPct(csTotals.deltaVsDisplacedPct)})` : 'N/A',
+                color: csTotals.deltaVsDisplaced != null ? deltaColor(csTotals.deltaVsDisplaced) : '',
+              },
+            ].map((kpi, i) => (
+              <div key={i} className="bg-white rounded-lg border border-gray-200 p-3">
+                <p className="text-xs text-gray-500">{kpi.label}</p>
+                {kpi.sublabel && <p className="text-[10px] text-gray-400">{kpi.sublabel}</p>}
+                <p className={`text-lg font-bold ${kpi.color || 'text-[#002144]'}`}>{kpi.value}</p>
+              </div>
+            ))}
+          </div>
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
             {[
               { label: 'Total Lanes', value: customerSummary.totalLanes },
@@ -383,10 +434,11 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
               </div>
             ))}
           </div>
+          </>
         )}
 
-        {/* Sankey Panel — carrier view only */}
-        {viewLevel === 'carrier' && (
+        {/* Sankey Panel — carrier + customer views */}
+        {(viewLevel === 'carrier' || viewLevel === 'customer') && (
           <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
             <button
               onClick={() => setShowSankey(v => !v)}
@@ -634,10 +686,10 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
                       </span>
                     </td>
                     <td colSpan={4}></td>
-                    <td className="px-3 py-2 text-right">{fmtNum(totals.annualShipments)}</td>
-                    <td className="px-3 py-2 text-right">{fmtCompact$(totals.annualSpend)}</td>
-                    <td className={`px-3 py-2 text-right ${totals.annualHistoric > 0 ? deltaColor(totals.delta) : ''}`}>
-                      {totals.annualHistoric > 0 ? `${fmtCompact$(totals.delta)} (${fmtPct(totals.deltaPct)})` : '—'}
+                    <td className="px-3 py-2 text-right">{fmtNum(csTotals.annualShipments)}</td>
+                    <td className="px-3 py-2 text-right">{fmtCompact$(csTotals.projectedAnnSpend)}</td>
+                    <td className={`px-3 py-2 text-right ${csTotals.deltaVsDisplaced != null ? deltaColor(csTotals.deltaVsDisplaced) : ''}`}>
+                      {csTotals.deltaVsDisplaced != null ? `${fmtCompact$(csTotals.deltaVsDisplaced)} (${fmtPct(csTotals.deltaVsDisplacedPct)})` : '—'}
                     </td>
                   </tr>
                 </tfoot>
@@ -648,8 +700,10 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
 
         {/* Footer note */}
         <p className="text-xs text-gray-400 text-center">
-          Projections based on {sampleWeeks}-week sample annualized to 52 weeks ({annualizationFactor.toFixed(1)}x factor).
-          Delta sign: projected − benchmark. Negative = savings.
+          {customerShareMode
+            ? `Estimated annual projections based on ${sampleWeeks}-week sample period. Negative delta = savings.`
+            : `Projections based on ${sampleWeeks}-week sample annualized to 52 weeks (${annualizationFactor.toFixed(1)}x factor). Delta sign: projected − benchmark. Negative = savings.`
+          }
         </p>
       </div>
     </div>

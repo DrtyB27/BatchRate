@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback } from 'react';
-import { computeCarrierFeedback, computeCarrierFeedbackSummary, getLowCostByReference, getLaneKey } from '../services/analyticsEngine.js';
+import { computeCarrierFeedback, computeCarrierFeedbackSummary, computeAnnualAward, computeCarrierSummary, detectSampleWeeks, getLaneKey } from '../services/analyticsEngine.js';
 import { generateCarrierFeedbackPdf } from '../services/pdfExport.js';
 
 const TIER_COLORS = {
@@ -258,138 +258,60 @@ export default function CarrierFeedback({ flatRows, computedScenarios }) {
     return computedScenarios.filter(s => s.result && Object.keys(s.result.awards || {}).length > 0);
   }, [computedScenarios]);
 
-  // Build award context: per-carrier won/lost/retained/spend
+  // Build award context using the same computeAnnualAward + computeCarrierSummary
+  // pipeline as the Annual Award tab — ensures numbers match exactly.
   const awardContext = useMemo(() => {
-    // Determine winners per reference — from scenario or low-cost
-    let winnersByRef; // { ref: { scac, totalCharge } }
+    let scenarioAwards = null;
     if (selectedScenarioId) {
       const sc = computedScenarios?.find(s => s.id === selectedScenarioId);
-      const awards = sc?.result?.awards;
-      if (awards) {
-        winnersByRef = {};
-        for (const [ref, a] of Object.entries(awards)) {
-          winnersByRef[ref] = { scac: (a.scac || '').toUpperCase(), totalCharge: a.totalCharge || 0 };
-        }
-      }
+      scenarioAwards = sc?.result?.awards || null;
     }
-    if (!winnersByRef) {
-      const lowCost = getLowCostByReference(flatRows);
-      winnersByRef = {};
-      for (const [ref, row] of Object.entries(lowCost)) {
-        winnersByRef[ref] = { scac: (row.rate.carrierSCAC || '').toUpperCase(), totalCharge: row.rate.totalCharge || 0 };
-      }
-    }
+    const detected = detectSampleWeeks(flatRows);
+    const { lanes } = computeAnnualAward(flatRows, scenarioAwards, detected.weeks);
+    const { carriers } = computeCarrierSummary(lanes);
 
-    // Determine historic carrier per reference
-    const historicByRef = {};
-    for (const r of flatRows) {
-      if (r.reference && r.historicCarrier && !historicByRef[r.reference]) {
-        historicByRef[r.reference] = String(r.historicCarrier).toUpperCase().trim();
-      }
-    }
-
-    // Build per-carrier stats
     const ctx = {};
-    const ensure = (scac) => {
-      if (!ctx[scac]) ctx[scac] = { awardedLanes: 0, incumbentLanes: 0, retainedLanes: 0, wonLanes: 0, lostLanes: 0, awardSpend: 0 };
-      return ctx[scac];
-    };
-
-    // Track unique lanes (state→state) per carrier
-    const awardedLaneKeys = {}; // scac -> Set of laneKeys
-    const incumbentLaneKeys = {}; // scac -> Set of laneKeys
-
-    for (const [ref, winner] of Object.entries(winnersByRef)) {
-      const awardScac = winner.scac;
-      const histScac = historicByRef[ref] || null;
-
-      // Find laneKey for this reference
-      const row = flatRows.find(r => r.reference === ref);
-      const laneKey = row ? getLaneKey(row) : ref;
-
-      // Track awarded
-      if (!awardedLaneKeys[awardScac]) awardedLaneKeys[awardScac] = new Set();
-      awardedLaneKeys[awardScac].add(laneKey);
-
-      const a = ensure(awardScac);
-      a.awardSpend += winner.totalCharge;
-
-      // Track incumbent
-      if (histScac) {
-        if (!incumbentLaneKeys[histScac]) incumbentLaneKeys[histScac] = new Set();
-        incumbentLaneKeys[histScac].add(laneKey);
-      }
+    for (const c of carriers) {
+      ctx[c.scac] = {
+        awardedLanes: c.awardedLanes,
+        incumbentLanes: c.incumbentLanes,
+        retainedLanes: c.retainedLanes,
+        wonLanes: c.wonLanes,
+        lostLanes: c.lostLanes,
+        awardSpend: c.projectedAnnSpend,
+      };
     }
-
-    // Now compute lane-level counts
-    const allScacs = new Set([...Object.keys(awardedLaneKeys), ...Object.keys(incumbentLaneKeys)]);
-    for (const scac of allScacs) {
-      const c = ensure(scac);
-      const awarded = awardedLaneKeys[scac] || new Set();
-      const incumbent = incumbentLaneKeys[scac] || new Set();
-      c.awardedLanes = awarded.size;
-      c.incumbentLanes = incumbent.size;
-      for (const lk of incumbent) {
-        if (awarded.has(lk)) c.retainedLanes++;
-        else c.lostLanes++;
-      }
-      for (const lk of awarded) {
-        if (!incumbent.has(lk)) c.wonLanes++;
-      }
-    }
-
     return ctx;
   }, [flatRows, computedScenarios, selectedScenarioId]);
 
   // Per-lane award status for the selected carrier's drill-down
+  // Uses computeAnnualAward lanes to match the Annual Award tab exactly.
   const laneAwardStatus = useMemo(() => {
-    if (!selectedSCAC || !awardContext) return {};
-    const ac = awardContext[selectedSCAC];
-    if (!ac) return {};
+    if (!selectedSCAC) return {};
 
-    // Determine winners per reference
-    let winnersByRef;
+    let scenarioAwards = null;
     if (selectedScenarioId) {
       const sc = computedScenarios?.find(s => s.id === selectedScenarioId);
-      const awards = sc?.result?.awards;
-      if (awards) {
-        winnersByRef = {};
-        for (const [ref, a] of Object.entries(awards)) {
-          winnersByRef[ref] = (a.scac || '').toUpperCase();
-        }
-      }
+      scenarioAwards = sc?.result?.awards || null;
     }
-    if (!winnersByRef) {
-      const lowCost = getLowCostByReference(flatRows);
-      winnersByRef = {};
-      for (const [ref, row] of Object.entries(lowCost)) {
-        winnersByRef[ref] = (row.rate.carrierSCAC || '').toUpperCase();
-      }
-    }
+    const detected = detectSampleWeeks(flatRows);
+    const { lanes } = computeAnnualAward(flatRows, scenarioAwards, detected.weeks);
 
-    // Historic by reference
-    const historicByRef = {};
-    for (const r of flatRows) {
-      if (r.reference && r.historicCarrier && !historicByRef[r.reference]) {
-        historicByRef[r.reference] = String(r.historicCarrier).toUpperCase().trim();
-      }
-    }
+    const laneStat = {};
+    for (const lane of lanes) {
+      const ac = lane.carrierSCAC;
+      const hc = lane.historicCarrier;
 
-    // Per-lane status for this carrier
-    const laneStat = {}; // laneKey -> 'awarded' | 'lost' | 'retained' | 'won'
-    for (const [ref, winnerScac] of Object.entries(winnersByRef)) {
-      const histScac = historicByRef[ref] || null;
-      const row = flatRows.find(r => r.reference === ref);
-      const laneKey = row ? getLaneKey(row) : ref;
-
-      if (winnerScac === selectedSCAC) {
-        if (histScac === selectedSCAC) {
-          laneStat[laneKey] = laneStat[laneKey] || 'retained';
+      if (ac === selectedSCAC) {
+        // This carrier is awarded this lane
+        if (hc === selectedSCAC) {
+          laneStat[lane.laneKey] = 'retained';
         } else {
-          laneStat[laneKey] = 'won';
+          laneStat[lane.laneKey] = 'won';
         }
-      } else if (histScac === selectedSCAC) {
-        if (!laneStat[laneKey]) laneStat[laneKey] = 'lost';
+      } else if (hc === selectedSCAC) {
+        // This carrier was historic but lost
+        if (!laneStat[lane.laneKey]) laneStat[lane.laneKey] = 'lost';
       }
     }
 

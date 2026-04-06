@@ -92,6 +92,12 @@ function collapseData(data) {
   const links = Object.values(newLinkMap).filter(l => l.value > 0);
   links.sort((a, b) => b.value - a.value);
 
+  // Build projected spend map from original nodes
+  const projMap = {};
+  for (const n of data.nodes) {
+    if (n.projectedSpend) projMap[n.id] = n.projectedSpend;
+  }
+
   // Rebuild nodes
   const allSourceIds = new Set(links.map(l => l.source));
   const allTargetIds = new Set(links.map(l => l.target));
@@ -100,10 +106,18 @@ function collapseData(data) {
   for (const id of allIds) {
     const isSource = allSourceIds.has(id);
     const isTarget = allTargetIds.has(id);
+    // Sum projected spend for collapsed "Other" nodes
+    let ps = projMap[id] || 0;
+    if (id === otherTargetId) {
+      for (const [nid, spend] of Object.entries(projMap)) {
+        if (!topTargetSet.has(nid)) ps += spend;
+      }
+    }
     nodes.push({
       id,
       label: id,
       side: isSource && isTarget ? 'both' : isSource ? 'left' : 'right',
+      projectedSpend: ps,
     });
   }
 
@@ -152,10 +166,20 @@ function computeLayout(data, width, height) {
     return nodes;
   }
 
+  // Build projected spend lookup from data nodes
+  const projSpendMap = {};
+  for (const n of data.nodes) {
+    if (n.projectedSpend) projSpendMap[n.id] = n.projectedSpend;
+  }
+
   const leftX = padding.left;
   const rightX = padding.left + usableWidth - NODE_WIDTH;
   const leftNodes = positionColumn(leftIds, sourceFlow, totalSourceFlow, leftX);
   const rightNodes = positionColumn(rightIds, targetFlow, totalTargetFlow, rightX);
+  // Attach projected spend to right nodes
+  for (const n of rightNodes) {
+    n.projectedSpend = projSpendMap[n.id] || 0;
+  }
 
   const leftMap = {};
   for (const n of leftNodes) leftMap[n.id] = n;
@@ -384,7 +408,7 @@ export default function CarrierSankey({ data, width: propWidth, height: propHeig
               dominantBaseline="central"
               style={labelStyle}
             >
-              {n.id} ({fmtMoney(n.flow)})
+              {n.id} ({fmtMoney(n.projectedSpend || n.flow)})
             </text>
           </g>
         ))}

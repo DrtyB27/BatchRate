@@ -1140,6 +1140,27 @@ export function computeCarrierFeedback(flatRows, selectedSCAC) {
     const minCount = myData.minCount;
     const nonMinCount = myData.count - minCount;
 
+    // Stoplight: green <= 5% gap, yellow 5-15%, red > 15%
+    const stoplight = (myRank === 1 || gapPct <= 5) ? 'green' : gapPct <= 15 ? 'yellow' : 'red';
+
+    // Target discount to win — what discount % would make their avg rate = best rate
+    // Only meaningful for non-minimum-rated lanes with discount data
+    let targetDiscToWin = null;
+    let discDeltaToWin = null;
+    if (myData.minCount < myData.count && avgDiscount != null && myAvg > bestRate) {
+      // Estimate: gross = avgRate / (1 - disc/100), solve for new disc to hit bestRate
+      // bestRate = gross * (1 - target/100) + accEst
+      // Simplification: targetDisc ≈ (1 - bestRate/myAvg) * 100 + current adjustment
+      // More accurate: use avg gross to back into it
+      const avgGross = myData.discounts.length > 0
+        ? myAvg / (1 - (avgDiscount / 100))
+        : null;
+      if (avgGross && avgGross > 0) {
+        targetDiscToWin = Math.round((1 - bestRate / avgGross) * 1000) / 10;
+        discDeltaToWin = avgDiscount != null ? Math.round((targetDiscToWin - avgDiscount) * 10) / 10 : null;
+      }
+    }
+
     lanes.push({
       laneKey: lk,
       shipments: myData.count,
@@ -1157,6 +1178,9 @@ export function computeCarrierFeedback(flatRows, selectedSCAC) {
       avgDiscount,
       minCount,
       nonMinCount,
+      stoplight,
+      targetDiscToWin,
+      discDeltaToWin,
     });
 
     percentiles.push({ percentile, weight: myData.count });

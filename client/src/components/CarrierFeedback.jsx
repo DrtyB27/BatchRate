@@ -365,8 +365,9 @@ export default function CarrierFeedback({ flatRows, computedScenarios }) {
 
     // Column headers
     lines.push([
-      'Lane', 'Award Status', '# Shipments', 'Avg Weight (lbs)', 'Avg Discount %', 'Min Count',
+      'Lane', 'Award Status', 'Stoplight', '# Shipments', 'Avg Weight (lbs)', 'Avg Discount %', 'Min Count',
       'Your Avg Rate ($)', 'Low Cost ($)', '$ vs Best', '% vs Best',
+      'Target Disc %', 'Disc Gap %',
       'Percentile Rank', 'Tier', 'Status'
     ].map(escCsv).join(','));
 
@@ -376,12 +377,15 @@ export default function CarrierFeedback({ flatRows, computedScenarios }) {
       lines.push([
         l.laneKey,
         aStatus ? aStatus.charAt(0).toUpperCase() + aStatus.slice(1) : '',
+        l.stoplight || '',
         l.shipments, l.avgWeight,
         l.avgDiscount != null ? `${l.avgDiscount}%` : '',
         l.minCount || '',
         l.theirRate, l.bestRate,
         l.isWinner ? '$0.00' : `+$${l.gapDollar.toFixed(2)}`,
         l.isWinner ? '0.0%' : `+${l.gapPct}%`,
+        l.targetDiscToWin != null ? `${l.targetDiscToWin}%` : '',
+        l.discDeltaToWin != null ? `+${l.discDeltaToWin}%` : '',
         `${l.percentile}%`, l.tier, l.status,
       ].map(escCsv).join(','));
     }
@@ -656,6 +660,15 @@ export default function CarrierFeedback({ flatRows, computedScenarios }) {
                       <th className={`${thCls} text-right`} onClick={() => handleSort('gapPct')}>
                         vs Best{arrow('gapPct')}
                       </th>
+                      <th className={`${thCls} text-center`} onClick={() => handleSort('stoplight')}>
+                        {arrow('stoplight')}
+                      </th>
+                      <th className={`${thCls} text-right`} onClick={() => handleSort('targetDiscToWin')}>
+                        Target Disc.{arrow('targetDiscToWin')}
+                      </th>
+                      <th className={`${thCls} text-right`} onClick={() => handleSort('discDeltaToWin')}>
+                        Disc. Gap{arrow('discDeltaToWin')}
+                      </th>
                       <th className={`${thCls} text-center`} onClick={() => handleSort('tier')}>
                         Tier{arrow('tier')}
                       </th>
@@ -708,6 +721,30 @@ export default function CarrierFeedback({ flatRows, computedScenarios }) {
                           {l.isWinner
                             ? <span>Best</span>
                             : <span>+{fmtMoney(l.gapDollar)} / +{fmtPct(l.gapPct)}</span>
+                          }
+                        </td>
+                        {/* Stoplight */}
+                        <td className="py-2 px-3 text-center">
+                          <span className={`inline-block w-3 h-3 rounded-full ${
+                            l.stoplight === 'green' ? 'bg-green-500' : l.stoplight === 'yellow' ? 'bg-yellow-400' : 'bg-red-500'
+                          }`} title={l.stoplight === 'green' ? 'Competitive (≤5%)' : l.stoplight === 'yellow' ? 'Marginal (5-15%)' : 'Uncompetitive (>15%)'} />
+                        </td>
+                        {/* Target discount to win */}
+                        <td className="py-2 px-3 text-right">
+                          {l.targetDiscToWin != null
+                            ? <span className="font-medium text-[#002144]">{fmtPct(l.targetDiscToWin)}</span>
+                            : l.isWinner
+                              ? <span className="text-green-600 text-[10px]">Winner</span>
+                              : <span className="text-gray-300">&mdash;</span>
+                          }
+                        </td>
+                        {/* Discount gap to win */}
+                        <td className="py-2 px-3 text-right">
+                          {l.discDeltaToWin != null
+                            ? <span className={`font-medium ${l.discDeltaToWin > 5 ? 'text-red-600' : l.discDeltaToWin > 2 ? 'text-amber-600' : 'text-green-700'}`}>
+                                +{fmtPct(l.discDeltaToWin)}
+                              </span>
+                            : <span className="text-gray-300">&mdash;</span>
                           }
                         </td>
                         <td className="py-2 px-3 text-center">

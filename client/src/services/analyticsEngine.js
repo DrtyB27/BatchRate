@@ -1746,11 +1746,17 @@ export function computeSankeyData(lanes, annualizationFactor) {
   const linkMap = {};
   const sourceSet = new Set();
   const targetSet = new Set();
+  const targetProjected = {}; // projected award spend per target carrier
 
   for (const lane of lanes) {
     const hc = lane.historicCarrier;
     const ac = lane.carrierSCAC;
     const value = lane.historicTotalAnnSpend || lane.annualHistoric || 0;
+
+    // Track projected spend per awarded carrier
+    if (ac) {
+      targetProjected[ac] = (targetProjected[ac] || 0) + (lane.annualSpend || 0);
+    }
 
     if (hc && ac) {
       // Flow from historic to assigned
@@ -1782,7 +1788,7 @@ export function computeSankeyData(lanes, annualizationFactor) {
     const isSource = sourceSet.has(id);
     const isTarget = targetSet.has(id);
     const side = isSource && isTarget ? 'both' : isSource ? 'left' : 'right';
-    nodes.push({ id, label: id, side });
+    nodes.push({ id, label: id, side, projectedSpend: targetProjected[id] || 0 });
   }
 
   const totalFlow = links.reduce((s, l) => s + l.value, 0);

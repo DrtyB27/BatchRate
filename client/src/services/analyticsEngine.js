@@ -1558,8 +1558,11 @@ export function computeAnnualAward(flatRows, scenarioAwards, sampleWeeks) {
     c.annualShipments += l.annualShipments;
     c.sampleSpend += l.sampleSpend;
     c.annualSpend += l.annualSpend;
-    c.historicSpend += l.historicSpend;
-    c.annualHistoric += l.annualHistoric;
+    // Only credit historic spend when this carrier was the actual historic carrier
+    if (l.historicCarrier && l.historicCarrier === l.carrierSCAC) {
+      c.historicSpend += l.historicSpend;
+      c.annualHistoric += l.annualHistoric;
+    }
   }
 
   const carriers = Object.values(carrierMap).map(c => ({

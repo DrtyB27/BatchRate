@@ -1,18 +1,40 @@
 import React, { useState, useMemo } from 'react';
 
+// 18 distinct, colorblind-friendly carrier colors — enough contrast side by side
+const CARRIER_PALETTE = [
+  '#0072B2', // strong blue
+  '#E69F00', // amber
+  '#009E73', // teal
+  '#D55E00', // vermilion
+  '#56B4E9', // sky blue
+  '#CC79A7', // rose
+  '#F0E442', // yellow (nodes only, links darken)
+  '#0A9396', // dark cyan
+  '#EE6C4D', // coral
+  '#6A4C93', // purple
+  '#1B9AAA', // ocean
+  '#E07A5F', // salmon
+  '#3D5A80', // slate blue
+  '#81B29A', // sage
+  '#F2CC8F', // sand
+  '#6D6875', // mauve gray
+  '#118AB2', // cerulean
+  '#EF476F', // hot pink
+];
+
 const COLORS = {
-  retained: '#39b6e6',   // DLX bright blue — freight staying with same carrier
-  migrating: '#94a3b8',  // gray-400 — freight moving between carriers
-  unassigned: '#f87171', // red-400 — unassigned target
+  retained: '#39b6e6',   // DLX bright blue — retained freight badge
+  migrating: '#94a3b8',  // fallback gray
+  unassigned: '#ef4444', // red-500 — unassigned target
   navy: '#002144',
 };
 
-const MAX_SIDE_NODES = 15;
-const MIN_NODE_HEIGHT = 4;
-const MIN_STROKE = 1;
-const NODE_WIDTH = 14;
+const MAX_SIDE_NODES = 20;
+const MIN_NODE_HEIGHT = 6;
+const MIN_STROKE = 1.5;
+const NODE_WIDTH = 16;
 const LABEL_GAP = 8;
-const NODE_GAP = 6;
+const NODE_GAP = 8;
 
 function fmtMoney(v) {
   if (v >= 1e6) return '$' + (v / 1e6).toFixed(2) + 'M';
@@ -176,14 +198,13 @@ function computeLayout(data, width, height) {
 
     const isRetained = link.source === link.target;
     const isUnassigned = link.target === '_UNASSIGNED_';
-    const color = isUnassigned ? COLORS.unassigned : isRetained ? COLORS.retained : COLORS.migrating;
 
     paths.push({
       link,
       d: `M${x0},${sy + sHeight / 2} C${midX},${sy + sHeight / 2} ${midX},${ty + tHeight / 2} ${x1},${ty + tHeight / 2}`,
       strokeWidth: Math.max(MIN_STROKE, (sHeight + tHeight) / 2),
-      color,
       isRetained,
+      isUnassigned,
     });
   }
 
@@ -198,8 +219,35 @@ export default function CarrierSankey({ data, width: propWidth, height: propHeig
   const collapsed = useMemo(() => collapseData(data), [data]);
 
   const nodeCount = collapsed ? collapsed.nodes.length : 0;
-  const height = propHeight || Math.min(800, Math.max(400, nodeCount * 20));
-  const width = propWidth || 800;
+  const height = propHeight || Math.min(1200, Math.max(500, nodeCount * 32));
+  const width = propWidth || 900;
+
+  // Build stable carrier → color map from left side (sorted by flow desc)
+  const carrierColorMap = useMemo(() => {
+    if (!collapsed) return {};
+    const map = {};
+    const sourceFlow = {};
+    for (const l of collapsed.links) {
+      sourceFlow[l.source] = (sourceFlow[l.source] || 0) + l.value;
+    }
+    const sorted = Object.entries(sourceFlow).sort((a, b) => b[1] - a[1]);
+    sorted.forEach(([id], i) => {
+      map[id] = CARRIER_PALETTE[i % CARRIER_PALETTE.length];
+    });
+    // Assign colors to right-only nodes too
+    const targetFlow = {};
+    for (const l of collapsed.links) {
+      targetFlow[l.target] = (targetFlow[l.target] || 0) + l.value;
+    }
+    const rightOnly = Object.entries(targetFlow)
+      .filter(([id]) => !map[id])
+      .sort((a, b) => b[1] - a[1]);
+    const usedCount = sorted.length;
+    rightOnly.forEach(([id], i) => {
+      map[id] = CARRIER_PALETTE[(usedCount + i) % CARRIER_PALETTE.length];
+    });
+    return map;
+  }, [collapsed]);
 
   const layout = useMemo(
     () => collapsed ? computeLayout(collapsed, width, height) : null,
@@ -221,13 +269,19 @@ export default function CarrierSankey({ data, width: propWidth, height: propHeig
     ? new Set(collapsed.links.filter(l => l.source === hoverNode || l.target === hoverNode).map(l => `${l.source}|||${l.target}`))
     : null;
 
+  function linkColor(path) {
+    if (path.isUnassigned) return COLORS.unassigned;
+    // Use source carrier's color for the flow
+    return carrierColorMap[path.link.source] || COLORS.migrating;
+  }
+
   function linkOpacity(path) {
-    if (hoverLink && hoverLink === `${path.link.source}|||${path.link.target}`) return 0.7;
+    if (hoverLink && hoverLink === `${path.link.source}|||${path.link.target}`) return 0.75;
     if (hoverNode) {
       const key = `${path.link.source}|||${path.link.target}`;
-      return connectedToNode && connectedToNode.has(key) ? 0.7 : 0.1;
+      return connectedToNode && connectedToNode.has(key) ? 0.75 : 0.08;
     }
-    return 0.35;
+    return path.isRetained ? 0.5 : 0.35;
   }
 
   function handleLinkEnter(e, path) {
@@ -268,7 +322,7 @@ export default function CarrierSankey({ data, width: propWidth, height: propHeig
             key={i}
             d={p.d}
             fill="none"
-            stroke={p.color}
+            stroke={linkColor(p)}
             strokeWidth={p.strokeWidth}
             opacity={linkOpacity(p)}
             style={{ transition: 'opacity 0.15s', cursor: 'pointer' }}
@@ -289,8 +343,8 @@ export default function CarrierSankey({ data, width: propWidth, height: propHeig
               y={n.y}
               width={n.width}
               height={n.height}
-              fill={n.id === '_UNASSIGNED_' ? COLORS.unassigned : COLORS.navy}
-              rx={2}
+              fill={n.id === '_UNASSIGNED_' ? COLORS.unassigned : (carrierColorMap[n.id] || COLORS.navy)}
+              rx={3}
             />
             <text
               x={n.x - LABEL_GAP}
@@ -316,8 +370,8 @@ export default function CarrierSankey({ data, width: propWidth, height: propHeig
               y={n.y}
               width={n.width}
               height={n.height}
-              fill={n.id === '_UNASSIGNED_' ? COLORS.unassigned : COLORS.navy}
-              rx={2}
+              fill={n.id === '_UNASSIGNED_' ? COLORS.unassigned : (carrierColorMap[n.id] || COLORS.navy)}
+              rx={3}
             />
             <text
               x={n.x + n.width + LABEL_GAP}
@@ -339,14 +393,15 @@ export default function CarrierSankey({ data, width: propWidth, height: propHeig
       </div>
 
       {/* Legend */}
-      <div className="flex items-center gap-4 mt-2 text-xs text-gray-600">
+      <div className="flex items-center gap-5 mt-2 text-xs text-gray-600">
+        <span className="text-gray-400 font-medium">Flow colors match incumbent carrier</span>
         <span className="flex items-center gap-1">
-          <span className="inline-block w-3 h-3 rounded-sm" style={{ backgroundColor: COLORS.retained }} />
-          Retained
+          <span className="inline-block w-3 h-3 rounded-sm opacity-60" style={{ backgroundColor: CARRIER_PALETTE[0] }} />
+          Retained (same carrier)
         </span>
         <span className="flex items-center gap-1">
-          <span className="inline-block w-3 h-3 rounded-sm" style={{ backgroundColor: COLORS.migrating }} />
-          Migrating
+          <span className="inline-block w-3 h-3 rounded-sm opacity-40" style={{ backgroundColor: CARRIER_PALETTE[3] }} />
+          Migrating (new carrier)
         </span>
         <span className="flex items-center gap-1">
           <span className="inline-block w-3 h-3 rounded-sm" style={{ backgroundColor: COLORS.unassigned }} />

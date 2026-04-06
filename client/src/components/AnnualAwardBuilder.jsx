@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { detectSampleWeeks, computeAnnualAward, computeCarrierSummary, computeSankeyData } from '../services/analyticsEngine.js';
 import { generateAnnualAwardPdf, downloadBlob } from '../services/pdfExport.js';
+import { applyMargin } from '../services/ratingClient.js';
 import CarrierSankey from './CarrierSankey.jsx';
 
 function fmt$(v) {
@@ -29,7 +30,7 @@ function escCsv(val) {
   return s;
 }
 
-export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
+export default function AnnualAwardBuilder({ flatRows, computedScenarios, activeMarkups }) {
   const detected = useMemo(() => detectSampleWeeks(flatRows), [flatRows]);
   const [weeksOverride, setWeeksOverride] = useState('');
   const [selectedScenarioId, setSelectedScenarioId] = useState('');
@@ -87,26 +88,37 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
   }, [computedScenarios]);
 
   // Customer view: group lanes by origin state, show carrier shifts
+  // Apply margin so customer sees their price, not raw carrier cost
   const customerLanes = useMemo(() => {
     return lanes.map(l => {
       const isShift = l.historicCarrier && l.historicCarrier !== l.carrierSCAC;
       const isNew = !l.historicCarrier;
-      return { ...l, isShift, isNew };
+      // Apply margin to per-shipment cost, then scale to annual
+      let custAnnualSpend = l.annualSpend;
+      let custSampleSpend = l.sampleSpend;
+      if (activeMarkups && l.shipments > 0) {
+        const perShipCost = l.sampleSpend / l.shipments;
+        const m = applyMargin(perShipCost, l.carrierSCAC, activeMarkups);
+        custSampleSpend = m.customerPrice * l.shipments;
+        custAnnualSpend = custSampleSpend * (52 / Math.max(1, sampleWeeks));
+      }
+      const custDelta = l.annualHistoric > 0 ? custAnnualSpend - l.annualHistoric : 0;
+      const custDeltaPct = l.annualHistoric > 0 ? (custDelta / l.annualHistoric) * 100 : 0;
+      return { ...l, isShift, isNew, custAnnualSpend, custSampleSpend, custDelta, custDeltaPct };
     }).sort((a, b) => {
-      // Sort: shifts first, then by origin state, then by spend
       if (a.isShift !== b.isShift) return a.isShift ? -1 : 1;
       if (a.origState !== b.origState) return (a.origState || '').localeCompare(b.origState || '');
-      return b.annualSpend - a.annualSpend;
+      return b.custAnnualSpend - a.custAnnualSpend;
     });
-  }, [lanes]);
+  }, [lanes, activeMarkups, sampleWeeks]);
 
   const customerSummary = useMemo(() => {
     const totalLanes = customerLanes.length;
     const shiftLanes = customerLanes.filter(l => l.isShift).length;
     const retainedLanes = customerLanes.filter(l => l.historicCarrier && !l.isShift).length;
     const newLanes = customerLanes.filter(l => l.isNew).length;
-    const shiftSpend = customerLanes.filter(l => l.isShift).reduce((s, l) => s + l.annualSpend, 0);
-    const totalSpend = customerLanes.reduce((s, l) => s + l.annualSpend, 0);
+    const shiftSpend = customerLanes.filter(l => l.isShift).reduce((s, l) => s + l.custAnnualSpend, 0);
+    const totalSpend = customerLanes.reduce((s, l) => s + l.custAnnualSpend, 0);
     return { totalLanes, shiftLanes, retainedLanes, newLanes, shiftSpend, totalSpend };
   }, [customerLanes]);
 
@@ -153,7 +165,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
     // Customer view section
     const custHeaders = [
       'Status', 'Lane', 'Origin Zips', 'Previous Carrier', 'New Carrier SCAC', 'New Carrier Name',
-      'Annual Shipments', 'Annual Spend', 'Savings ($)', 'Savings (%)',
+      'Annual Shipments', 'Customer Spend', 'Savings ($)', 'Savings (%)',
     ];
     const custRows = customerLanes.map(l => [
       l.isShift ? 'CHANGE' : l.isNew ? 'NEW' : 'RETAINED',
@@ -163,9 +175,9 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
       l.carrierSCAC,
       l.carrierName,
       l.annualShipments,
-      l.annualSpend.toFixed(2),
-      l.annualHistoric > 0 ? l.delta.toFixed(2) : '',
-      l.annualHistoric > 0 ? l.deltaPct.toFixed(1) : '',
+      l.custAnnualSpend.toFixed(2),
+      l.annualHistoric > 0 ? l.custDelta.toFixed(2) : '',
+      l.annualHistoric > 0 ? l.custDeltaPct.toFixed(1) : '',
     ].map(escCsv));
 
     const filterNote = selectedOrigins.length > 0
@@ -422,19 +434,23 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
           </div>
         ) : null}
 
-        {/* Customer View KPIs */}
-        {viewLevel === 'customer' && (
-          <>
+        {/* Customer View KPIs — margin-applied */}
+        {viewLevel === 'customer' && (() => {
+          const custTotalSpend = customerLanes.reduce((s, l) => s + l.custAnnualSpend, 0);
+          const custHistoric = customerLanes.reduce((s, l) => s + (l.annualHistoric || 0), 0);
+          const custDelta = custHistoric > 0 ? custTotalSpend - custHistoric : null;
+          const custDeltaPct = custHistoric > 0 ? (custDelta / custHistoric) * 100 : null;
+          return <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             {[
               { label: 'Annual Shipments (est)', value: fmtNum(csTotals.annualShipments) },
-              { label: 'Projected Annual Spend', value: fmtCompact$(csTotals.projectedAnnSpend) },
-              { label: 'Displaced Historic', value: csTotals.displacedHistoricSpend > 0 ? fmtCompact$(csTotals.displacedHistoricSpend) : 'N/A' },
+              { label: 'Projected Customer Spend', value: fmtCompact$(custTotalSpend), sublabel: 'with margin applied' },
+              { label: 'Displaced Historic', value: custHistoric > 0 ? fmtCompact$(custHistoric) : 'N/A' },
               {
                 label: 'Annual Delta',
                 sublabel: 'vs Displaced Historic',
-                value: csTotals.deltaVsDisplaced != null ? `${fmtCompact$(csTotals.deltaVsDisplaced)} (${fmtPct(csTotals.deltaVsDisplacedPct)})` : 'N/A',
-                color: csTotals.deltaVsDisplaced != null ? deltaColor(csTotals.deltaVsDisplaced) : '',
+                value: custDelta != null ? `${fmtCompact$(custDelta)} (${fmtPct(custDeltaPct)})` : 'N/A',
+                color: custDelta != null ? deltaColor(custDelta) : '',
               },
             ].map((kpi, i) => (
               <div key={i} className="bg-white rounded-lg border border-gray-200 p-3">
@@ -459,8 +475,8 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
               </div>
             ))}
           </div>
-          </>
-        )}
+          </>;
+        })()}
 
         {/* Sankey Panel — carrier + customer views */}
         {(viewLevel === 'carrier' || viewLevel === 'customer') && (
@@ -633,7 +649,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
                     <th className="px-3 py-2 text-center"></th>
                     <th className="px-3 py-2 text-center">New Carrier</th>
                     <th className="px-3 py-2 text-right">Ann. Shipments</th>
-                    <th className="px-3 py-2 text-right">Ann. Spend</th>
+                    <th className="px-3 py-2 text-right">Cust. Spend</th>
                     <th className="px-3 py-2 text-right">Savings</th>
                   </tr>
                 </thead>
@@ -694,9 +710,9 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
                           <span className="block text-[10px] text-gray-400 mt-0.5">{l.carrierName}</span>
                         </td>
                         <td className="px-3 py-2 text-right">{fmtNum(l.annualShipments)}</td>
-                        <td className="px-3 py-2 text-right font-medium">{fmtCompact$(l.annualSpend)}</td>
-                        <td className={`px-3 py-2 text-right font-medium ${l.annualHistoric > 0 ? deltaColor(l.delta) : 'text-gray-400'}`}>
-                          {l.annualHistoric > 0 ? `${fmtCompact$(l.delta)} (${fmtPct(l.deltaPct)})` : '—'}
+                        <td className="px-3 py-2 text-right font-medium">{fmtCompact$(l.custAnnualSpend)}</td>
+                        <td className={`px-3 py-2 text-right font-medium ${l.annualHistoric > 0 ? deltaColor(l.custDelta) : 'text-gray-400'}`}>
+                          {l.annualHistoric > 0 ? `${fmtCompact$(l.custDelta)} (${fmtPct(l.custDeltaPct)})` : '—'}
                         </td>
                       </tr>
                     );

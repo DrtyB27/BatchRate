@@ -765,7 +765,7 @@ export default function ResultsScreen({
       ) : viewMode === 'feedback' ? (
         <CarrierFeedback flatRows={flatRows} computedScenarios={computedScenarios} />
       ) : viewMode === 'annual' ? (
-        <AnnualAwardBuilder flatRows={flatRows} computedScenarios={computedScenarios} />
+        <AnnualAwardBuilder flatRows={flatRows} computedScenarios={computedScenarios} activeMarkups={activeMarkups} />
       ) : (
         <ResultsTable
           flatRows={flatRows}

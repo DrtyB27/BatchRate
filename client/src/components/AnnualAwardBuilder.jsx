@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { detectSampleWeeks, computeAnnualAward, computeCarrierSummary, computeSankeyData } from '../services/analyticsEngine.js';
+import { computeAnnualAward, computeCarrierSummary, computeSankeyData } from '../services/analyticsEngine.js';
 import { generateAnnualAwardPdf, downloadBlob } from '../services/pdfExport.js';
 import { applyMargin } from '../services/ratingClient.js';
 import CarrierSankey from './CarrierSankey.jsx';
@@ -30,9 +30,7 @@ function escCsv(val) {
   return s;
 }
 
-export default function AnnualAwardBuilder({ flatRows, computedScenarios, activeMarkups }) {
-  const detected = useMemo(() => detectSampleWeeks(flatRows), [flatRows]);
-  const [weeksOverride, setWeeksOverride] = useState('');
+export default function AnnualAwardBuilder({ flatRows, computedScenarios, activeMarkups, sampleWeeks, weeksOverride, onWeeksChange, detectedWeeks }) {
   const [selectedScenarioId, setSelectedScenarioId] = useState('');
   const [viewLevel, setViewLevel] = useState('carrier'); // 'carrier' | 'lane' | 'customer'
   const [showSankey, setShowSankey] = useState(true);
@@ -40,7 +38,6 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
   const [originDropdownOpen, setOriginDropdownOpen] = useState(false);
   const [customerShareMode, setCustomerShareMode] = useState(false); // hides internal views
 
-  const sampleWeeks = weeksOverride !== '' ? Math.max(1, parseInt(weeksOverride, 10) || 1) : detected.weeks;
   const annualizationFactor = 52 / Math.max(1, sampleWeeks);
 
   // Collect all unique origin states for the filter dropdown
@@ -282,22 +279,22 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
                   type="number"
                   min="1"
                   max="52"
-                  value={weeksOverride !== '' ? weeksOverride : detected.weeks}
-                  onChange={(e) => setWeeksOverride(e.target.value)}
+                  value={weeksOverride !== '' ? weeksOverride : detectedWeeks.weeks}
+                  onChange={(e) => onWeeksChange(e.target.value)}
                   className="w-20 px-2 py-1 text-sm border border-gray-300 rounded"
                 />
                 {weeksOverride !== '' && (
                   <button
-                    onClick={() => setWeeksOverride('')}
+                    onClick={() => onWeeksChange('')}
                     className="text-xs text-[#39b6e6] hover:underline"
                   >
-                    Reset (detected: {detected.weeks})
+                    Reset (detected: {detectedWeeks.weeks})
                   </button>
                 )}
               </div>
-              {detected.dateRange && (
+              {detectedWeeks.dateRange && (
                 <p className="text-xs text-gray-400 mt-1">
-                  Pickup dates: {detected.dateRange.min.toLocaleDateString()} – {detected.dateRange.max.toLocaleDateString()}
+                  Pickup dates: {detectedWeeks.dateRange.min.toLocaleDateString()} – {detectedWeeks.dateRange.max.toLocaleDateString()}
                 </p>
               )}
             </div>

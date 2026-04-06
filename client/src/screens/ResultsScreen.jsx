@@ -11,6 +11,7 @@ import CombineRunsDialog from '../components/CombineRunsDialog.jsx';
 import { serializeRun, downloadRunFile } from '../services/runPersistence.js';
 import {
   computeScenario, computeCurrentState, computeHistoricCarrierMatch,
+  detectSampleWeeks,
 } from '../services/analyticsEngine.js';
 import { applyMargin } from '../services/ratingClient.js';
 
@@ -277,6 +278,11 @@ export default function ResultsScreen({
 
   const flatRows = useMemo(() => flattenResults(results), [results]);
   const lowCostFlags = useMemo(() => computeLowCostFlags(flatRows), [flatRows]);
+
+  // Shared sampleWeeks — detected from data, can be overridden by Award tab
+  const detectedWeeks = useMemo(() => detectSampleWeeks(flatRows), [flatRows]);
+  const [weeksOverride, setWeeksOverride] = useState('');
+  const sampleWeeks = weeksOverride !== '' ? Math.max(1, parseInt(weeksOverride, 10) || 1) : detectedWeeks.weeks;
 
   const allSCACs = useMemo(() => {
     const scacs = new Set();
@@ -763,9 +769,9 @@ export default function ResultsScreen({
       ) : viewMode === 'performance' ? (
         <BatchPerformance results={results} batchMeta={batchMeta} totalRows={totalRows} onRetryInPlace={onRetryInPlace} retryProgress={retryProgress} />
       ) : viewMode === 'feedback' ? (
-        <CarrierFeedback flatRows={flatRows} computedScenarios={computedScenarios} />
+        <CarrierFeedback flatRows={flatRows} computedScenarios={computedScenarios} sampleWeeks={sampleWeeks} />
       ) : viewMode === 'annual' ? (
-        <AnnualAwardBuilder flatRows={flatRows} computedScenarios={computedScenarios} activeMarkups={activeMarkups} />
+        <AnnualAwardBuilder flatRows={flatRows} computedScenarios={computedScenarios} activeMarkups={activeMarkups} sampleWeeks={sampleWeeks} weeksOverride={weeksOverride} onWeeksChange={setWeeksOverride} detectedWeeks={detectedWeeks} />
       ) : (
         <ResultsTable
           flatRows={flatRows}

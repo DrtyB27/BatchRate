@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback } from 'react';
-import { computeCarrierFeedback, computeCarrierFeedbackSummary, computeAnnualAward, computeCarrierSummary, detectSampleWeeks, getLaneKey } from '../services/analyticsEngine.js';
+import { computeCarrierFeedback, computeCarrierFeedbackSummary, computeAnnualAward, computeCarrierSummary, getLaneKey } from '../services/analyticsEngine.js';
 import { generateCarrierFeedbackPdf } from '../services/pdfExport.js';
 
 const TIER_COLORS = {
@@ -238,7 +238,7 @@ function CarrierSummaryTable({ summary, onSelectCarrier, awardContext }) {
 }
 
 // ── Main Component ──────────────────────────────────────────
-export default function CarrierFeedback({ flatRows, computedScenarios }) {
+export default function CarrierFeedback({ flatRows, computedScenarios, sampleWeeks }) {
   // Get all unique SCACs
   const allSCACs = useMemo(() => {
     const scacs = new Set();
@@ -266,8 +266,7 @@ export default function CarrierFeedback({ flatRows, computedScenarios }) {
       const sc = computedScenarios?.find(s => s.id === selectedScenarioId);
       scenarioAwards = sc?.result?.awards || null;
     }
-    const detected = detectSampleWeeks(flatRows);
-    const { lanes } = computeAnnualAward(flatRows, scenarioAwards, detected.weeks);
+    const { lanes } = computeAnnualAward(flatRows, scenarioAwards, sampleWeeks);
     const { carriers } = computeCarrierSummary(lanes);
 
     const ctx = {};
@@ -275,7 +274,7 @@ export default function CarrierFeedback({ flatRows, computedScenarios }) {
       ctx[c.scac] = c; // pass the full carrier summary object
     }
     return ctx;
-  }, [flatRows, computedScenarios, selectedScenarioId]);
+  }, [flatRows, computedScenarios, selectedScenarioId, sampleWeeks]);
 
   // Per-lane award status for the selected carrier's drill-down
   // Uses computeAnnualAward lanes to match the Annual Award tab exactly.
@@ -287,8 +286,7 @@ export default function CarrierFeedback({ flatRows, computedScenarios }) {
       const sc = computedScenarios?.find(s => s.id === selectedScenarioId);
       scenarioAwards = sc?.result?.awards || null;
     }
-    const detected = detectSampleWeeks(flatRows);
-    const { lanes } = computeAnnualAward(flatRows, scenarioAwards, detected.weeks);
+    const { lanes } = computeAnnualAward(flatRows, scenarioAwards, sampleWeeks);
 
     const laneStat = {};
     for (const lane of lanes) {
@@ -296,20 +294,18 @@ export default function CarrierFeedback({ flatRows, computedScenarios }) {
       const hc = lane.historicCarrier;
 
       if (ac === selectedSCAC) {
-        // This carrier is awarded this lane
         if (hc === selectedSCAC) {
           laneStat[lane.laneKey] = 'retained';
         } else {
           laneStat[lane.laneKey] = 'won';
         }
       } else if (hc === selectedSCAC) {
-        // This carrier was historic but lost
         if (!laneStat[lane.laneKey]) laneStat[lane.laneKey] = 'lost';
       }
     }
 
     return laneStat;
-  }, [flatRows, selectedSCAC, computedScenarios, selectedScenarioId]);
+  }, [flatRows, selectedSCAC, computedScenarios, selectedScenarioId, sampleWeeks]);
 
   const summary = useMemo(() => computeCarrierFeedbackSummary(flatRows), [flatRows]);
 

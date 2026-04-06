@@ -319,13 +319,13 @@ export function generateCarrierFeedbackPdf({
   // Lane table
   y = drawSectionLabel(doc, y, 'Lane Performance');
 
-  const lHeaders = ['Lane', 'Status', 'Award', 'Ship.', 'Discount', 'Your Rate', 'Low Cost', 'vs Best ($)', 'vs Best (%)', 'Tier'];
-  const lWidths = [35, 28, 20, 16, 22, 24, 24, 24, 22, 22];
+  const lHeaders = ['Lane', 'Light', 'Award', 'Ship.', 'Disc.', 'Your Rate', 'Low Cost', 'vs Best ($)', 'vs Best (%)', 'Tgt Disc', 'Gap', 'Tier'];
+  const lWidths = [32, 14, 20, 16, 18, 22, 22, 22, 20, 20, 18, 22];
   const lRows = feedback.lanes.map(l => {
     const as = laneAwardStatus?.[l.laneKey] || '';
     return [
       l.laneKey,
-      l.status,
+      l.stoplight === 'green' ? '●' : l.stoplight === 'yellow' ? '●' : '●',
       as ? as.charAt(0).toUpperCase() + as.slice(1) : '',
       l.shipments,
       l.avgDiscount != null ? l.avgDiscount + '%' : '—',
@@ -333,10 +333,13 @@ export function generateCarrierFeedbackPdf({
       '$' + l.bestRate.toFixed(2),
       l.isWinner ? '$0.00' : '+$' + l.gapDollar.toFixed(2),
       l.isWinner ? '0.0%' : '+' + l.gapPct + '%',
+      l.targetDiscToWin != null ? l.targetDiscToWin + '%' : '—',
+      l.discDeltaToWin != null ? '+' + l.discDeltaToWin + '%' : '—',
       l.tier,
     ];
   });
 
+  const YELLOW = [202, 138, 4];
   const awardColorFn = (val) => {
     const s = String(val).toLowerCase();
     if (s === 'won') return [37, 99, 235];
@@ -345,10 +348,19 @@ export function generateCarrierFeedbackPdf({
     return [100, 100, 100];
   };
 
+  const stoplightColorFn = (val, row) => {
+    // Determine stoplight from the original lane data
+    const laneName = row[0];
+    const lane = feedback.lanes.find(l => l.laneKey === laneName);
+    if (lane?.stoplight === 'green') return GREEN;
+    if (lane?.stoplight === 'yellow') return YELLOW;
+    return RED;
+  };
+
   y = drawTable(doc, y, lHeaders, lRows, {
     colWidths: lWidths,
-    rightAlign: [3, 4, 5, 6, 7, 8],
-    colorFn: { 2: awardColorFn },
+    rightAlign: [3, 4, 5, 6, 7, 8, 9, 10],
+    colorFn: { 1: stoplightColorFn, 2: awardColorFn },
   });
 
   drawFooter(doc, 'Confidential — This report shows the selected carrier\'s own rates only. Other carriers\' rates are not disclosed.');

@@ -1599,51 +1599,162 @@ export function computeAnnualAward(flatRows, scenarioAwards, sampleWeeks) {
 }
 
 /**
- * Build a per-carrier rollup from annual award lanes showing historic vs projected portfolio.
+ * Build a per-carrier rollup from annual award lanes with proper incumbent/award attribution.
+ *
+ * Each carrier has two sides:
+ * - Incumbent side: lanes where this SCAC was historicCarrier
+ * - Award side: lanes where this SCAC is carrierSCAC (assigned)
  *
  * @param {Array} lanes - lanes array from computeAnnualAward
- * @returns {Array} sorted by historicAnnSpend descending
+ * @returns {{ carriers: Array, totals: Object }}
  */
 export function computeCarrierSummary(lanes) {
   const map = {};
 
-  const ensure = (scac) => {
+  const ensure = (scac, name) => {
     if (!map[scac]) {
       map[scac] = {
         scac,
-        historicLanes: 0,
-        historicAnnSpend: 0,
-        projectedLanes: 0,
+        carrierName: name || '',
+        incumbentLanes: 0,
+        incumbentAnnSpend: 0,
+        awardedLanes: 0,
         projectedAnnSpend: 0,
+        displacedHistoricSpend: 0,
+        sampleShipments: 0,
+        annualShipments: 0,
+        retainedLanes: 0,
+        wonLanes: 0,
+        lostLanes: 0,
       };
     }
+    if (name && !map[scac].carrierName) map[scac].carrierName = name;
     return map[scac];
   };
 
   for (const lane of lanes) {
-    // Historic side — credit the dominant historic carrier
-    if (lane.historicCarrier) {
-      const h = ensure(lane.historicCarrier);
-      h.historicLanes++;
-      h.historicAnnSpend += lane.annualHistoric || 0;
+    const hc = lane.historicCarrier;
+    const ac = lane.carrierSCAC;
+
+    // Incumbent side — credit the historic carrier
+    if (hc) {
+      const h = ensure(hc, null);
+      h.incumbentLanes++;
+      h.incumbentAnnSpend += lane.annualHistoric || 0;
+      if (ac === hc) {
+        h.retainedLanes++;
+      } else {
+        h.lostLanes++;
+      }
     }
-    // Projected side — credit the assigned carrier
-    if (lane.carrierSCAC) {
-      const p = ensure(lane.carrierSCAC);
-      p.projectedLanes++;
-      p.projectedAnnSpend += lane.annualSpend || 0;
+
+    // Award side — credit the assigned carrier
+    if (ac) {
+      const a = ensure(ac, lane.carrierName);
+      a.awardedLanes++;
+      a.projectedAnnSpend += lane.annualSpend || 0;
+      a.displacedHistoricSpend += lane.historicTotalAnnSpend || lane.annualHistoric || 0;
+      a.sampleShipments += lane.shipments || 0;
+      a.annualShipments += lane.annualShipments || 0;
+      if (hc && hc !== ac) {
+        a.wonLanes++;
+      }
     }
   }
 
-  return Object.values(map).map(c => {
-    const netLaneChange = c.projectedLanes - c.historicLanes;
-    const deltaSpend = (c.historicAnnSpend > 0 || c.projectedAnnSpend > 0)
-      ? c.projectedAnnSpend - c.historicAnnSpend
-      : null;
-    const deltaSpendPct = c.historicAnnSpend > 0
-      ? (deltaSpend / c.historicAnnSpend) * 100
+  const carriers = Object.values(map).map(c => {
+    const netLaneChange = c.awardedLanes - c.incumbentLanes;
+    const hasBoth = c.projectedAnnSpend > 0 && c.displacedHistoricSpend > 0;
+    const deltaVsDisplaced = hasBoth ? c.projectedAnnSpend - c.displacedHistoricSpend : null;
+    const deltaVsDisplacedPct = c.displacedHistoricSpend > 0
+      ? (deltaVsDisplaced / c.displacedHistoricSpend) * 100
       : null;
 
-    return { ...c, netLaneChange, deltaSpend, deltaSpendPct };
-  }).sort((a, b) => b.historicAnnSpend - a.historicAnnSpend);
+    return { ...c, netLaneChange, deltaVsDisplaced, deltaVsDisplacedPct };
+  });
+
+  carriers.sort((a, b) => b.displacedHistoricSpend - a.displacedHistoricSpend);
+
+  // Totals
+  const totals = carriers.reduce((t, c) => {
+    t.incumbentLanes += c.incumbentLanes;
+    t.incumbentAnnSpend += c.incumbentAnnSpend;
+    t.awardedLanes += c.awardedLanes;
+    t.projectedAnnSpend += c.projectedAnnSpend;
+    t.displacedHistoricSpend += c.displacedHistoricSpend;
+    t.sampleShipments += c.sampleShipments;
+    t.annualShipments += c.annualShipments;
+    t.retainedLanes += c.retainedLanes;
+    t.wonLanes += c.wonLanes;
+    t.lostLanes += c.lostLanes;
+    return t;
+  }, {
+    incumbentLanes: 0, incumbentAnnSpend: 0,
+    awardedLanes: 0, projectedAnnSpend: 0, displacedHistoricSpend: 0,
+    sampleShipments: 0, annualShipments: 0,
+    retainedLanes: 0, wonLanes: 0, lostLanes: 0,
+  });
+  totals.netLaneChange = totals.awardedLanes - totals.incumbentLanes;
+  const tHasBoth = totals.projectedAnnSpend > 0 && totals.displacedHistoricSpend > 0;
+  totals.deltaVsDisplaced = tHasBoth ? totals.projectedAnnSpend - totals.displacedHistoricSpend : null;
+  totals.deltaVsDisplacedPct = totals.displacedHistoricSpend > 0
+    ? (totals.deltaVsDisplaced / totals.displacedHistoricSpend) * 100
+    : null;
+
+  return { carriers, totals };
+}
+
+/**
+ * Build node/link structure for a Sankey flow diagram showing carrier-to-carrier freight migration.
+ *
+ * @param {Array} lanes - lanes array from computeAnnualAward
+ * @param {number} annualizationFactor - 52 / sampleWeeks (for reference, lanes are already annualized)
+ * @returns {{ nodes: Array, links: Array, totalFlow: number }}
+ */
+export function computeSankeyData(lanes, annualizationFactor) {
+  const linkMap = {};
+  const sourceSet = new Set();
+  const targetSet = new Set();
+
+  for (const lane of lanes) {
+    const hc = lane.historicCarrier;
+    const ac = lane.carrierSCAC;
+    const value = lane.historicTotalAnnSpend || lane.annualHistoric || 0;
+
+    if (hc && ac) {
+      // Flow from historic to assigned
+      const key = `${hc}|||${ac}`;
+      if (!linkMap[key]) linkMap[key] = { source: hc, target: ac, value: 0, lanes: 0 };
+      linkMap[key].value += value;
+      linkMap[key].lanes++;
+      sourceSet.add(hc);
+      targetSet.add(ac);
+    } else if (hc && !ac) {
+      // Historic carrier but no assignment — unassigned
+      const key = `${hc}|||_UNASSIGNED_`;
+      if (!linkMap[key]) linkMap[key] = { source: hc, target: '_UNASSIGNED_', value: 0, lanes: 0 };
+      linkMap[key].value += value;
+      linkMap[key].lanes++;
+      sourceSet.add(hc);
+      targetSet.add('_UNASSIGNED_');
+    }
+    // Lanes with assignedSCAC but no historicCarrier — skip from Sankey (no source)
+  }
+
+  const links = Object.values(linkMap).filter(l => l.value > 0);
+  links.sort((a, b) => b.value - a.value);
+
+  // Build nodes — a SCAC on both sides gets side: 'both'
+  const allIds = new Set([...sourceSet, ...targetSet]);
+  const nodes = [];
+  for (const id of allIds) {
+    const isSource = sourceSet.has(id);
+    const isTarget = targetSet.has(id);
+    const side = isSource && isTarget ? 'both' : isSource ? 'left' : 'right';
+    nodes.push({ id, label: id, side });
+  }
+
+  const totalFlow = links.reduce((s, l) => s + l.value, 0);
+
+  return { nodes, links, totalFlow };
 }

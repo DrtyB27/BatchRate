@@ -1460,7 +1460,7 @@ export function computeAnnualAward(flatRows, scenarioAwards, sampleWeeks) {
     winnersByRef = getLowCostByReference(flatRows);
   }
 
-  // Group winners by lane + carrier
+  // Group winners by lane + carrier, tracking historic cost per SCAC
   const laneCarrierMap = {};
   for (const [ref, row] of Object.entries(winnersByRef)) {
     const laneKey = getLaneKey(row);
@@ -1473,20 +1473,46 @@ export function computeAnnualAward(flatRows, scenarioAwards, sampleWeeks) {
         carrierName: row.rate.carrierName || '',
         shipments: 0,
         sampleSpend: 0,
-        historicSpend: 0,
+        historicCostByScac: {},
+        historicCarrierVotes: {},
       };
     }
     const g = laneCarrierMap[groupKey];
     g.shipments++;
     g.sampleSpend += row.rate.totalCharge ?? 0;
-    g.historicSpend += row.historicCost ? parseFloat(row.historicCost) || 0 : 0;
+    const hc = row.historicCarrier ? String(row.historicCarrier).toUpperCase().trim() : null;
+    const hCost = row.historicCost ? parseFloat(row.historicCost) || 0 : 0;
+    if (hCost > 0) {
+      const scacKey = hc || '_UNKNOWN_';
+      g.historicCostByScac[scacKey] = (g.historicCostByScac[scacKey] || 0) + hCost;
+    }
+    if (hc) {
+      g.historicCarrierVotes[hc] = (g.historicCarrierVotes[hc] || 0) + 1;
+    }
   }
 
-  // Build lane rows with annualized projections
+  // Build lane rows with annualized projections and SCAC-attributed historic spend
   const lanes = Object.values(laneCarrierMap).map(g => {
     const annualShipments = Math.round(g.shipments * factor);
     const annualSpend = g.sampleSpend * factor;
-    const annualHistoric = g.historicSpend * factor;
+
+    // Determine dominant historic carrier by vote count
+    const votes = Object.entries(g.historicCarrierVotes);
+    let historicCarrier = null;
+    let historicCarrierPct = 0;
+    if (votes.length > 0) {
+      votes.sort((a, b) => b[1] - a[1]);
+      historicCarrier = votes[0][0];
+      const totalVotes = votes.reduce((s, [, v]) => s + v, 0);
+      historicCarrierPct = Math.round((votes[0][1] / totalVotes) * 100);
+    }
+
+    const totalHistCost = Object.values(g.historicCostByScac).reduce((s, v) => s + v, 0);
+    const historicTotalAnnSpend = Math.round(totalHistCost * factor);
+    const attributedHistCost = historicCarrier ? (g.historicCostByScac[historicCarrier] || 0) : 0;
+    const annualHistoric = Math.round(attributedHistCost * factor);
+    const historicSpend = attributedHistCost;
+
     const delta = annualHistoric > 0 ? annualSpend - annualHistoric : 0;
     const deltaPct = annualHistoric > 0 ? (delta / annualHistoric) * 100 : 0;
 
@@ -1498,8 +1524,11 @@ export function computeAnnualAward(flatRows, scenarioAwards, sampleWeeks) {
       annualSpend,
       carrierSCAC: g.carrierSCAC,
       carrierName: g.carrierName,
-      historicSpend: g.historicSpend,
+      historicCarrier,
+      historicCarrierPct,
+      historicSpend,
       annualHistoric,
+      historicTotalAnnSpend,
       delta,
       deltaPct,
     };
@@ -1564,4 +1593,54 @@ export function computeAnnualAward(flatRows, scenarioAwards, sampleWeeks) {
       deltaPct: totDeltaPct,
     },
   };
+}
+
+/**
+ * Build a per-carrier rollup from annual award lanes showing historic vs projected portfolio.
+ *
+ * @param {Array} lanes - lanes array from computeAnnualAward
+ * @returns {Array} sorted by historicAnnSpend descending
+ */
+export function computeCarrierSummary(lanes) {
+  const map = {};
+
+  const ensure = (scac) => {
+    if (!map[scac]) {
+      map[scac] = {
+        scac,
+        historicLanes: 0,
+        historicAnnSpend: 0,
+        projectedLanes: 0,
+        projectedAnnSpend: 0,
+      };
+    }
+    return map[scac];
+  };
+
+  for (const lane of lanes) {
+    // Historic side — credit the dominant historic carrier
+    if (lane.historicCarrier) {
+      const h = ensure(lane.historicCarrier);
+      h.historicLanes++;
+      h.historicAnnSpend += lane.annualHistoric || 0;
+    }
+    // Projected side — credit the assigned carrier
+    if (lane.carrierSCAC) {
+      const p = ensure(lane.carrierSCAC);
+      p.projectedLanes++;
+      p.projectedAnnSpend += lane.annualSpend || 0;
+    }
+  }
+
+  return Object.values(map).map(c => {
+    const netLaneChange = c.projectedLanes - c.historicLanes;
+    const deltaSpend = (c.historicAnnSpend > 0 || c.projectedAnnSpend > 0)
+      ? c.projectedAnnSpend - c.historicAnnSpend
+      : null;
+    const deltaSpendPct = c.historicAnnSpend > 0
+      ? (deltaSpend / c.historicAnnSpend) * 100
+      : null;
+
+    return { ...c, netLaneChange, deltaSpend, deltaSpendPct };
+  }).sort((a, b) => b.historicAnnSpend - a.historicAnnSpend);
 }

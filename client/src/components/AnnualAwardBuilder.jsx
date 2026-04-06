@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { detectSampleWeeks, computeAnnualAward } from '../services/analyticsEngine.js';
+import { detectSampleWeeks, computeAnnualAward, computeCarrierSummary } from '../services/analyticsEngine.js';
 
 function fmt$(v) {
   return '$' + Number(v || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -25,6 +25,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
   const [weeksOverride, setWeeksOverride] = useState('');
   const [selectedScenarioId, setSelectedScenarioId] = useState('');
   const [viewLevel, setViewLevel] = useState('carrier'); // 'carrier' | 'lane'
+  const [showCarrierSummary, setShowCarrierSummary] = useState(true);
 
   const sampleWeeks = weeksOverride !== '' ? Math.max(1, parseInt(weeksOverride, 10) || 1) : detected.weeks;
 
@@ -41,6 +42,8 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
 
   const { lanes, carriers, totals } = result;
 
+  const carrierSummary = useMemo(() => computeCarrierSummary(lanes), [lanes]);
+
   const availableScenarios = useMemo(() => {
     if (!computedScenarios) return [];
     return computedScenarios.filter(s => s.result && Object.keys(s.result.awards || {}).length > 0);
@@ -48,20 +51,46 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
 
   // CSV export
   const handleExportCsv = () => {
+    // Lane detail headers with new columns
     const headers = [
       'Lane', 'Carrier SCAC', 'Carrier Name',
+      'Hist. Carrier', 'Hist. Carrier %', 'Hist. Total Ann. Spend',
       'Sample Shipments', 'Annual Shipments (est)',
       'Sample Spend', 'Annual Spend (est)',
-      'Annual Historic Spend', 'Annual Delta ($)', 'Annual Delta (%)',
+      'Annual Historic Spend (Attributed)', 'Annual Delta ($)', 'Annual Delta (%)',
     ];
     const rows = lanes.map(l => [
       l.laneKey, l.carrierSCAC, l.carrierName,
+      l.historicCarrier || '', l.historicCarrierPct || '',
+      l.historicTotalAnnSpend ? l.historicTotalAnnSpend.toFixed(2) : '0.00',
       l.shipments, l.annualShipments,
       l.sampleSpend.toFixed(2), l.annualSpend.toFixed(2),
       l.annualHistoric.toFixed(2), l.delta.toFixed(2), l.deltaPct.toFixed(1),
     ].map(escCsv));
 
-    const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+    // Carrier Summary section
+    const summaryHeaders = [
+      'SCAC', 'Historic Lanes', 'Historic Ann. Spend',
+      'Projected Lanes', 'Projected Ann. Spend',
+      'Net Lanes', '\u0394 Spend', '\u0394 %',
+    ];
+    const summaryRows = carrierSummary.map(c => [
+      c.scac, c.historicLanes, c.historicAnnSpend.toFixed(2),
+      c.projectedLanes, c.projectedAnnSpend.toFixed(2),
+      c.netLaneChange,
+      c.deltaSpend != null ? c.deltaSpend.toFixed(2) : '',
+      c.deltaSpendPct != null ? c.deltaSpendPct.toFixed(1) : '',
+    ].map(escCsv));
+
+    const csv = [
+      headers.join(','),
+      ...rows.map(r => r.join(',')),
+      '',
+      'Carrier Summary',
+      summaryHeaders.join(','),
+      ...summaryRows.map(r => r.join(',')),
+    ].join('\n');
+
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -72,6 +101,19 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
   };
 
   const deltaColor = (v) => v < 0 ? 'text-green-700' : v > 0 ? 'text-red-600' : 'text-gray-700';
+  const netLaneColor = (v) => v > 0 ? 'text-green-700' : v < 0 ? 'text-red-600' : 'text-gray-500';
+  const netLanePrefix = (v) => v > 0 ? '+' + v : String(v);
+
+  // Carrier summary totals
+  const csTotals = useMemo(() => {
+    const h = carrierSummary.reduce((s, c) => s + c.historicAnnSpend, 0);
+    const p = carrierSummary.reduce((s, c) => s + c.projectedAnnSpend, 0);
+    const hLanes = carrierSummary.reduce((s, c) => s + c.historicLanes, 0);
+    const pLanes = carrierSummary.reduce((s, c) => s + c.projectedLanes, 0);
+    const delta = h > 0 || p > 0 ? p - h : null;
+    const deltaPct = h > 0 ? (delta / h) * 100 : null;
+    return { hLanes, historicAnnSpend: h, pLanes, projectedAnnSpend: p, netLanes: pLanes - hLanes, delta, deltaPct };
+  }, [carrierSummary]);
 
   return (
     <div className="flex-1 overflow-auto p-6 bg-gray-50">
@@ -149,7 +191,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
           </div>
 
           <div className="text-xs text-gray-500">
-            Annualization factor: <strong>{(52 / sampleWeeks).toFixed(1)}x</strong> ({sampleWeeks} wk → 52 wk)
+            Annualization factor: <strong>{(52 / sampleWeeks).toFixed(1)}x</strong> ({sampleWeeks} wk &rarr; 52 wk)
           </div>
         </div>
 
@@ -166,6 +208,84 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
               <p className={`text-lg font-bold ${kpi.color || 'text-[#002144]'}`}>{kpi.value}</p>
             </div>
           ))}
+        </div>
+
+        {/* Carrier Summary Panel */}
+        <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+          <button
+            onClick={() => setShowCarrierSummary(v => !v)}
+            className="w-full flex items-center justify-between px-4 py-3 hover:bg-gray-50 transition-colors"
+          >
+            <div>
+              <span className="text-sm font-bold text-[#002144]">Carrier Summary</span>
+              <span className="text-xs text-gray-400 ml-2">Portfolio impact per carrier — share with carriers to show spend changes.</span>
+            </div>
+            <svg className={`w-4 h-4 text-gray-400 transform transition-transform ${showCarrierSummary ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          {showCarrierSummary && (
+            <div className="overflow-x-auto border-t border-gray-200">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-gray-50 border-b text-left text-xs font-medium text-gray-500 uppercase">
+                    <th className="px-4 py-2">Carrier</th>
+                    <th className="px-4 py-2 text-right">Hist. Lanes</th>
+                    <th className="px-4 py-2 text-right">Hist. Annual</th>
+                    <th className="px-4 py-2 text-center text-gray-300">&rarr;</th>
+                    <th className="px-4 py-2 text-right">Proj. Lanes</th>
+                    <th className="px-4 py-2 text-right">Proj. Annual</th>
+                    <th className="px-4 py-2 text-right">Net Lanes</th>
+                    <th className="px-4 py-2 text-right">&Delta; Spend</th>
+                    <th className="px-4 py-2 text-right">&Delta; %</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {carrierSummary.map((c, i) => (
+                    <tr
+                      key={c.scac}
+                      className={`${i % 2 === 0 ? 'bg-white' : 'bg-gray-50'} ${c.projectedLanes === 0 ? 'opacity-60' : ''}`}
+                    >
+                      <td className="px-4 py-2 font-mono font-medium text-[#002144]">{c.scac}</td>
+                      <td className="px-4 py-2 text-right">{c.historicLanes || '—'}</td>
+                      <td className="px-4 py-2 text-right">{c.historicAnnSpend > 0 ? fmt$(c.historicAnnSpend) : '—'}</td>
+                      <td className="px-4 py-2 text-center text-gray-300">&rarr;</td>
+                      <td className="px-4 py-2 text-right">{c.projectedLanes || '—'}</td>
+                      <td className="px-4 py-2 text-right">{c.projectedAnnSpend > 0 ? fmt$(c.projectedAnnSpend) : '—'}</td>
+                      <td className={`px-4 py-2 text-right font-medium ${netLaneColor(c.netLaneChange)}`}>
+                        {netLanePrefix(c.netLaneChange)}
+                      </td>
+                      <td className={`px-4 py-2 text-right font-medium ${c.deltaSpend != null ? deltaColor(c.deltaSpend) : 'text-gray-400'}`}>
+                        {c.deltaSpend != null ? fmt$(c.deltaSpend) : '—'}
+                      </td>
+                      <td className={`px-4 py-2 text-right ${c.deltaSpendPct != null ? deltaColor(c.deltaSpendPct) : 'text-gray-400'}`}>
+                        {c.deltaSpendPct != null ? fmtPct(c.deltaSpendPct) : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr className="bg-[#002144]/5 font-bold border-t">
+                    <td className="px-4 py-2">Total</td>
+                    <td className="px-4 py-2 text-right">{csTotals.hLanes}</td>
+                    <td className="px-4 py-2 text-right">{csTotals.historicAnnSpend > 0 ? fmt$(csTotals.historicAnnSpend) : '—'}</td>
+                    <td className="px-4 py-2"></td>
+                    <td className="px-4 py-2 text-right">{csTotals.pLanes}</td>
+                    <td className="px-4 py-2 text-right">{csTotals.projectedAnnSpend > 0 ? fmt$(csTotals.projectedAnnSpend) : '—'}</td>
+                    <td className={`px-4 py-2 text-right font-medium ${netLaneColor(csTotals.netLanes)}`}>
+                      {netLanePrefix(csTotals.netLanes)}
+                    </td>
+                    <td className={`px-4 py-2 text-right ${csTotals.delta != null ? deltaColor(csTotals.delta) : ''}`}>
+                      {csTotals.delta != null ? fmt$(csTotals.delta) : '—'}
+                    </td>
+                    <td className={`px-4 py-2 text-right ${csTotals.deltaPct != null ? deltaColor(csTotals.deltaPct) : ''}`}>
+                      {csTotals.deltaPct != null ? fmtPct(csTotals.deltaPct) : '—'}
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          )}
         </div>
 
         {/* Data Table */}
@@ -224,6 +344,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
                     <th className="px-4 py-2">Lane</th>
                     <th className="px-4 py-2">SCAC</th>
                     <th className="px-4 py-2">Carrier</th>
+                    <th className="px-4 py-2">Hist. Carrier</th>
                     <th className="px-4 py-2 text-right">Sample Ship.</th>
                     <th className="px-4 py-2 text-right">Annual Ship.</th>
                     <th className="px-4 py-2 text-right">Sample Spend</th>
@@ -239,6 +360,17 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
                       <td className="px-4 py-2 font-medium">{l.laneKey}</td>
                       <td className="px-4 py-2 font-mono">{l.carrierSCAC}</td>
                       <td className="px-4 py-2">{l.carrierName}</td>
+                      <td className="px-4 py-2 font-mono">
+                        {l.historicCarrier || '—'}
+                        {l.historicCarrier && l.historicCarrierPct < 100 && (
+                          <span
+                            className="ml-1 text-xs text-gray-400"
+                            title={`This carrier handled ${l.historicCarrierPct}% of sample volume on this lane`}
+                          >
+                            ({l.historicCarrierPct}%)
+                          </span>
+                        )}
+                      </td>
                       <td className="px-4 py-2 text-right">{fmtNum(l.shipments)}</td>
                       <td className="px-4 py-2 text-right">{fmtNum(l.annualShipments)}</td>
                       <td className="px-4 py-2 text-right">{fmt$(l.sampleSpend)}</td>
@@ -251,7 +383,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
                 </tbody>
                 <tfoot>
                   <tr className="bg-[#002144]/5 font-bold border-t">
-                    <td className="px-4 py-2" colSpan={3}>Total ({lanes.length} lanes)</td>
+                    <td className="px-4 py-2" colSpan={4}>Total ({lanes.length} lanes)</td>
                     <td className="px-4 py-2 text-right">{fmtNum(totals.shipments)}</td>
                     <td className="px-4 py-2 text-right">{fmtNum(totals.annualShipments)}</td>
                     <td className="px-4 py-2 text-right">{fmt$(totals.sampleSpend)}</td>

@@ -763,7 +763,7 @@ export default function ResultsScreen({
       ) : viewMode === 'performance' ? (
         <BatchPerformance results={results} batchMeta={batchMeta} totalRows={totalRows} onRetryInPlace={onRetryInPlace} retryProgress={retryProgress} />
       ) : viewMode === 'feedback' ? (
-        <CarrierFeedback flatRows={flatRows} />
+        <CarrierFeedback flatRows={flatRows} computedScenarios={computedScenarios} />
       ) : viewMode === 'annual' ? (
         <AnnualAwardBuilder flatRows={flatRows} computedScenarios={computedScenarios} />
       ) : (

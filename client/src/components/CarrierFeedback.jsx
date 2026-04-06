@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback } from 'react';
-import { computeCarrierFeedback, computeCarrierFeedbackSummary } from '../services/analyticsEngine.js';
+import { computeCarrierFeedback, computeCarrierFeedbackSummary, getLowCostByReference, getLaneKey } from '../services/analyticsEngine.js';
 
 const TIER_COLORS = {
   'Top 10%':    'bg-green-100 text-green-800',
@@ -56,7 +56,14 @@ function minDeltaColor(pct) {
 }
 
 // ── Summary Comparison Table ────────────────────────────────
-function CarrierSummaryTable({ summary, onSelectCarrier }) {
+function fmtCompact$(v) {
+  const n = Number(v || 0);
+  if (Math.abs(n) >= 1e6) return '$' + (n / 1e6).toFixed(2) + 'M';
+  if (Math.abs(n) >= 1e3) return '$' + (n / 1e3).toFixed(1) + 'K';
+  return '$' + n.toFixed(0);
+}
+
+function CarrierSummaryTable({ summary, onSelectCarrier, awardContext }) {
   const [sortKey, setSortKey] = useState('winRate');
   const [sortAsc, setSortAsc] = useState(false);
 
@@ -143,10 +150,22 @@ function CarrierSummaryTable({ summary, onSelectCarrier }) {
                 <th className={`${thCls} text-right`} onClick={() => handleSort('winRate')}>
                   Win Rate{arrow('winRate')}
                 </th>
+                {awardContext && (
+                  <>
+                    <th className={`${thCls} text-right border-l-2 border-gray-300`} onClick={() => handleSort('awardedLanes')}>Award{arrow('awardedLanes')}</th>
+                    <th className={`${thCls} text-right`} onClick={() => handleSort('incumbentLanes')}>Historic{arrow('incumbentLanes')}</th>
+                    <th className={`${thCls} text-right`} onClick={() => handleSort('retainedLanes')}>Kept{arrow('retainedLanes')}</th>
+                    <th className={`${thCls} text-right`} onClick={() => handleSort('wonLanes')}>Won{arrow('wonLanes')}</th>
+                    <th className={`${thCls} text-right`} onClick={() => handleSort('lostLanes')}>Lost{arrow('lostLanes')}</th>
+                    <th className={`${thCls} text-right`} onClick={() => handleSort('awardSpend')}>Proj. Spend{arrow('awardSpend')}</th>
+                  </>
+                )}
               </tr>
             </thead>
             <tbody>
-              {sorted.map((r) => (
+              {sorted.map((r) => {
+                const ac = awardContext?.[r.scac];
+                return (
                 <tr key={r.scac}
                     className="border-b border-gray-100 hover:bg-blue-50/40 cursor-pointer"
                     onClick={() => onSelectCarrier(r.scac)}>
@@ -197,8 +216,18 @@ function CarrierSummaryTable({ summary, onSelectCarrier }) {
                   <td className={`py-2 px-2 text-right font-medium ${winRateColor(r.winRate)}`}>
                     {fmtPct(r.winRate)}
                   </td>
+                  {awardContext && (
+                    <>
+                      <td className="py-2 px-2 text-right font-medium border-l-2 border-gray-300 text-[#002144]">{ac?.awardedLanes || 0}</td>
+                      <td className="py-2 px-2 text-right text-gray-500">{ac?.incumbentLanes || 0}</td>
+                      <td className="py-2 px-2 text-right text-green-700">{ac?.retainedLanes || 0}</td>
+                      <td className={`py-2 px-2 text-right ${(ac?.wonLanes || 0) > 0 ? 'text-green-700 font-medium' : 'text-gray-400'}`}>{ac?.wonLanes || 0}</td>
+                      <td className={`py-2 px-2 text-right ${(ac?.lostLanes || 0) > 0 ? 'text-red-600 font-medium' : 'text-gray-400'}`}>{ac?.lostLanes || 0}</td>
+                      <td className="py-2 px-2 text-right font-medium text-[#002144]">{ac?.awardSpend > 0 ? fmtCompact$(ac.awardSpend) : '—'}</td>
+                    </>
+                  )}
                 </tr>
-              ))}
+              );})}
             </tbody>
           </table>
         </div>
@@ -208,7 +237,7 @@ function CarrierSummaryTable({ summary, onSelectCarrier }) {
 }
 
 // ── Main Component ──────────────────────────────────────────
-export default function CarrierFeedback({ flatRows }) {
+export default function CarrierFeedback({ flatRows, computedScenarios }) {
   // Get all unique SCACs
   const allSCACs = useMemo(() => {
     const scacs = new Set();
@@ -221,6 +250,150 @@ export default function CarrierFeedback({ flatRows }) {
   const [selectedSCAC, setSelectedSCAC] = useState(allSCACs[0] || '');
   const [sortKey, setSortKey] = useState('percentile');
   const [sortAsc, setSortAsc] = useState(false);
+  const [selectedScenarioId, setSelectedScenarioId] = useState('');
+
+  const availableScenarios = useMemo(() => {
+    if (!computedScenarios) return [];
+    return computedScenarios.filter(s => s.result && Object.keys(s.result.awards || {}).length > 0);
+  }, [computedScenarios]);
+
+  // Build award context: per-carrier won/lost/retained/spend
+  const awardContext = useMemo(() => {
+    // Determine winners per reference — from scenario or low-cost
+    let winnersByRef; // { ref: { scac, totalCharge } }
+    if (selectedScenarioId) {
+      const sc = computedScenarios?.find(s => s.id === selectedScenarioId);
+      const awards = sc?.result?.awards;
+      if (awards) {
+        winnersByRef = {};
+        for (const [ref, a] of Object.entries(awards)) {
+          winnersByRef[ref] = { scac: (a.scac || '').toUpperCase(), totalCharge: a.totalCharge || 0 };
+        }
+      }
+    }
+    if (!winnersByRef) {
+      const lowCost = getLowCostByReference(flatRows);
+      winnersByRef = {};
+      for (const [ref, row] of Object.entries(lowCost)) {
+        winnersByRef[ref] = { scac: (row.rate.carrierSCAC || '').toUpperCase(), totalCharge: row.rate.totalCharge || 0 };
+      }
+    }
+
+    // Determine historic carrier per reference
+    const historicByRef = {};
+    for (const r of flatRows) {
+      if (r.reference && r.historicCarrier && !historicByRef[r.reference]) {
+        historicByRef[r.reference] = String(r.historicCarrier).toUpperCase().trim();
+      }
+    }
+
+    // Build per-carrier stats
+    const ctx = {};
+    const ensure = (scac) => {
+      if (!ctx[scac]) ctx[scac] = { awardedLanes: 0, incumbentLanes: 0, retainedLanes: 0, wonLanes: 0, lostLanes: 0, awardSpend: 0 };
+      return ctx[scac];
+    };
+
+    // Track unique lanes (state→state) per carrier
+    const awardedLaneKeys = {}; // scac -> Set of laneKeys
+    const incumbentLaneKeys = {}; // scac -> Set of laneKeys
+
+    for (const [ref, winner] of Object.entries(winnersByRef)) {
+      const awardScac = winner.scac;
+      const histScac = historicByRef[ref] || null;
+
+      // Find laneKey for this reference
+      const row = flatRows.find(r => r.reference === ref);
+      const laneKey = row ? getLaneKey(row) : ref;
+
+      // Track awarded
+      if (!awardedLaneKeys[awardScac]) awardedLaneKeys[awardScac] = new Set();
+      awardedLaneKeys[awardScac].add(laneKey);
+
+      const a = ensure(awardScac);
+      a.awardSpend += winner.totalCharge;
+
+      // Track incumbent
+      if (histScac) {
+        if (!incumbentLaneKeys[histScac]) incumbentLaneKeys[histScac] = new Set();
+        incumbentLaneKeys[histScac].add(laneKey);
+      }
+    }
+
+    // Now compute lane-level counts
+    const allScacs = new Set([...Object.keys(awardedLaneKeys), ...Object.keys(incumbentLaneKeys)]);
+    for (const scac of allScacs) {
+      const c = ensure(scac);
+      const awarded = awardedLaneKeys[scac] || new Set();
+      const incumbent = incumbentLaneKeys[scac] || new Set();
+      c.awardedLanes = awarded.size;
+      c.incumbentLanes = incumbent.size;
+      for (const lk of incumbent) {
+        if (awarded.has(lk)) c.retainedLanes++;
+        else c.lostLanes++;
+      }
+      for (const lk of awarded) {
+        if (!incumbent.has(lk)) c.wonLanes++;
+      }
+    }
+
+    return ctx;
+  }, [flatRows, computedScenarios, selectedScenarioId]);
+
+  // Per-lane award status for the selected carrier's drill-down
+  const laneAwardStatus = useMemo(() => {
+    if (!selectedSCAC || !awardContext) return {};
+    const ac = awardContext[selectedSCAC];
+    if (!ac) return {};
+
+    // Determine winners per reference
+    let winnersByRef;
+    if (selectedScenarioId) {
+      const sc = computedScenarios?.find(s => s.id === selectedScenarioId);
+      const awards = sc?.result?.awards;
+      if (awards) {
+        winnersByRef = {};
+        for (const [ref, a] of Object.entries(awards)) {
+          winnersByRef[ref] = (a.scac || '').toUpperCase();
+        }
+      }
+    }
+    if (!winnersByRef) {
+      const lowCost = getLowCostByReference(flatRows);
+      winnersByRef = {};
+      for (const [ref, row] of Object.entries(lowCost)) {
+        winnersByRef[ref] = (row.rate.carrierSCAC || '').toUpperCase();
+      }
+    }
+
+    // Historic by reference
+    const historicByRef = {};
+    for (const r of flatRows) {
+      if (r.reference && r.historicCarrier && !historicByRef[r.reference]) {
+        historicByRef[r.reference] = String(r.historicCarrier).toUpperCase().trim();
+      }
+    }
+
+    // Per-lane status for this carrier
+    const laneStat = {}; // laneKey -> 'awarded' | 'lost' | 'retained' | 'won'
+    for (const [ref, winnerScac] of Object.entries(winnersByRef)) {
+      const histScac = historicByRef[ref] || null;
+      const row = flatRows.find(r => r.reference === ref);
+      const laneKey = row ? getLaneKey(row) : ref;
+
+      if (winnerScac === selectedSCAC) {
+        if (histScac === selectedSCAC) {
+          laneStat[laneKey] = laneStat[laneKey] || 'retained';
+        } else {
+          laneStat[laneKey] = 'won';
+        }
+      } else if (histScac === selectedSCAC) {
+        if (!laneStat[laneKey]) laneStat[laneKey] = 'lost';
+      }
+    }
+
+    return laneStat;
+  }, [flatRows, selectedSCAC, computedScenarios, selectedScenarioId]);
 
   const summary = useMemo(() => computeCarrierFeedbackSummary(flatRows), [flatRows]);
 
@@ -264,17 +437,30 @@ export default function CarrierFeedback({ flatRows }) {
     lines.push(`Min Floor Rate: ${feedback.totalMinCount} of ${feedback.totalShipments} shipments (${feedback.minFloorRate}%)`);
     lines.push('');
 
+    // Award summary
+    const ac = awardContext[feedback.scac];
+    if (ac) {
+      lines.push(`Award Basis: ${selectedScenarioId ? availableScenarios.find(s => s.id === selectedScenarioId)?.name : 'Low-Cost Winners'}`);
+      lines.push(`Awarded Lanes: ${ac.awardedLanes}`);
+      lines.push(`Retained: ${ac.retainedLanes}  Won: ${ac.wonLanes}  Lost: ${ac.lostLanes}`);
+      lines.push(`Proj. Spend: ${fmtCompact$(ac.awardSpend)}`);
+      lines.push('');
+    }
+
     // Column headers
     lines.push([
-      'Lane', '# Shipments', 'Avg Weight (lbs)', 'Avg Discount %', 'Min Count',
+      'Lane', 'Award Status', '# Shipments', 'Avg Weight (lbs)', 'Avg Discount %', 'Min Count',
       'Your Avg Rate ($)', 'Low Cost ($)', '$ vs Best', '% vs Best',
       'Percentile Rank', 'Tier', 'Status'
     ].map(escCsv).join(','));
 
     // Data rows
     for (const l of feedback.lanes) {
+      const aStatus = laneAwardStatus[l.laneKey] || '';
       lines.push([
-        l.laneKey, l.shipments, l.avgWeight,
+        l.laneKey,
+        aStatus ? aStatus.charAt(0).toUpperCase() + aStatus.slice(1) : '',
+        l.shipments, l.avgWeight,
         l.avgDiscount != null ? `${l.avgDiscount}%` : '',
         l.minCount || '',
         l.theirRate, l.bestRate,
@@ -326,6 +512,22 @@ export default function CarrierFeedback({ flatRows }) {
           </select>
         </label>
 
+        {availableScenarios.length > 0 && (
+          <label className="flex items-center gap-2 text-xs">
+            <span className="text-gray-500">Award Basis:</span>
+            <select
+              value={selectedScenarioId}
+              onChange={(e) => setSelectedScenarioId(e.target.value)}
+              className="border border-gray-300 rounded px-2 py-1.5 text-sm font-medium"
+            >
+              <option value="">Low-Cost Winners</option>
+              {availableScenarios.map(s => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+          </label>
+        )}
+
         <div className="flex-1" />
 
         <button
@@ -340,7 +542,7 @@ export default function CarrierFeedback({ flatRows }) {
 
       <div className="p-4 space-y-4">
         {/* Multi-carrier comparison table */}
-        <CarrierSummaryTable summary={summary} onSelectCarrier={setSelectedSCAC} />
+        <CarrierSummaryTable summary={summary} onSelectCarrier={setSelectedSCAC} awardContext={awardContext} />
 
         {/* Single-carrier drill-down */}
         {feedback && (
@@ -402,6 +604,61 @@ export default function CarrierFeedback({ flatRows }) {
               </div>
             </div>
 
+            {/* Award Summary Card */}
+            {awardContext[selectedSCAC] && (() => {
+              const ac = awardContext[selectedSCAC];
+              const netChange = ac.awardedLanes - ac.incumbentLanes;
+              return (
+                <div className="bg-white border border-gray-200 rounded-lg p-4">
+                  <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">
+                    Expected Award — {feedback.scac}
+                    <span className="ml-2 font-normal text-gray-400">
+                      ({selectedScenarioId ? availableScenarios.find(s => s.id === selectedScenarioId)?.name : 'Low-Cost Winners'})
+                    </span>
+                  </h4>
+                  <div className="flex gap-4 flex-wrap text-sm">
+                    <div className="bg-[#002144]/5 rounded-lg px-3 py-2 text-center min-w-[80px]">
+                      <div className="text-[10px] text-gray-400 uppercase">Awarded</div>
+                      <div className="font-bold text-[#002144] text-lg">{ac.awardedLanes}</div>
+                      <div className="text-[10px] text-gray-400">lanes</div>
+                    </div>
+                    <div className="bg-[#002144]/5 rounded-lg px-3 py-2 text-center min-w-[80px]">
+                      <div className="text-[10px] text-gray-400 uppercase">Proj. Spend</div>
+                      <div className="font-bold text-[#002144] text-lg">{fmtCompact$(ac.awardSpend)}</div>
+                      <div className="text-[10px] text-gray-400">annual est.</div>
+                    </div>
+                    <div className="rounded-lg px-3 py-2 text-center min-w-[80px] bg-green-50">
+                      <div className="text-[10px] text-green-600 uppercase">Retained</div>
+                      <div className="font-bold text-green-700 text-lg">{ac.retainedLanes}</div>
+                      <div className="text-[10px] text-green-500">kept from historic</div>
+                    </div>
+                    <div className="rounded-lg px-3 py-2 text-center min-w-[80px] bg-blue-50">
+                      <div className="text-[10px] text-blue-600 uppercase">Won</div>
+                      <div className="font-bold text-blue-700 text-lg">{ac.wonLanes}</div>
+                      <div className="text-[10px] text-blue-500">new freight</div>
+                    </div>
+                    <div className={`rounded-lg px-3 py-2 text-center min-w-[80px] ${ac.lostLanes > 0 ? 'bg-red-50' : 'bg-gray-50'}`}>
+                      <div className={`text-[10px] uppercase ${ac.lostLanes > 0 ? 'text-red-600' : 'text-gray-400'}`}>Lost</div>
+                      <div className={`font-bold text-lg ${ac.lostLanes > 0 ? 'text-red-600' : 'text-gray-400'}`}>{ac.lostLanes}</div>
+                      <div className={`text-[10px] ${ac.lostLanes > 0 ? 'text-red-400' : 'text-gray-300'}`}>historic freight</div>
+                    </div>
+                    <div className="rounded-lg px-3 py-2 text-center min-w-[80px] bg-gray-50">
+                      <div className="text-[10px] text-gray-400 uppercase">Incumbent</div>
+                      <div className="font-bold text-gray-600 text-lg">{ac.incumbentLanes}</div>
+                      <div className="text-[10px] text-gray-400">historic lanes</div>
+                    </div>
+                    <div className="rounded-lg px-3 py-2 text-center min-w-[80px] bg-gray-50">
+                      <div className="text-[10px] text-gray-400 uppercase">Net Change</div>
+                      <div className={`font-bold text-lg ${netChange > 0 ? 'text-green-700' : netChange < 0 ? 'text-red-600' : 'text-gray-500'}`}>
+                        {netChange > 0 ? '+' : ''}{netChange}
+                      </div>
+                      <div className="text-[10px] text-gray-400">lanes</div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
             {/* Lane table */}
             <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
               <div className="bg-[#002144] text-white px-4 py-2"
@@ -442,9 +699,22 @@ export default function CarrierFeedback({ flatRows }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {sortedLanes.map((l) => (
-                      <tr key={l.laneKey} className="border-b border-gray-100 hover:bg-gray-50/50">
-                        <td className="py-2 px-3 font-mono text-[#002144]">{l.laneKey}</td>
+                    {sortedLanes.map((l) => {
+                      const awardStatus = laneAwardStatus[l.laneKey];
+                      const rowBg = awardStatus === 'won' ? 'bg-blue-50/60'
+                        : awardStatus === 'lost' ? 'bg-red-50/60'
+                        : awardStatus === 'retained' ? 'bg-green-50/40'
+                        : '';
+                      return (
+                      <tr key={l.laneKey} className={`border-b border-gray-100 hover:bg-gray-50/50 ${rowBg}`}>
+                        <td className="py-2 px-3 font-mono text-[#002144]">
+                          <span className="flex items-center gap-1.5">
+                            {awardStatus === 'won' && <span className="inline-block w-2 h-2 rounded-full bg-blue-500 flex-shrink-0" title="Won — new freight" />}
+                            {awardStatus === 'lost' && <span className="inline-block w-2 h-2 rounded-full bg-red-500 flex-shrink-0" title="Lost — historic freight displaced" />}
+                            {awardStatus === 'retained' && <span className="inline-block w-2 h-2 rounded-full bg-green-500 flex-shrink-0" title="Retained — kept historic freight" />}
+                            {l.laneKey}
+                          </span>
+                        </td>
                         <td className="py-2 px-3 text-right">{l.shipments}</td>
                         {/* Discount stoplight — non-min shipments only */}
                         <td className="py-2 px-3 text-right">
@@ -485,7 +755,8 @@ export default function CarrierFeedback({ flatRows }) {
                           </span>
                         </td>
                       </tr>
-                    ))}
+                    );
+                    })}
                   </tbody>
                 </table>
               </div>

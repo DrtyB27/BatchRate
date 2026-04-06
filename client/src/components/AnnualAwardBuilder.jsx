@@ -32,11 +32,29 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
   const detected = useMemo(() => detectSampleWeeks(flatRows), [flatRows]);
   const [weeksOverride, setWeeksOverride] = useState('');
   const [selectedScenarioId, setSelectedScenarioId] = useState('');
-  const [viewLevel, setViewLevel] = useState('carrier'); // 'carrier' | 'lane'
+  const [viewLevel, setViewLevel] = useState('carrier'); // 'carrier' | 'lane' | 'customer'
   const [showSankey, setShowSankey] = useState(true);
+  const [selectedOrigins, setSelectedOrigins] = useState([]); // origState[] filter
+  const [originDropdownOpen, setOriginDropdownOpen] = useState(false);
 
   const sampleWeeks = weeksOverride !== '' ? Math.max(1, parseInt(weeksOverride, 10) || 1) : detected.weeks;
   const annualizationFactor = 52 / Math.max(1, sampleWeeks);
+
+  // Collect all unique origin states for the filter dropdown
+  const allOriginStates = useMemo(() => {
+    const states = new Set();
+    for (const r of flatRows) {
+      if (r.origState) states.add(r.origState);
+    }
+    return [...states].sort();
+  }, [flatRows]);
+
+  // Filter flatRows by selected origins (empty = all)
+  const filteredFlatRows = useMemo(() => {
+    if (selectedOrigins.length === 0) return flatRows;
+    const allowed = new Set(selectedOrigins);
+    return flatRows.filter(r => allowed.has(r.origState));
+  }, [flatRows, selectedOrigins]);
 
   const scenarioAwards = useMemo(() => {
     if (!selectedScenarioId || !computedScenarios) return null;
@@ -45,8 +63,8 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
   }, [selectedScenarioId, computedScenarios]);
 
   const result = useMemo(
-    () => computeAnnualAward(flatRows, scenarioAwards, sampleWeeks),
-    [flatRows, scenarioAwards, sampleWeeks]
+    () => computeAnnualAward(filteredFlatRows, scenarioAwards, sampleWeeks),
+    [filteredFlatRows, scenarioAwards, sampleWeeks]
   );
 
   const { lanes, carriers, totals } = result;
@@ -65,6 +83,36 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
     if (!computedScenarios) return [];
     return computedScenarios.filter(s => s.result && Object.keys(s.result.awards || {}).length > 0);
   }, [computedScenarios]);
+
+  // Customer view: group lanes by origin state, show carrier shifts
+  const customerLanes = useMemo(() => {
+    return lanes.map(l => {
+      const isShift = l.historicCarrier && l.historicCarrier !== l.carrierSCAC;
+      const isNew = !l.historicCarrier;
+      return { ...l, isShift, isNew };
+    }).sort((a, b) => {
+      // Sort: shifts first, then by origin state, then by spend
+      if (a.isShift !== b.isShift) return a.isShift ? -1 : 1;
+      if (a.origState !== b.origState) return (a.origState || '').localeCompare(b.origState || '');
+      return b.annualSpend - a.annualSpend;
+    });
+  }, [lanes]);
+
+  const customerSummary = useMemo(() => {
+    const totalLanes = customerLanes.length;
+    const shiftLanes = customerLanes.filter(l => l.isShift).length;
+    const retainedLanes = customerLanes.filter(l => l.historicCarrier && !l.isShift).length;
+    const newLanes = customerLanes.filter(l => l.isNew).length;
+    const shiftSpend = customerLanes.filter(l => l.isShift).reduce((s, l) => s + l.annualSpend, 0);
+    const totalSpend = customerLanes.reduce((s, l) => s + l.annualSpend, 0);
+    return { totalLanes, shiftLanes, retainedLanes, newLanes, shiftSpend, totalSpend };
+  }, [customerLanes]);
+
+  const toggleOrigin = (st) => {
+    setSelectedOrigins(prev =>
+      prev.includes(st) ? prev.filter(s => s !== st) : [...prev, st]
+    );
+  };
 
   // CSV export
   const handleExportCsv = () => {
@@ -100,13 +148,41 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
       c.incumbentLanes, c.netLaneChange, c.retainedLanes, c.wonLanes, c.lostLanes,
     ].map(escCsv));
 
+    // Customer view section
+    const custHeaders = [
+      'Status', 'Lane', 'Origin Zips', 'Previous Carrier', 'New Carrier SCAC', 'New Carrier Name',
+      'Annual Shipments', 'Annual Spend', 'Savings ($)', 'Savings (%)',
+    ];
+    const custRows = customerLanes.map(l => [
+      l.isShift ? 'CHANGE' : l.isNew ? 'NEW' : 'RETAINED',
+      l.laneKey,
+      (l.origPostals || []).join('; '),
+      l.historicCarrier || '',
+      l.carrierSCAC,
+      l.carrierName,
+      l.annualShipments,
+      l.annualSpend.toFixed(2),
+      l.annualHistoric > 0 ? l.delta.toFixed(2) : '',
+      l.annualHistoric > 0 ? l.deltaPct.toFixed(1) : '',
+    ].map(escCsv));
+
+    const filterNote = selectedOrigins.length > 0
+      ? `Origin Filter: ${selectedOrigins.join(', ')}`
+      : 'Origin Filter: All';
+
     const csv = [
+      filterNote,
+      '',
       headers.join(','),
       ...rows.map(r => r.join(',')),
       '',
       'Carrier Summary',
       summaryHeaders.join(','),
       ...summaryRows.map(r => r.join(',')),
+      '',
+      'Customer View - Carrier Shifts',
+      custHeaders.join(','),
+      ...custRows.map(r => r.join(',')),
       '',
       'Note: Sankey flow diagram is not included in CSV export.',
     ].join('\n');
@@ -185,20 +261,68 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
           <div>
             <label className="block text-xs font-medium text-gray-600 mb-1">View</label>
             <div className="flex gap-1">
-              <button
-                className={`px-2 py-1 text-xs rounded ${viewLevel === 'carrier' ? 'bg-[#39b6e6] text-white' : 'bg-gray-200 text-gray-700'}`}
-                onClick={() => setViewLevel('carrier')}
-              >
-                By Carrier
-              </button>
-              <button
-                className={`px-2 py-1 text-xs rounded ${viewLevel === 'lane' ? 'bg-[#39b6e6] text-white' : 'bg-gray-200 text-gray-700'}`}
-                onClick={() => setViewLevel('lane')}
-              >
-                By Lane
-              </button>
+              {[
+                { key: 'carrier', label: 'By Carrier' },
+                { key: 'lane', label: 'By Lane' },
+                { key: 'customer', label: 'Customer View' },
+              ].map(v => (
+                <button
+                  key={v.key}
+                  className={`px-2 py-1 text-xs rounded ${viewLevel === v.key ? 'bg-[#39b6e6] text-white' : 'bg-gray-200 text-gray-700'}`}
+                  onClick={() => setViewLevel(v.key)}
+                >
+                  {v.label}
+                </button>
+              ))}
             </div>
           </div>
+
+          {/* Origin filter */}
+          <div className="relative">
+            <label className="block text-xs font-medium text-gray-600 mb-1">Filter by Origin</label>
+            <button
+              onClick={() => setOriginDropdownOpen(v => !v)}
+              className="px-2 py-1 text-sm border border-gray-300 rounded flex items-center gap-1 min-w-[140px]"
+            >
+              <span className="truncate">
+                {selectedOrigins.length === 0
+                  ? 'All Origins'
+                  : selectedOrigins.length <= 3
+                    ? selectedOrigins.join(', ')
+                    : `${selectedOrigins.length} states`}
+              </span>
+              <svg className="w-3 h-3 text-gray-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+            {originDropdownOpen && (
+              <div className="absolute z-50 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-60 overflow-y-auto w-48">
+                <div className="sticky top-0 bg-white border-b px-2 py-1.5 flex justify-between">
+                  <button onClick={() => setSelectedOrigins([])} className="text-xs text-[#39b6e6] hover:underline">Clear All</button>
+                  <button onClick={() => setOriginDropdownOpen(false)} className="text-xs text-gray-400 hover:text-gray-600">Done</button>
+                </div>
+                {allOriginStates.map(st => (
+                  <label key={st} className="flex items-center gap-2 px-2 py-1 hover:bg-gray-50 cursor-pointer text-sm">
+                    <input
+                      type="checkbox"
+                      checked={selectedOrigins.includes(st)}
+                      onChange={() => toggleOrigin(st)}
+                      className="rounded border-gray-300"
+                    />
+                    {st}
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+          {selectedOrigins.length > 0 && (
+            <div className="flex items-center gap-1">
+              <span className="text-xs bg-[#39b6e6]/10 text-[#002144] px-2 py-0.5 rounded-full font-medium">
+                Filtered: {selectedOrigins.length} origin{selectedOrigins.length !== 1 ? 's' : ''}
+              </span>
+              <button onClick={() => setSelectedOrigins([])} className="text-xs text-gray-400 hover:text-red-500">✕</button>
+            </div>
+          )}
 
           <div className="text-xs text-gray-500">
             Annualization factor: <strong>{annualizationFactor.toFixed(1)}x</strong> ({sampleWeeks} wk &rarr; 52 wk)
@@ -236,6 +360,25 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
             ].map((kpi, i) => (
               <div key={i} className="bg-white rounded-lg border border-gray-200 p-3">
                 <p className="text-xs text-gray-500">{kpi.label}</p>
+                <p className={`text-lg font-bold ${kpi.color || 'text-[#002144]'}`}>{kpi.value}</p>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Customer View KPIs */}
+        {viewLevel === 'customer' && (
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            {[
+              { label: 'Total Lanes', value: customerSummary.totalLanes },
+              { label: 'Carrier Changes', value: customerSummary.shiftLanes, color: customerSummary.shiftLanes > 0 ? 'text-amber-600' : 'text-gray-700' },
+              { label: 'Retained', value: customerSummary.retainedLanes, color: 'text-green-700' },
+              { label: 'New (No History)', value: customerSummary.newLanes, color: 'text-blue-600' },
+              { label: 'Change Spend Impact', value: fmtCompact$(customerSummary.shiftSpend), sublabel: `${(customerSummary.totalSpend > 0 ? (customerSummary.shiftSpend / customerSummary.totalSpend * 100) : 0).toFixed(0)}% of total` },
+            ].map((kpi, i) => (
+              <div key={i} className="bg-white rounded-lg border border-gray-200 p-3">
+                <p className="text-xs text-gray-500">{kpi.label}</p>
+                {kpi.sublabel && <p className="text-[10px] text-gray-400">{kpi.sublabel}</p>}
                 <p className={`text-lg font-bold ${kpi.color || 'text-[#002144]'}`}>{kpi.value}</p>
               </div>
             ))}
@@ -344,7 +487,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
                   </tr>
                 </tfoot>
               </table>
-            ) : (
+            ) : viewLevel === 'lane' ? (
               <table className="w-full text-sm">
                 <thead>
                   <tr className="bg-gray-50 border-b text-left text-xs font-medium text-gray-500 uppercase">
@@ -398,6 +541,104 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios }) {
                     <td className="px-4 py-2 text-right">{totals.annualHistoric > 0 ? fmt$(totals.annualHistoric) : '—'}</td>
                     <td className={`px-4 py-2 text-right ${deltaColor(totals.delta)}`}>{totals.annualHistoric > 0 ? fmt$(totals.delta) : '—'}</td>
                     <td className={`px-4 py-2 text-right ${deltaColor(totals.deltaPct)}`}>{totals.annualHistoric > 0 ? fmtPct(totals.deltaPct) : '—'}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            ) : (
+              /* Customer View — operations-focused carrier shift table */
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-gray-50 border-b text-left text-xs font-medium text-gray-500 uppercase">
+                    <th className="px-3 py-2 w-8">Status</th>
+                    <th className="px-3 py-2">Lane</th>
+                    <th className="px-3 py-2">Origin Zips</th>
+                    <th className="px-3 py-2 text-center">Previous Carrier</th>
+                    <th className="px-3 py-2 text-center"></th>
+                    <th className="px-3 py-2 text-center">New Carrier</th>
+                    <th className="px-3 py-2 text-right">Ann. Shipments</th>
+                    <th className="px-3 py-2 text-right">Ann. Spend</th>
+                    <th className="px-3 py-2 text-right">Savings</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {customerLanes.map((l, i) => {
+                    const statusBg = l.isShift ? 'bg-amber-50' : l.isNew ? 'bg-blue-50/50' : '';
+                    const stripeBg = i % 2 === 0 ? 'bg-white' : 'bg-gray-50';
+                    return (
+                      <tr key={`${l.laneKey}-${l.carrierSCAC}`} className={l.isShift ? statusBg : stripeBg}>
+                        <td className="px-3 py-2 text-center">
+                          {l.isShift ? (
+                            <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-amber-100 text-amber-700 text-xs font-bold" title="Carrier change">
+                              &Delta;
+                            </span>
+                          ) : l.isNew ? (
+                            <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-blue-100 text-blue-600 text-xs font-bold" title="New lane (no history)">
+                              +
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-green-100 text-green-700 text-xs" title="No change">
+                              =
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2 font-medium text-[#002144]">{l.laneKey}</td>
+                        <td className="px-3 py-2 text-xs text-gray-500 font-mono">
+                          {(l.origPostals || []).slice(0, 3).join(', ')}
+                          {(l.origPostals || []).length > 3 && (
+                            <span className="text-gray-400" title={l.origPostals.join(', ')}> +{l.origPostals.length - 3}</span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2 text-center">
+                          {l.historicCarrier ? (
+                            <span className={`inline-block px-2 py-0.5 rounded text-xs font-mono font-medium ${l.isShift ? 'bg-red-100 text-red-700 line-through' : 'bg-green-100 text-green-700'}`}>
+                              {l.historicCarrier}
+                            </span>
+                          ) : (
+                            <span className="text-gray-300 text-xs">none</span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2 text-center text-gray-300">
+                          {l.isShift ? (
+                            <svg className="w-4 h-4 mx-auto text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                            </svg>
+                          ) : l.isNew ? (
+                            <svg className="w-4 h-4 mx-auto text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                            </svg>
+                          ) : (
+                            <span className="text-xs">=</span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2 text-center">
+                          <span className={`inline-block px-2 py-0.5 rounded text-xs font-mono font-medium ${l.isShift ? 'bg-amber-100 text-amber-800 font-bold' : 'bg-gray-100 text-gray-700'}`}>
+                            {l.carrierSCAC}
+                          </span>
+                          <span className="block text-[10px] text-gray-400 mt-0.5">{l.carrierName}</span>
+                        </td>
+                        <td className="px-3 py-2 text-right">{fmtNum(l.annualShipments)}</td>
+                        <td className="px-3 py-2 text-right font-medium">{fmtCompact$(l.annualSpend)}</td>
+                        <td className={`px-3 py-2 text-right font-medium ${l.annualHistoric > 0 ? deltaColor(l.delta) : 'text-gray-400'}`}>
+                          {l.annualHistoric > 0 ? `${fmtCompact$(l.delta)} (${fmtPct(l.deltaPct)})` : '—'}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+                <tfoot>
+                  <tr className="bg-[#002144]/5 font-bold border-t">
+                    <td className="px-3 py-2" colSpan={2}>
+                      {customerSummary.totalLanes} lanes
+                      <span className="font-normal text-gray-500 ml-1">
+                        ({customerSummary.shiftLanes} change{customerSummary.shiftLanes !== 1 ? 's' : ''}, {customerSummary.retainedLanes} retained)
+                      </span>
+                    </td>
+                    <td colSpan={4}></td>
+                    <td className="px-3 py-2 text-right">{fmtNum(totals.annualShipments)}</td>
+                    <td className="px-3 py-2 text-right">{fmtCompact$(totals.annualSpend)}</td>
+                    <td className={`px-3 py-2 text-right ${totals.annualHistoric > 0 ? deltaColor(totals.delta) : ''}`}>
+                      {totals.annualHistoric > 0 ? `${fmtCompact$(totals.delta)} (${fmtPct(totals.deltaPct)})` : '—'}
+                    </td>
                   </tr>
                 </tfoot>
               </table>

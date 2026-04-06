@@ -1469,6 +1469,9 @@ export function computeAnnualAward(flatRows, scenarioAwards, sampleWeeks) {
     if (!laneCarrierMap[groupKey]) {
       laneCarrierMap[groupKey] = {
         laneKey,
+        origState: row.origState || '',
+        destState: row.destState || '',
+        origPostals: new Set(),
         carrierSCAC: scac,
         carrierName: row.rate.carrierName || '',
         shipments: 0,
@@ -1480,6 +1483,7 @@ export function computeAnnualAward(flatRows, scenarioAwards, sampleWeeks) {
     const g = laneCarrierMap[groupKey];
     g.shipments++;
     g.sampleSpend += row.rate.totalCharge ?? 0;
+    if (row.origPostal) g.origPostals.add(row.origPostal);
     const hc = row.historicCarrier ? String(row.historicCarrier).toUpperCase().trim() : null;
     const hCost = row.historicCost ? parseFloat(row.historicCost) || 0 : 0;
     if (hCost > 0) {
@@ -1518,6 +1522,9 @@ export function computeAnnualAward(flatRows, scenarioAwards, sampleWeeks) {
 
     return {
       laneKey: g.laneKey,
+      origState: g.origState,
+      destState: g.destState,
+      origPostals: [...g.origPostals],
       shipments: g.shipments,
       annualShipments,
       sampleSpend: g.sampleSpend,

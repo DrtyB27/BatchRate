@@ -1795,3 +1795,76 @@ export function computeSankeyData(lanes, annualizationFactor) {
 
   return { nodes, links, totalFlow };
 }
+
+/**
+ * Compute carrier mix broken down by origin state.
+ * For each origin, shows which carriers were awarded and their spend share.
+ *
+ * @param {Array} lanes - lanes array from computeAnnualAward (each has laneKey, carrierSCAC, carrierName, annualSpend, historicTotalAnnSpend, annualHistoric)
+ * @param {Array} flatRows - flat rows for origin lookup (not strictly needed since origState is in laneKey)
+ * @returns {{ origins: Array }}
+ */
+export function computeCarrierMixByOrigin(lanes, flatRows) {
+  const originMap = {}; // origState -> { totalLanes, assignedLanes, totalProjectedSpend, totalHistoricSpend, carrierMap }
+
+  for (const lane of lanes) {
+    const parts = lane.laneKey.split(' → ');
+    const origState = parts[0] || 'UNK';
+    const isAssigned = !!lane.carrierSCAC;
+
+    if (!originMap[origState]) {
+      originMap[origState] = {
+        origin: origState,
+        totalLanes: 0,
+        assignedLanes: 0,
+        totalProjectedSpend: 0,
+        totalHistoricSpend: 0,
+        carrierMap: {},
+      };
+    }
+
+    const o = originMap[origState];
+    o.totalLanes++;
+    if (isAssigned) {
+      o.assignedLanes++;
+      o.totalProjectedSpend += lane.annualSpend || 0;
+      o.totalHistoricSpend += lane.historicTotalAnnSpend || lane.annualHistoric || 0;
+
+      const scac = lane.carrierSCAC;
+      if (!o.carrierMap[scac]) {
+        o.carrierMap[scac] = {
+          scac,
+          carrierName: lane.carrierName || scac,
+          lanes: 0,
+          projectedSpend: 0,
+        };
+      }
+      o.carrierMap[scac].lanes++;
+      o.carrierMap[scac].projectedSpend += lane.annualSpend || 0;
+    }
+  }
+
+  const origins = Object.values(originMap).map(o => {
+    const carriers = Object.values(o.carrierMap)
+      .map(c => ({
+        ...c,
+        pctOfOriginSpend: o.totalProjectedSpend > 0
+          ? (c.projectedSpend / o.totalProjectedSpend) * 100
+          : 0,
+      }))
+      .sort((a, b) => b.projectedSpend - a.projectedSpend);
+
+    return {
+      origin: o.origin,
+      totalLanes: o.totalLanes,
+      assignedLanes: o.assignedLanes,
+      totalProjectedSpend: o.totalProjectedSpend,
+      totalHistoricSpend: o.totalHistoricSpend,
+      carriers,
+    };
+  });
+
+  origins.sort((a, b) => b.totalProjectedSpend - a.totalProjectedSpend);
+
+  return { origins };
+}

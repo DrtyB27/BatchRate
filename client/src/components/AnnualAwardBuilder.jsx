@@ -1,8 +1,9 @@
-import React, { useState, useMemo } from 'react';
-import { computeAnnualAward, computeCarrierSummary, computeSankeyData, getLaneKey } from '../services/analyticsEngine.js';
+import React, { useState, useMemo, useRef, useCallback } from 'react';
+import { computeAnnualAward, computeCarrierSummary, computeSankeyData, computeCarrierMixByOrigin, getLaneKey } from '../services/analyticsEngine.js';
 import { generateAnnualAwardPdf, downloadBlob } from '../services/pdfExport.js';
 import { applyMargin } from '../services/ratingClient.js';
 import CarrierSankey from './CarrierSankey.jsx';
+import { openAwardSharePdf } from './AwardSharePdf.js';
 
 function fmt$(v) {
   return '$' + Number(v || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -38,6 +39,8 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
   const [originDropdownOpen, setOriginDropdownOpen] = useState(false);
   const [customerShareMode, setCustomerShareMode] = useState(false); // hides internal views
   const [awardBasis, setAwardBasis] = useState('cost'); // 'cost' | 'customerPrice'
+  const [customerName, setCustomerName] = useState('');
+  const sankeyRef = useRef(null);
 
   const annualizationFactor = 52 / Math.max(1, sampleWeeks);
 
@@ -132,6 +135,11 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
   const sankeyData = useMemo(
     () => computeSankeyData(lanes, annualizationFactor),
     [lanes, annualizationFactor]
+  );
+
+  const originMix = useMemo(
+    () => computeCarrierMixByOrigin(lanes, filteredFlatRows),
+    [lanes, filteredFlatRows]
   );
 
   const availableScenarios = useMemo(() => {
@@ -287,6 +295,21 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
     handleExportCsv();
   };
 
+  const handleSharePdf = useCallback(() => {
+    const sankeyHtml = sankeyRef.current?.innerHTML || '';
+    const distinctCarriers = new Set(carrierSummary.filter(c => c.awardedLanes > 0).map(c => c.scac));
+    openAwardSharePdf({
+      sankeyHtml,
+      carrierSummary: { carriers: carrierSummary, totals: csTotals },
+      originMix,
+      sampleWeeks,
+      annualizationFactor,
+      totals: csTotals,
+      customerName,
+      carrierCount: distinctCarriers.size,
+    });
+  }, [carrierSummary, csTotals, originMix, sampleWeeks, annualizationFactor, customerName]);
+
   const deltaColor = (v) => v < 0 ? 'text-green-700' : v > 0 ? 'text-red-600' : 'text-gray-700';
   const netLaneColor = (v) => v > 0 ? 'text-green-700' : v < 0 ? 'text-red-600' : 'text-gray-500';
   const netLanePrefix = (v) => v > 0 ? '+' + v : String(v);
@@ -314,6 +337,23 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
               title="Toggle customer-facing view — hides internal controls"
             >
               {customerShareMode ? 'Exit Share Mode' : 'Customer Share'}
+            </button>
+            {csTotals.awardedLanes > 0 && (
+              <input
+                type="text"
+                placeholder="Customer name (for PDF)"
+                value={customerName}
+                onChange={e => setCustomerName(e.target.value)}
+                className="text-xs border border-gray-300 rounded px-2 py-1.5 w-40"
+              />
+            )}
+            <button
+              onClick={handleSharePdf}
+              disabled={csTotals.awardedLanes === 0}
+              className="text-xs bg-[#002144] hover:bg-[#003366] disabled:bg-gray-300 text-white px-3 py-1.5 rounded font-medium"
+              style={{ fontFamily: "'Montserrat', Arial, sans-serif" }}
+            >
+              Share PDF
             </button>
             <button
               onClick={handleExportWithPdf}
@@ -570,7 +610,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
             </button>
             {showSankey && (
               <div className="border-t border-gray-200 p-4">
-                <CarrierSankey data={sankeyData} />
+                <CarrierSankey ref={sankeyRef} data={sankeyData} />
               </div>
             )}
           </div>

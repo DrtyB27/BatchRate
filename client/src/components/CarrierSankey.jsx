@@ -235,7 +235,7 @@ function computeLayout(data, width, height) {
   return { leftNodes, rightNodes, paths };
 }
 
-export default function CarrierSankey({ data, width: propWidth, height: propHeight }) {
+const CarrierSankey = React.forwardRef(function CarrierSankey({ data, width: propWidth, height: propHeight }, ref) {
   const [hoverLink, setHoverLink] = useState(null);
   const [hoverNode, setHoverNode] = useState(null);
   const [tooltip, setTooltip] = useState(null);
@@ -337,7 +337,7 @@ export default function CarrierSankey({ data, width: propWidth, height: propHeig
   const labelStyle = { fill: COLORS.navy, fontSize: 11, fontFamily: 'ui-monospace, monospace' };
 
   return (
-    <div className="relative" style={{ width: '100%' }}>
+    <div ref={ref} className="relative" style={{ width: '100%' }}>
       <svg
         width="100%"
         height={height}
@@ -448,4 +448,6 @@ export default function CarrierSankey({ data, width: propWidth, height: propHeig
       )}
     </div>
   );
-}
+});
+CarrierSankey.displayName = 'CarrierSankey';
+export default CarrierSankey;

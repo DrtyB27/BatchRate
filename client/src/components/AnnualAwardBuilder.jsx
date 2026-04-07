@@ -154,9 +154,11 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
         custSampleSpend = m.customerPrice * l.shipments;
         custAnnualSpend = custSampleSpend * (52 / Math.max(1, sampleWeeks));
       }
-      const custDelta = l.annualHistoric > 0 ? custAnnualSpend - l.annualHistoric : 0;
-      const custDeltaPct = l.annualHistoric > 0 ? (custDelta / l.annualHistoric) * 100 : 0;
-      return { ...l, isShift, isNew, custAnnualSpend, custSampleSpend, custDelta, custDeltaPct };
+      // Compare customer price against what was actually being paid on this lane
+      const histBasis = l.historicTotalAnnSpend || l.annualHistoric || 0;
+      const custDelta = histBasis > 0 ? custAnnualSpend - histBasis : 0;
+      const custDeltaPct = histBasis > 0 ? (custDelta / histBasis) * 100 : 0;
+      return { ...l, isShift, isNew, custAnnualSpend, custSampleSpend, custDelta, custDeltaPct, custHistBasis: histBasis };
     }).sort((a, b) => {
       if (a.isShift !== b.isShift) return a.isShift ? -1 : 1;
       if (a.origState !== b.origState) return (a.origState || '').localeCompare(b.origState || '');
@@ -228,8 +230,8 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
       l.carrierName,
       l.annualShipments,
       l.custAnnualSpend.toFixed(2),
-      l.annualHistoric > 0 ? l.custDelta.toFixed(2) : '',
-      l.annualHistoric > 0 ? l.custDeltaPct.toFixed(1) : '',
+      l.custHistBasis > 0 ? l.custDelta.toFixed(2) : '',
+      l.custHistBasis > 0 ? l.custDeltaPct.toFixed(1) : '',
     ].map(escCsv));
 
     const filterNote = selectedOrigins.length > 0
@@ -510,7 +512,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
         {/* Customer View KPIs — margin-applied */}
         {viewLevel === 'customer' && (() => {
           const custTotalSpend = customerLanes.reduce((s, l) => s + l.custAnnualSpend, 0);
-          const custHistoric = customerLanes.reduce((s, l) => s + (l.annualHistoric || 0), 0);
+          const custHistoric = customerLanes.reduce((s, l) => s + (l.custHistBasis || 0), 0);
           const custDelta = custHistoric > 0 ? custTotalSpend - custHistoric : null;
           const custDeltaPct = custHistoric > 0 ? (custDelta / custHistoric) * 100 : null;
           return <>
@@ -518,10 +520,10 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
             {[
               { label: 'Annual Shipments (est)', value: fmtNum(csTotals.annualShipments) },
               { label: 'Projected Customer Spend', value: fmtCompact$(custTotalSpend), sublabel: 'with margin applied' },
-              { label: 'Displaced Historic', value: custHistoric > 0 ? fmtCompact$(custHistoric) : 'N/A' },
+              { label: 'Was Paying (Historic)', value: custHistoric > 0 ? fmtCompact$(custHistoric) : 'N/A' },
               {
-                label: 'Annual Delta',
-                sublabel: 'vs Displaced Historic',
+                label: 'Customer Savings',
+                sublabel: 'vs what was being paid',
                 value: custDelta != null ? `${fmtCompact$(custDelta)} (${fmtPct(custDeltaPct)})` : 'N/A',
                 color: custDelta != null ? deltaColor(custDelta) : '',
               },
@@ -784,8 +786,8 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
                         </td>
                         <td className="px-3 py-2 text-right">{fmtNum(l.annualShipments)}</td>
                         <td className="px-3 py-2 text-right font-medium">{fmtCompact$(l.custAnnualSpend)}</td>
-                        <td className={`px-3 py-2 text-right font-medium ${l.annualHistoric > 0 ? deltaColor(l.custDelta) : 'text-gray-400'}`}>
-                          {l.annualHistoric > 0 ? `${fmtCompact$(l.custDelta)} (${fmtPct(l.custDeltaPct)})` : '—'}
+                        <td className={`px-3 py-2 text-right font-medium ${l.custHistBasis > 0 ? deltaColor(l.custDelta) : 'text-gray-400'}`}>
+                          {l.custHistBasis > 0 ? `${fmtCompact$(l.custDelta)} (${fmtPct(l.custDeltaPct)})` : '—'}
                         </td>
                       </tr>
                     );

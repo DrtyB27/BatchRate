@@ -48,6 +48,25 @@ export default function NetworkSummary({ result }) {
         />
       </div>
 
+      {/* Origin breakdown strip — only when multiple origins */}
+      {result.originCount > 1 && result.origins && (
+        <div className="flex gap-2 overflow-x-auto pb-1">
+          {result.origins.map(o => (
+            <div key={o.originKey} className="bg-white border rounded-lg px-3 py-2 min-w-[220px] shrink-0">
+              <div className="font-medium text-[#002144] text-xs" style={{ fontFamily: "'Montserrat', Arial, sans-serif" }}>
+                {o.originLabel}
+              </div>
+              <div className="text-[10px] text-gray-500 mt-0.5">
+                {o.shipmentCount.toLocaleString()} ships &middot; {o.poolPoints.length} pools &middot;{' '}
+                <span className={o.totalSavings > 0 ? 'text-green-600 font-medium' : 'text-red-600 font-medium'}>
+                  {fmtMoney(o.totalSavings)} savings ({fmtPct(o.savingsPct)})
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Disclaimer */}
       <div className="bg-amber-50 border border-amber-200 rounded px-3 py-2 text-[10px] text-amber-700">
         All costs are estimates for bid strategy modeling — not actual contracted rates. Final-mile costs use distance-ratio estimation.

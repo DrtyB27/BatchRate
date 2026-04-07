@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { computeAnnualAward, computeCarrierSummary, computeSankeyData } from '../services/analyticsEngine.js';
+import { computeAnnualAward, computeCarrierSummary, computeSankeyData, getLaneKey } from '../services/analyticsEngine.js';
 import { generateAnnualAwardPdf, downloadBlob } from '../services/pdfExport.js';
 import { applyMargin } from '../services/ratingClient.js';
 import CarrierSankey from './CarrierSankey.jsx';
@@ -37,6 +37,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
   const [selectedOrigins, setSelectedOrigins] = useState([]); // origState[] filter
   const [originDropdownOpen, setOriginDropdownOpen] = useState(false);
   const [customerShareMode, setCustomerShareMode] = useState(false); // hides internal views
+  const [awardBasis, setAwardBasis] = useState('cost'); // 'cost' | 'customerPrice'
 
   const annualizationFactor = 52 / Math.max(1, sampleWeeks);
 
@@ -62,9 +63,63 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
     return sc?.result?.awards || null;
   }, [selectedScenarioId, computedScenarios]);
 
+  // When "Customer Price" mode is active, re-select winners by lowest customer price
+  // (with per-SCAC markup applied). Respects scenario's eligible SCACs if active.
+  const customerPriceAwards = useMemo(() => {
+    if (awardBasis !== 'customerPrice' || !activeMarkups) return null;
+
+    // Determine eligible SCACs from selected scenario (null = all carriers)
+    let eligibleSet = null;
+    if (selectedScenarioId && computedScenarios) {
+      const sc = computedScenarios.find(s => s.id === selectedScenarioId);
+      if (sc && sc.eligibleSCACs?.length > 0) {
+        eligibleSet = new Set(sc.eligibleSCACs.map(s => s.toUpperCase()));
+      }
+    }
+
+    // Group by reference, pick lowest customer price
+    const refGroups = {};
+    for (const row of filteredFlatRows) {
+      if (!row.hasRate || row.rate.validRate === 'false') continue;
+      const scac = (row.rate.carrierSCAC || '').toUpperCase();
+      if (eligibleSet && !eligibleSet.has(scac)) continue;
+      const ref = row.reference || '';
+      if (!refGroups[ref]) refGroups[ref] = [];
+      refGroups[ref].push(row);
+    }
+
+    const awards = {};
+    for (const [ref, rows] of Object.entries(refGroups)) {
+      const seenScacs = new Set();
+      let best = null;
+      let bestPrice = Infinity;
+      for (const r of rows) {
+        const scac = (r.rate.carrierSCAC || '').toUpperCase();
+        if (seenScacs.has(scac)) continue;
+        seenScacs.add(scac);
+        const m = applyMargin(r.rate.totalCharge, r.rate.carrierSCAC, activeMarkups);
+        if (m.customerPrice < bestPrice) {
+          best = r;
+          bestPrice = m.customerPrice;
+        }
+      }
+      if (best) {
+        awards[ref] = {
+          scac: best.rate.carrierSCAC,
+          carrierName: best.rate.carrierName,
+          totalCharge: best.rate.totalCharge,
+          laneKey: getLaneKey(best),
+        };
+      }
+    }
+    return Object.keys(awards).length > 0 ? awards : null;
+  }, [awardBasis, activeMarkups, filteredFlatRows, selectedScenarioId, computedScenarios]);
+
+  const effectiveAwards = customerPriceAwards || scenarioAwards;
+
   const result = useMemo(
-    () => computeAnnualAward(filteredFlatRows, scenarioAwards, sampleWeeks),
-    [filteredFlatRows, scenarioAwards, sampleWeeks]
+    () => computeAnnualAward(filteredFlatRows, effectiveAwards, sampleWeeks),
+    [filteredFlatRows, effectiveAwards, sampleWeeks]
   );
 
   const { lanes, carriers, totals } = result;
@@ -311,6 +366,27 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
                   <option key={s.id} value={s.id}>{s.name}</option>
                 ))}
               </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Award By</label>
+              <div className="flex gap-1">
+                {[
+                  { key: 'cost', label: 'Carrier Cost' },
+                  { key: 'customerPrice', label: 'Customer Price' },
+                ].map(v => (
+                  <button
+                    key={v.key}
+                    className={`px-2 py-1 text-xs rounded ${awardBasis === v.key ? 'bg-[#002144] text-white' : 'bg-gray-200 text-gray-700'}`}
+                    onClick={() => setAwardBasis(v.key)}
+                  >
+                    {v.label}
+                  </button>
+                ))}
+              </div>
+              {awardBasis === 'customerPrice' && (
+                <p className="text-[10px] text-amber-600 mt-1">Winners selected by lowest customer price (with markup)</p>
+              )}
             </div>
 
             <div>

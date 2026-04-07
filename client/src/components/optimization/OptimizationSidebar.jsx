@@ -16,6 +16,7 @@ const FIELDS = [
   { key: 'minShipmentsPerCluster', label: 'Min Shipments/Cluster', type: 'number', step: 1 },
   { key: 'maxTransitDays', label: 'Max Transit Days', type: 'number', step: 1 },
   { key: 'maxDwellDays', label: 'Max Dwell Days', type: 'number', step: 1 },
+  { key: 'consolidationWindowDays', label: 'Consolidation Window (days)', type: 'number', step: 1 },
 ];
 
 export default function OptimizationSidebar({ config, onChange, onRun, running }) {

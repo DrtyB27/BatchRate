@@ -36,11 +36,18 @@ function SavingsGauge({ current, optimized, savings, pct }) {
   );
 }
 
-function OpportunityRow({ pool, index }) {
+function OpportunityRow({ pool, index, showOrigin }) {
   const easeColor = pool.ease === 'High' ? 'text-green-600 bg-green-50' : pool.ease === 'Medium' ? 'text-amber-600 bg-amber-50' : 'text-red-600 bg-red-50';
+  // Find origin info from pool's originKey
+  const originLabel = pool.originKey
+    ? `${pool.cluster?.shipments?.[0]?.origCity || ''}, ${pool.cluster?.shipments?.[0]?.origState || ''}`
+    : '';
   return (
     <tr className={`border-b border-gray-100 ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50'}`}>
       <td className="px-4 py-3 font-medium text-[#002144]">{index + 1}</td>
+      {showOrigin && (
+        <td className="px-4 py-3 text-xs text-gray-600">{originLabel}</td>
+      )}
       <td className="px-4 py-3">
         <div className="font-medium text-[#002144]">{pool.city}, {pool.state}</div>
         <div className="text-[10px] text-gray-400">{pool.source === 'metro' ? 'Metro Hub' : 'Regional Cluster'} &middot; ZIP {pool.zip}</div>
@@ -125,6 +132,47 @@ export default function CustomerSummary({ result }) {
         </div>
       </div>
 
+      {/* Network Overview by Origin — only when multiple origins */}
+      {result.originCount > 1 && result.origins && (
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="bg-[#002144] text-white px-4 py-3" style={{ fontFamily: "'Montserrat', Arial, sans-serif" }}>
+            <h4 className="text-sm font-semibold">Network Overview by Origin</h4>
+          </div>
+          <div className="overflow-auto">
+            <table className="w-full text-xs border-collapse">
+              <thead>
+                <tr className="bg-gray-100 text-gray-600">
+                  <th className="px-4 py-2 text-left font-semibold">Origin</th>
+                  <th className="px-4 py-2 text-right font-semibold">Shipments</th>
+                  <th className="px-4 py-2 text-right font-semibold">Pools</th>
+                  <th className="px-4 py-2 text-right font-semibold">Consolidated</th>
+                  <th className="px-4 py-2 text-right font-semibold">TL Loads</th>
+                  <th className="px-4 py-2 text-right font-semibold">Current</th>
+                  <th className="px-4 py-2 text-right font-semibold">Optimized</th>
+                  <th className="px-4 py-2 text-right font-semibold">Savings</th>
+                  <th className="px-4 py-2 text-right font-semibold">Savings %</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[...result.origins].sort((a, b) => b.totalSavings - a.totalSavings).map((o, i) => (
+                  <tr key={o.originKey} className={`border-b border-gray-100 ${i % 2 === 0 ? 'bg-white' : 'bg-gray-50'}`}>
+                    <td className="px-4 py-2 font-medium text-[#002144]">{o.originLabel}</td>
+                    <td className="px-4 py-2 text-right">{o.shipmentCount}</td>
+                    <td className="px-4 py-2 text-right">{o.poolPoints.length}</td>
+                    <td className="px-4 py-2 text-right">{o.totalConsolidated}</td>
+                    <td className="px-4 py-2 text-right">{o.truckLoads}</td>
+                    <td className="px-4 py-2 text-right font-medium">{fmtMoney(o.totalCurrentCost)}</td>
+                    <td className="px-4 py-2 text-right font-medium">{fmtMoney(o.totalOptimizedCost)}</td>
+                    <td className="px-4 py-2 text-right font-bold text-green-600">{fmtMoney(o.totalSavings)}</td>
+                    <td className="px-4 py-2 text-right text-green-600">{fmtPct(o.savingsPct)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {/* Opportunity Table */}
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
         <div className="bg-[#002144] text-white px-4 py-3" style={{ fontFamily: "'Montserrat', Arial, sans-serif" }}>
@@ -136,6 +184,7 @@ export default function CustomerSummary({ result }) {
             <thead>
               <tr className="bg-gray-100 text-gray-600">
                 <th className="px-4 py-2 text-left font-semibold">#</th>
+                {result.originCount > 1 && <th className="px-4 py-2 text-left font-semibold">Origin</th>}
                 <th className="px-4 py-2 text-left font-semibold">Pool Point</th>
                 <th className="px-4 py-2 text-right font-semibold">Shipments</th>
                 <th className="px-4 py-2 text-right font-semibold">Weight (lbs)</th>
@@ -150,7 +199,7 @@ export default function CustomerSummary({ result }) {
             </thead>
             <tbody>
               {topOpportunities.map((p, i) => (
-                <OpportunityRow key={p.poolId} pool={p} index={i} />
+                <OpportunityRow key={p.poolId} pool={p} index={i} showOrigin={result.originCount > 1} />
               ))}
             </tbody>
           </table>

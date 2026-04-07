@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import { runOptimization, buildOptimizationCsv, DEFAULT_CONFIG } from '../services/optimizationEngine.js';
 import OptimizationSidebar from './optimization/OptimizationSidebar.jsx';
 import NetworkSummary from './optimization/NetworkSummary.jsx';
@@ -28,6 +28,7 @@ export default function OptimizationDashboard({ flatRows }) {
   const [error, setError] = useState(null);
   const [selectedPool, setSelectedPool] = useState(null);
   const [subView, setSubView] = useState('summary'); // summary | detail | shipments
+  const [activeOrigin, setActiveOrigin] = useState(null); // null = all origins
 
   const handleRun = useCallback(async () => {
     setRunning(true);
@@ -38,6 +39,7 @@ export default function OptimizationDashboard({ flatRows }) {
       const res = await runOptimization(flatRows, config, setProgress);
       setResult(res);
       setSubView('summary');
+      setActiveOrigin(null);
     } catch (err) {
       setError(err.message || 'Optimization failed');
     } finally {
@@ -55,11 +57,47 @@ export default function OptimizationDashboard({ flatRows }) {
     setSubView('shipments');
   };
 
+  const filteredResult = useMemo(() => {
+    if (!result || !activeOrigin) return result;
+    const filteredPools = result.poolPoints.filter(p => p.originKey === activeOrigin);
+    const filteredDirect = result.directShipments.filter(s => (s.origPostal || '').startsWith(activeOrigin));
+    const totalCurrentCost = filteredPools.reduce((s, p) => s + p.currentCost, 0) +
+      filteredDirect.reduce((s, d) => s + (d.historicCost || d.rate?.totalCharge || 0), 0);
+    const totalOptimizedCost = filteredPools.reduce((s, p) => s + p.consolidatedCost, 0) +
+      filteredDirect.reduce((s, d) => s + (d.historicCost || d.rate?.totalCharge || 0), 0);
+    const totalSavings = totalCurrentCost - totalOptimizedCost;
+    const consolidatedCount = filteredPools.reduce((s, p) => s + p.shipmentCount, 0);
+    return {
+      ...result,
+      poolPoints: filteredPools,
+      directShipments: filteredDirect,
+      totalCurrentCost,
+      totalOptimizedCost,
+      totalSavings,
+      savingsPct: totalCurrentCost > 0 ? (totalSavings / totalCurrentCost) * 100 : 0,
+      totalConsolidated: consolidatedCount,
+      totalDirect: filteredDirect.length,
+      truckLoads: filteredPools.reduce((s, p) => s + p.truckLoads, 0),
+      avgTransitImpact: filteredPools.length > 0
+        ? filteredPools.reduce((s, p) => s + p.transitDelta, 0) / filteredPools.length
+        : 0,
+    };
+  }, [result, activeOrigin]);
+
   const viewBtnCls = (mode) =>
     `px-3 py-1 text-[11px] font-medium rounded transition-colors ${
       subView === mode
         ? 'bg-[#002144] text-white'
         : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
+    }`;
+
+  const originBtnCls = (key) =>
+    `px-2 py-1 text-[10px] font-medium rounded transition-colors whitespace-nowrap ${
+      activeOrigin === key
+        ? 'bg-[#39b6e6] text-white'
+        : key === null && activeOrigin === null
+          ? 'bg-[#39b6e6] text-white'
+          : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
     }`;
 
   return (
@@ -114,6 +152,21 @@ export default function OptimizationDashboard({ flatRows }) {
           </div>
         )}
 
+        {/* Origin filter row */}
+        {result && result.originCount > 1 && subView !== 'summary' && (
+          <div className="px-4 py-1.5 bg-gray-50 border-b border-gray-200 flex items-center gap-1.5 overflow-x-auto shrink-0">
+            <span className="text-[10px] text-gray-500 font-medium mr-1">Origin:</span>
+            <button className={originBtnCls(null)} onClick={() => setActiveOrigin(null)}>
+              All Origins ({result.originCount})
+            </button>
+            {result.origins.map(o => (
+              <button key={o.originKey} className={originBtnCls(o.originKey)} onClick={() => setActiveOrigin(o.originKey)}>
+                {o.originCity}, {o.originState} ({o.shipmentCount.toLocaleString()})
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* No result yet */}
         {!result && !running && (
           <div className="flex-1 flex items-center justify-center">
@@ -137,9 +190,9 @@ export default function OptimizationDashboard({ flatRows }) {
 
         {result && subView === 'detail' && (
           <div className="flex-1 overflow-auto p-4 space-y-4">
-            <NetworkSummary result={result} />
+            <NetworkSummary result={filteredResult} />
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-              {result.poolPoints.map((pp, idx) => (
+              {filteredResult.poolPoints.map((pp, idx) => (
                 <PoolPointCard
                   key={pp.poolId}
                   pool={pp}
@@ -149,7 +202,7 @@ export default function OptimizationDashboard({ flatRows }) {
                 />
               ))}
             </div>
-            {result.poolPoints.length === 0 && (
+            {filteredResult.poolPoints.length === 0 && (
               <div className="text-center text-gray-400 py-8 text-sm">
                 No consolidation opportunities identified with current parameters.
               </div>
@@ -170,7 +223,7 @@ export default function OptimizationDashboard({ flatRows }) {
                 </button>
               </div>
             )}
-            <OpportunityTable result={result} selectedPool={selectedPool} />
+            <OpportunityTable result={filteredResult} selectedPool={selectedPool} />
           </div>
         )}
       </div>

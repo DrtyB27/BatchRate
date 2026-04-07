@@ -64,6 +64,7 @@ export const DEFAULT_CONFIG = {
   handlingCostPerPallet: 15.00,
   handlingCostMethod: 'pallet',
   maxDwellDays: 2,
+  consolidationWindowDays: 5,
   finalMileMethod: 'estimate',
   estimateDiscountPct: 60,
   finalMileMinCharge: 150,
@@ -75,9 +76,36 @@ export const DEFAULT_CONFIG = {
 };
 
 // ============================================================
+// Date parsing helper (self-contained — handles M/D/YYYY and YYYY-MM-DD)
+// ============================================================
+function parseDate(s) {
+  if (!s) return null;
+  const str = String(s).trim();
+  // M/D/YYYY or MM/DD/YYYY
+  const slashMatch = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (slashMatch) {
+    const d = new Date(+slashMatch[3], +slashMatch[1] - 1, +slashMatch[2]);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  // YYYY-MM-DD
+  const isoMatch = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoMatch) {
+    const d = new Date(+isoMatch[1], +isoMatch[2] - 1, +isoMatch[3]);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  // Fallback
+  const d = new Date(str);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+const MS_PER_DAY = 86400000;
+
+// ============================================================
 // Step 1: Destination clustering
 // ============================================================
-function clusterDestinations(shipments, centroids, config) {
+function clusterDestinations(shipments, centroids, config, originKey) {
+  const idPrefix = originKey ? `${originKey}_` : '';
+
   // Phase A: group by 3-digit dest ZIP prefix
   const zip3Groups = {};
   for (const s of shipments) {
@@ -95,41 +123,84 @@ function clusterDestinations(shipments, centroids, config) {
       // Unknown ZIP — each shipment becomes its own "cluster"
       for (const r of rows) {
         clusters.push({
-          clusterId: `c${clusterId++}`,
+          clusterId: `${idPrefix}c${clusterId++}`,
           centroidLat: 0, centroidLon: 0,
           centroidCity: r.destCity || 'Unknown', centroidState: r.destState || '',
           centroidZip3: prefix, shipments: [r],
           totalWeight: parseFloat(r.inputNetWt) || 0,
           totalPallets: parseInt(r.inputHUs) || 1,
           shipmentCount: 1,
+          windowStart: null, windowEnd: null,
         });
       }
       continue;
     }
 
-    // Phase B: radius-based sub-clustering if needed
-    // Simple approach: for now, treat the whole 3-digit prefix as one cluster
-    const totalWeight = rows.reduce((s, r) => s + (parseFloat(r.inputNetWt) || 0), 0);
-    const totalPallets = rows.reduce((s, r) => s + (parseInt(r.inputHUs) || 1), 0);
-    const dates = rows.map(r => r.pickupDate).filter(Boolean).sort();
+    // Phase A.5: time-window splitting within each ZIP3 group
+    const windowDays = config.consolidationWindowDays || 5;
+    const dated = [];
+    const undated = [];
+    for (const r of rows) {
+      const d = parseDate(r.pickupDate);
+      if (d) dated.push({ shipment: r, date: d });
+      else undated.push(r);
+    }
+    dated.sort((a, b) => a.date - b.date);
 
-    clusters.push({
-      clusterId: `c${clusterId++}`,
-      centroidLat: centroid.lat,
-      centroidLon: centroid.lon,
-      centroidCity: centroid.city,
-      centroidState: centroid.state,
-      centroidZip3: prefix,
-      shipments: rows,
-      totalWeight,
-      totalPallets,
-      shipmentCount: rows.length,
-      dateRange: { earliest: dates[0] || '', latest: dates[dates.length - 1] || '' },
-    });
+    // Split dated shipments into time-window sub-groups
+    const subGroups = [];
+    if (dated.length > 0) {
+      let currentGroup = [dated[0]];
+      let groupStart = dated[0].date;
+      for (let i = 1; i < dated.length; i++) {
+        if ((dated[i].date - groupStart) / MS_PER_DAY <= windowDays) {
+          currentGroup.push(dated[i]);
+        } else {
+          subGroups.push(currentGroup);
+          currentGroup = [dated[i]];
+          groupStart = dated[i].date;
+        }
+      }
+      subGroups.push(currentGroup);
+    }
+    // Undated shipments form their own sub-group if any
+    if (undated.length > 0) {
+      subGroups.push(undated.map(s => ({ shipment: s, date: null })));
+    }
+
+    // Phase B: each time-window sub-group becomes its own cluster
+    for (const group of subGroups) {
+      const groupShipments = group.map(g => g.shipment);
+      const groupDates = group.map(g => g.date).filter(Boolean);
+      const totalWeight = groupShipments.reduce((s, r) => s + (parseFloat(r.inputNetWt) || 0), 0);
+      const totalPallets = groupShipments.reduce((s, r) => s + (parseInt(r.inputHUs) || 1), 0);
+      const windowStart = groupDates.length > 0 ? groupDates[0] : null;
+      const windowEnd = groupDates.length > 0 ? groupDates[groupDates.length - 1] : null;
+
+      clusters.push({
+        clusterId: `${idPrefix}c${clusterId++}`,
+        centroidLat: centroid.lat,
+        centroidLon: centroid.lon,
+        centroidCity: centroid.city,
+        centroidState: centroid.state,
+        centroidZip3: prefix,
+        shipments: groupShipments,
+        totalWeight,
+        totalPallets,
+        shipmentCount: groupShipments.length,
+        windowStart,
+        windowEnd,
+        dateRange: {
+          earliest: windowStart ? windowStart.toISOString().slice(0, 10) : '',
+          latest: windowEnd ? windowEnd.toISOString().slice(0, 10) : '',
+        },
+      });
+    }
   }
 
-  // Phase C: merge small clusters into nearest qualifying
+  // Phase C: merge small clusters into nearest qualifying (same time window)
   const minShip = config.minShipmentsPerCluster || 3;
+  const windowDays = config.consolidationWindowDays || 5;
   const small = clusters.filter(c => c.shipmentCount < minShip && c.centroidLat !== 0);
   const big = clusters.filter(c => c.shipmentCount >= minShip || c.centroidLat === 0);
 
@@ -139,6 +210,13 @@ function clusterDestinations(shipments, centroids, config) {
       if (bc.centroidLat === 0) continue;
       const d = haversineDistance(sc.centroidLat, sc.centroidLon, bc.centroidLat, bc.centroidLon);
       if (d < bestDist && d < config.maxClusterRadius * 2) {
+        // Check time-window overlap: only merge if date ranges are compatible
+        if (sc.windowStart && bc.windowStart) {
+          const gapMs = Math.max(0,
+            Math.max(sc.windowStart, bc.windowStart) - Math.min(sc.windowEnd || sc.windowStart, bc.windowEnd || bc.windowStart)
+          );
+          if (gapMs / MS_PER_DAY > windowDays) continue;
+        }
         bestDist = d;
         bestCluster = bc;
       }
@@ -148,6 +226,13 @@ function clusterDestinations(shipments, centroids, config) {
       bestCluster.shipmentCount += sc.shipmentCount;
       bestCluster.totalWeight += sc.totalWeight;
       bestCluster.totalPallets += sc.totalPallets;
+      // Extend window
+      if (sc.windowStart && (!bestCluster.windowStart || sc.windowStart < bestCluster.windowStart)) {
+        bestCluster.windowStart = sc.windowStart;
+      }
+      if (sc.windowEnd && (!bestCluster.windowEnd || sc.windowEnd > bestCluster.windowEnd)) {
+        bestCluster.windowEnd = sc.windowEnd;
+      }
     } else {
       big.push(sc); // keep as-is
     }
@@ -326,13 +411,76 @@ function scoreImplementationEase(pool) {
 }
 
 // ============================================================
-// Step 5: Main optimization
+// Step 5: Main optimization (multi-origin)
 // ============================================================
+function optimizeOrigin(originShipments, originKey, originCentroid, centroids, hubs, config) {
+  const clusters = clusterDestinations(originShipments, centroids, config, originKey);
+  const candidates = identifyPoolPoints(clusters, [originCentroid], hubs, config);
+
+  const scored = [];
+  for (const cand of candidates) {
+    const cost = calculateConsolidationCost(cand, originCentroid, config);
+    const service = assessServiceImpact(cand, originCentroid, config);
+    scored.push({
+      ...cand,
+      ...cost,
+      ...service,
+      originKey,
+      shipmentCount: cand.cluster.shipmentCount,
+      totalWeight: cand.cluster.totalWeight,
+      totalPallets: cand.cluster.totalPallets,
+      savingsPct: cost.savingsPct,
+      riskFlags: service.riskFlags,
+    });
+  }
+
+  const bestPerCluster = {};
+  for (const s of scored) {
+    if (s.savings <= 0) continue;
+    if (!bestPerCluster[s.clusterId] || s.savings > bestPerCluster[s.clusterId].savings) {
+      bestPerCluster[s.clusterId] = s;
+    }
+  }
+
+  const poolPoints = Object.values(bestPerCluster).map(p => ({
+    ...p,
+    ease: scoreImplementationEase(p),
+  }));
+  poolPoints.sort((a, b) => b.savings - a.savings);
+
+  const consolidatedRefs = new Set();
+  for (const pp of poolPoints) {
+    for (const s of pp.cluster.shipments) consolidatedRefs.add(s.reference);
+  }
+  const directShipments = originShipments.filter(s => !consolidatedRefs.has(s.reference));
+
+  const totalCurrentCost = originShipments.reduce((sum, s) => sum + (s.historicCost || s.rate?.totalCharge || 0), 0);
+  const poolCost = poolPoints.reduce((sum, p) => sum + p.consolidatedCost, 0);
+  const directCost = directShipments.reduce((sum, s) => sum + (s.historicCost || s.rate?.totalCharge || 0), 0);
+  const totalOptimizedCost = poolCost + directCost;
+  const totalSavings = totalCurrentCost - totalOptimizedCost;
+
+  return {
+    originKey,
+    originCity: originCentroid.city || 'Unknown',
+    originState: originCentroid.state || '',
+    originLabel: `${originCentroid.city || 'Unknown'}, ${originCentroid.state || ''} (${originKey})`,
+    shipmentCount: originShipments.length,
+    poolPoints,
+    directShipments,
+    totalCurrentCost,
+    totalOptimizedCost,
+    totalSavings,
+    savingsPct: totalCurrentCost > 0 ? (totalSavings / totalCurrentCost) * 100 : 0,
+    totalConsolidated: consolidatedRefs.size,
+    totalDirect: directShipments.length,
+    truckLoads: poolPoints.reduce((sum, p) => sum + p.truckLoads, 0),
+  };
+}
+
 export async function runOptimization(flatRows, config, onProgress) {
   const centroids = await loadZipCentroids();
   const hubs = await loadLogisticsHubs();
-
-  if (onProgress) onProgress('Analyzing shipment data...');
 
   // Get best rate per reference
   const bestByRef = {};
@@ -347,91 +495,62 @@ export async function runOptimization(flatRows, config, onProgress) {
   const shipments = Object.values(bestByRef);
 
   if (shipments.length === 0) {
-    return { poolPoints: [], directShipments: [], totalCurrentCost: 0, totalOptimizedCost: 0, totalSavings: 0, savingsPct: 0, totalConsolidated: 0, totalDirect: 0 };
+    return { poolPoints: [], directShipments: [], totalCurrentCost: 0, totalOptimizedCost: 0, totalSavings: 0, savingsPct: 0, totalConsolidated: 0, totalDirect: 0, origins: [], originCount: 0, truckLoads: 0, avgTransitImpact: 0 };
   }
 
-  // Determine common origin(s) — use most frequent origin
-  const origCounts = {};
+  // Group shipments by 3-digit origin prefix
+  const originGroups = {};
   for (const s of shipments) {
     const key = (s.origPostal || '').substring(0, 3);
-    origCounts[key] = (origCounts[key] || 0) + 1;
-  }
-  const topOrigZip3 = Object.entries(origCounts).sort((a, b) => b[1] - a[1])[0][0];
-  const origin = centroids[topOrigZip3] || { lat: 35.96, lon: -83.92 };
-
-  if (onProgress) onProgress('Clustering destinations...');
-  const clusters = clusterDestinations(shipments, centroids, config);
-
-  if (onProgress) onProgress('Identifying pool points...');
-  const candidates = identifyPoolPoints(clusters, [origin], hubs, config);
-
-  if (onProgress) onProgress('Calculating costs...');
-
-  // Score each candidate
-  const scored = [];
-  for (const cand of candidates) {
-    const cost = calculateConsolidationCost(cand, origin, config);
-    const service = assessServiceImpact(cand, origin, config);
-
-    scored.push({
-      ...cand,
-      ...cost,
-      ...service,
-      shipmentCount: cand.cluster.shipmentCount,
-      totalWeight: cand.cluster.totalWeight,
-      totalPallets: cand.cluster.totalPallets,
-      savingsPct: cost.savingsPct,
-      riskFlags: service.riskFlags,
-    });
+    if (!originGroups[key]) originGroups[key] = [];
+    originGroups[key].push(s);
   }
 
-  if (onProgress) onProgress('Optimizing assignments...');
+  const originKeys = Object.keys(originGroups);
+  if (onProgress) onProgress(`Analyzing shipment data... (${originKeys.length} origin${originKeys.length !== 1 ? 's' : ''} detected)`);
 
-  // Pick best pool per cluster (highest savings)
-  const bestPerCluster = {};
-  for (const s of scored) {
-    const cid = s.clusterId;
-    if (s.savings <= 0) continue; // negative savings = not worth it
-    if (!bestPerCluster[cid] || s.savings > bestPerCluster[cid].savings) {
-      bestPerCluster[cid] = s;
-    }
+  // Optimize each origin independently
+  const origins = [];
+  for (let i = 0; i < originKeys.length; i++) {
+    const origKey = originKeys[i];
+    const originCentroid = centroids[origKey] || { lat: 35.96, lon: -83.92, city: 'Unknown', state: '' };
+    const label = `${originCentroid.city || 'Unknown'}, ${originCentroid.state || ''}`;
+
+    if (onProgress) onProgress(`Optimizing origin ${i + 1}/${originKeys.length}: ${label}...`);
+
+    const originResult = optimizeOrigin(originGroups[origKey], origKey, originCentroid, centroids, hubs, config);
+    origins.push(originResult);
   }
 
-  // Build results
-  const poolPoints = Object.values(bestPerCluster).map(p => ({
-    ...p,
-    ease: scoreImplementationEase(p),
-  }));
-  poolPoints.sort((a, b) => b.savings - a.savings);
+  // Sort origins by totalCurrentCost descending (biggest first)
+  origins.sort((a, b) => b.totalCurrentCost - a.totalCurrentCost);
 
-  // Shipments assigned to pools vs direct
-  const consolidatedRefs = new Set();
-  for (const pp of poolPoints) {
-    for (const s of pp.cluster.shipments) {
-      consolidatedRefs.add(s.reference);
-    }
-  }
-  const directShipments = shipments.filter(s => !consolidatedRefs.has(s.reference));
-
-  const totalCurrentCost = shipments.reduce((sum, s) => sum + (s.historicCost || s.rate?.totalCharge || 0), 0);
-  const poolCost = poolPoints.reduce((sum, p) => sum + p.consolidatedCost, 0);
-  const directCost = directShipments.reduce((sum, s) => sum + (s.historicCost || s.rate?.totalCharge || 0), 0);
-  const totalOptimizedCost = poolCost + directCost;
+  // Aggregate across all origins
+  const allPoolPoints = origins.flatMap(o => o.poolPoints);
+  const allDirectShipments = origins.flatMap(o => o.directShipments);
+  const totalCurrentCost = origins.reduce((sum, o) => sum + o.totalCurrentCost, 0);
+  const totalOptimizedCost = origins.reduce((sum, o) => sum + o.totalOptimizedCost, 0);
   const totalSavings = totalCurrentCost - totalOptimizedCost;
+  const totalConsolidated = origins.reduce((sum, o) => sum + o.totalConsolidated, 0);
+  const totalDirect = origins.reduce((sum, o) => sum + o.totalDirect, 0);
+  const truckLoads = origins.reduce((sum, o) => sum + o.truckLoads, 0);
+  const avgTransitImpact = allPoolPoints.length > 0 ? mean(allPoolPoints.map(p => p.transitDelta)) : 0;
 
-  if (onProgress) onProgress(`Done — ${poolPoints.length} pool points, $${totalSavings.toFixed(0)} savings identified`);
+  if (onProgress) onProgress(`Done — ${allPoolPoints.length} pool points across ${origins.length} origin${origins.length !== 1 ? 's' : ''}, $${totalSavings.toFixed(0)} savings identified`);
 
   return {
-    poolPoints,
-    directShipments,
+    poolPoints: allPoolPoints,
+    directShipments: allDirectShipments,
     totalCurrentCost,
     totalOptimizedCost,
     totalSavings,
     savingsPct: totalCurrentCost > 0 ? (totalSavings / totalCurrentCost) * 100 : 0,
-    totalConsolidated: consolidatedRefs.size,
-    totalDirect: directShipments.length,
-    truckLoads: poolPoints.reduce((sum, p) => sum + p.truckLoads, 0),
-    avgTransitImpact: poolPoints.length > 0 ? mean(poolPoints.map(p => p.transitDelta)) : 0,
+    totalConsolidated,
+    totalDirect,
+    truckLoads,
+    avgTransitImpact,
+    origins,
+    originCount: origins.length,
   };
 }
 
@@ -457,15 +576,30 @@ export function buildOptimizationCsv(result) {
   lines.push(['Pool Points', result.poolPoints.length].map(escCsv).join(','));
   lines.push(['Shipments Consolidated', result.totalConsolidated].map(escCsv).join(','));
   lines.push(['Shipments Direct', result.totalDirect].map(escCsv).join(','));
+  if (result.originCount) lines.push(['Origins', result.originCount].map(escCsv).join(','));
   lines.push('');
 
+  // Per-origin summary (when multiple origins)
+  if (result.origins && result.origins.length > 1) {
+    lines.push('ORIGIN SUMMARY');
+    lines.push(['Origin', 'Shipments', 'Pool Points', 'Consolidated', 'Direct', 'Current Cost', 'Optimized Cost', 'Savings', 'Savings %'].map(escCsv).join(','));
+    for (const o of result.origins) {
+      lines.push([
+        o.originLabel, o.shipmentCount, o.poolPoints.length, o.totalConsolidated, o.totalDirect,
+        o.totalCurrentCost.toFixed(2), o.totalOptimizedCost.toFixed(2),
+        o.totalSavings.toFixed(2), o.savingsPct.toFixed(1),
+      ].map(escCsv).join(','));
+    }
+    lines.push('');
+  }
+
   lines.push('POOL POINT DETAIL');
-  lines.push(['City', 'State', 'ZIP', 'Source', '# Shipments', 'Weight', 'Pallets', 'Trucks',
+  lines.push(['Origin', 'City', 'State', 'ZIP', 'Source', '# Shipments', 'Weight', 'Pallets', 'Trucks',
     'Linehaul $', 'Handling $', 'Final Mile $', 'Total Consolidated $', 'vs Direct $',
     'Savings $', 'Savings %', 'Avg Transit', 'Transit Delta', 'Risk Flags', 'Ease'].map(escCsv).join(','));
   for (const p of result.poolPoints) {
     lines.push([
-      p.city, p.state, p.zip, p.source, p.shipmentCount, p.totalWeight.toFixed(0),
+      p.originKey || '', p.city, p.state, p.zip, p.source, p.shipmentCount, p.totalWeight.toFixed(0),
       p.totalPallets, p.truckLoads,
       p.linehaulCost.toFixed(2), p.handlingCost.toFixed(2), p.totalFinalMile.toFixed(2),
       p.consolidatedCost.toFixed(2), p.currentCost.toFixed(2),
@@ -477,13 +611,13 @@ export function buildOptimizationCsv(result) {
   lines.push('');
 
   lines.push('SHIPMENT ASSIGNMENTS');
-  lines.push(['Reference', 'Orig ZIP', 'Dest ZIP', 'Weight', 'Direct LTL Cost',
+  lines.push(['Reference', 'Origin', 'Orig ZIP', 'Dest ZIP', 'Weight', 'Direct LTL Cost',
     'Assigned Pool', 'Pool ZIP', 'Est Final Mile $', 'Est Total $', 'Savings $'].map(escCsv).join(','));
   for (const p of result.poolPoints) {
     for (const fm of p.finalMileDetails) {
       const s = p.cluster.shipments.find(sh => sh.reference === fm.reference);
       lines.push([
-        fm.reference, s?.origPostal || '', fm.destPostal, s ? (parseFloat(s.inputNetWt) || 0).toFixed(0) : '',
+        fm.reference, p.originKey || '', s?.origPostal || '', fm.destPostal, s ? (parseFloat(s.inputNetWt) || 0).toFixed(0) : '',
         fm.directCost.toFixed(2),
         `${p.city}, ${p.state}`, p.zip,
         fm.estimatedCost.toFixed(2),

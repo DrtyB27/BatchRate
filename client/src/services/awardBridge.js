@@ -23,7 +23,12 @@ function uid(prefix) {
  * Returns both the direct scenario and the consolidation scenario
  * for side-by-side comparison.
  */
-export function buildAwardLanes(optimizationResult, sampleWeeks) {
+/**
+ * @param {Object} optimizationResult - from runOptimization()
+ * @param {number} sampleWeeks - sample period in weeks
+ * @param {Array|null} confirmedConsolidations - rerated consolidation candidates with rerateStatus === 'confirmed'
+ */
+export function buildAwardLanes(optimizationResult, sampleWeeks, confirmedConsolidations) {
   _nextId = 1;
   const factor = 52 / Math.max(1, sampleWeeks || 1);
 
@@ -200,16 +205,60 @@ export function buildAwardLanes(optimizationResult, sampleWeeks) {
     });
   }
 
+  // --- Direct consolidation candidates (Phase 4) ---
+  // When confirmed rerate results exist, replace individual direct lanes
+  // with a single consolidated lane at the rerated cost.
+  const directConsolLanes = [];
+  const directConsolRefs = new Set();
+
+  if (confirmedConsolidations && confirmedConsolidations.length > 0) {
+    for (const cc of confirmedConsolidations) {
+      if (cc.rerateStatus !== 'confirmed' || !cc.reratedCost) continue;
+
+      const refs = cc.shipments.map(s => s.reference);
+      refs.forEach(r => directConsolRefs.add(r));
+
+      const combinedWeight = cc.combinedWeight || 0;
+      const firstShip = cc.shipments[0];
+
+      directConsolLanes.push({
+        id: uid('dconsol'),
+        laneKey: `${cc.lane.originState || ''} -> ${cc.lane.destState || ''}`,
+        originZip: cc.lane.originZip || '',
+        destZip: cc.lane.destZip || '',
+        originCity: cc.lane.originCity || '',
+        originState: cc.lane.originState || '',
+        destCity: cc.lane.destCity || '',
+        destState: cc.lane.destState || '',
+        carrier: cc.bestRateCarrier || 'CONSOL',
+        carrierName: cc.bestRateCarrierName || 'Consolidated LTL',
+        annualCost: cc.reratedCost * factor,
+        sampleCost: cc.reratedCost,
+        annualShipments: Math.round(refs.length * factor),
+        sampleShipments: refs.length,
+        annualWeight: Math.round(combinedWeight * factor),
+        laneType: 'directConsolidation',
+        poolPointZip: null,
+        sourceShipmentIds: refs,
+        individualCost: cc.individualTotalCost,
+        actualSavings: cc.actualSavings,
+        weightBreak: cc.targetBreak,
+      });
+    }
+  }
+
   // Summary
   const directTotalCost = directLanes.reduce((s, l) => s + l.annualCost, 0);
   const consolidatedTotalCost =
     consolidationLanes.reduce((s, l) => s + l.annualCost, 0) +
     finalMileLanes.reduce((s, l) => s + l.annualCost, 0);
   // For non-consolidated shipments, add their direct cost to consolidated total
+  // Exclude refs that are covered by direct consolidation candidates
   const unconsolidatedCost = directLanes
-    .filter(l => !consolidatedRefs.has(l.sourceShipmentIds[0]))
+    .filter(l => !consolidatedRefs.has(l.sourceShipmentIds[0]) && !directConsolRefs.has(l.sourceShipmentIds[0]))
     .reduce((s, l) => s + l.annualCost, 0);
-  const totalConsolidatedCost = consolidatedTotalCost + unconsolidatedCost;
+  const directConsolCost = directConsolLanes.reduce((s, l) => s + l.annualCost, 0);
+  const totalConsolidatedCost = consolidatedTotalCost + unconsolidatedCost + directConsolCost;
 
   const estimatedSavings = directTotalCost - totalConsolidatedCost;
 
@@ -217,18 +266,22 @@ export function buildAwardLanes(optimizationResult, sampleWeeks) {
     consolidationLanes,
     finalMileLanes,
     directLanes,
+    directConsolLanes,
     summary: {
       directTotalCost,
       consolidatedTotalCost: totalConsolidatedCost,
       estimatedSavings,
       savingsPercent: directTotalCost > 0 ? (estimatedSavings / directTotalCost) * 100 : 0,
       poolPointCount: optimizationResult.poolPoints?.length || 0,
+      directConsolCount: directConsolLanes.length,
       laneCount: {
         direct: directLanes.length,
         consolidated: consolidationLanes.length,
         finalMile: finalMileLanes.length,
+        directConsolidation: directConsolLanes.length,
       },
       consolidatedShipments: consolidatedRefs.size,
+      directConsolShipments: directConsolRefs.size,
     },
   };
 }

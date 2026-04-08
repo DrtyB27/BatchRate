@@ -393,6 +393,7 @@ export default function App() {
             totalRows={totalRows}
             batchParams={batchParams}
             batchMeta={batchMeta}
+            credentials={credentials}
             onNewBatch={handleNewBatch}
             onLoadRun={handleLoadRun}
             onReplaceResults={handleReplaceResults}

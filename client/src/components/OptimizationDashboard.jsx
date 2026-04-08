@@ -6,6 +6,7 @@ import PoolPointCard from './optimization/PoolPointCard.jsx';
 import OpportunityTable from './optimization/OpportunityTable.jsx';
 import CustomerSummary from './optimization/CustomerSummary.jsx';
 import ConsolidationCompare from './optimization/ConsolidationCompare.jsx';
+import ConsolidationCandidates from './optimization/ConsolidationCandidates.jsx';
 
 function downloadCsv(filename, csvContent) {
   const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -21,15 +22,16 @@ function timestamp() {
   return new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 }
 
-export default function OptimizationDashboard({ flatRows, sampleWeeks }) {
+export default function OptimizationDashboard({ flatRows, sampleWeeks, credentials, batchParams }) {
   const [config, setConfig] = useState({ ...DEFAULT_CONFIG });
   const [result, setResult] = useState(null);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState('');
   const [error, setError] = useState(null);
   const [selectedPool, setSelectedPool] = useState(null);
-  const [subView, setSubView] = useState('summary'); // summary | detail | shipments | compare
+  const [subView, setSubView] = useState('summary'); // summary | detail | shipments | compare | consolidations
   const [activeOrigin, setActiveOrigin] = useState(null); // null = all origins
+  const [consolidationCandidates, setConsolidationCandidates] = useState(null);
 
   const handleRun = useCallback(async () => {
     setRunning(true);
@@ -50,7 +52,10 @@ export default function OptimizationDashboard({ flatRows, sampleWeeks }) {
 
   const handleExportCsv = () => {
     if (!result) return;
-    downloadCsv(`NetworkOptimization_${timestamp()}.csv`, buildOptimizationCsv(result));
+    const exportResult = consolidationCandidates
+      ? { ...result, consolidationCandidates }
+      : result;
+    downloadCsv(`NetworkOptimization_${timestamp()}.csv`, buildOptimizationCsv(exportResult));
   };
 
   const handlePoolClick = (pool) => {
@@ -124,6 +129,9 @@ export default function OptimizationDashboard({ flatRows, sampleWeeks }) {
                 </button>
                 <button className={viewBtnCls('shipments')} onClick={() => setSubView('shipments')}>
                   Shipment Detail
+                </button>
+                <button className={viewBtnCls('consolidations')} onClick={() => setSubView('consolidations')}>
+                  Direct Consolidations
                 </button>
               </div>
               <button
@@ -239,11 +247,22 @@ export default function OptimizationDashboard({ flatRows, sampleWeeks }) {
           </div>
         )}
 
+        {result && subView === 'consolidations' && (
+          <ConsolidationCandidates
+            flatRows={flatRows}
+            config={config}
+            credentials={credentials}
+            batchParams={batchParams}
+            onCandidatesUpdate={setConsolidationCandidates}
+          />
+        )}
+
         {result && subView === 'compare' && (
           <ConsolidationCompare
             optimizationResult={result}
             sampleWeeks={sampleWeeks || 1}
             onBack={() => setSubView('summary')}
+            confirmedConsolidations={consolidationCandidates?.filter(c => c.rerateStatus === 'confirmed') || null}
           />
         )}
       </div>

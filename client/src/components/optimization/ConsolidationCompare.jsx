@@ -82,14 +82,14 @@ function CarrierTable({ rows, title, showType }) {
   );
 }
 
-export default function ConsolidationCompare({ optimizationResult, sampleWeeks, onBack }) {
+export default function ConsolidationCompare({ optimizationResult, sampleWeeks, onBack, confirmedConsolidations }) {
   const [showSankey, setShowSankey] = useState(true);
   const directSankeyRef = useRef(null);
   const consolSankeyRef = useRef(null);
 
   const awardData = useMemo(
-    () => buildAwardLanes(optimizationResult, sampleWeeks),
-    [optimizationResult, sampleWeeks]
+    () => buildAwardLanes(optimizationResult, sampleWeeks, confirmedConsolidations || null),
+    [optimizationResult, sampleWeeks, confirmedConsolidations]
   );
 
   // Build Sankey data for consolidation view

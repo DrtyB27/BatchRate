@@ -258,7 +258,7 @@ function buildCustomRateCsv(flatRows) {
 // RESULTS SCREEN
 // ============================================================
 export default function ResultsScreen({
-  results, totalRows, batchParams, batchMeta, onNewBatch, onLoadRun, onReplaceResults,
+  results, totalRows, batchParams, batchMeta, credentials, onNewBatch, onLoadRun, onReplaceResults,
   loadedFromFile, initialYieldConfig, csvRows, onRetryFailed, onResumeExecution,
   onCancelExecution, orchestratorRef, executorRef, onRetryInPlace, retryProgress,
 }) {
@@ -765,7 +765,7 @@ export default function ResultsScreen({
           hasHistoric={hasHistoric}
         />
       ) : viewMode === 'optimize' ? (
-        <OptimizationDashboard flatRows={flatRows} sampleWeeks={sampleWeeks} />
+        <OptimizationDashboard flatRows={flatRows} sampleWeeks={sampleWeeks} credentials={credentials} batchParams={batchParams} />
       ) : viewMode === 'performance' ? (
         <BatchPerformance results={results} batchMeta={batchMeta} totalRows={totalRows} onRetryInPlace={onRetryInPlace} retryProgress={retryProgress} />
       ) : viewMode === 'feedback' ? (

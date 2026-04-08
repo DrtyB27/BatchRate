@@ -28,6 +28,14 @@ export default function OptimizationSidebar({ config, onChange, onRun, running }
     onChange({ ...DEFAULT_CONFIG });
   };
 
+  const fmMethod = config.finalMileMethod || 'proportional';
+  const fmBtnCls = (val) =>
+    `flex-1 text-[9px] font-medium py-1 px-1 rounded transition-colors ${
+      fmMethod === val
+        ? 'bg-[#39b6e6] text-white'
+        : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+    }`;
+
   return (
     <div className="w-56 bg-white border-r border-gray-200 flex flex-col shrink-0 overflow-hidden">
       <div className="bg-[#002144] text-white px-3 py-2 shrink-0" style={{ fontFamily: "'Montserrat', Arial, sans-serif" }}>
@@ -35,6 +43,19 @@ export default function OptimizationSidebar({ config, onChange, onRun, running }
       </div>
 
       <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2">
+        {/* Final Mile Method toggle */}
+        <div>
+          <label className="text-[10px] text-gray-500 font-medium block mb-0.5">Final Mile Estimate</label>
+          <div className="flex gap-1">
+            <button className={fmBtnCls('proportional')} onClick={() => handleChange('finalMileMethod', 'proportional')}>
+              Rated Proportional
+            </button>
+            <button className={fmBtnCls('flat')} onClick={() => handleChange('finalMileMethod', 'flat')}>
+              Flat Discount
+            </button>
+          </div>
+        </div>
+
         {FIELDS.map(f => (
           <div key={f.key}>
             <label className="text-[10px] text-gray-500 font-medium block mb-0.5">{f.label}</label>

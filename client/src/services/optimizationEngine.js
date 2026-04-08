@@ -65,7 +65,7 @@ export const DEFAULT_CONFIG = {
   handlingCostMethod: 'pallet',
   maxDwellDays: 2,
   consolidationWindowDays: 5,
-  finalMileMethod: 'estimate',
+  finalMileMethod: 'proportional',
   estimateDiscountPct: 60,
   finalMileMinCharge: 150,
   maxTransitDays: 5,
@@ -295,6 +295,81 @@ function identifyPoolPoints(clusters, origins, hubs, config) {
 // ============================================================
 // Step 3: Cost model
 // ============================================================
+
+/**
+ * Estimate final-mile cost for a single shipment using distance-proportional method.
+ * Scales the shipment's actual rated cost by the ratio of pool→dest distance to origin→dest distance.
+ * Falls back to flat discount method when proportional isn't viable.
+ */
+export function estimateFinalMileCost(shipment, poolLat, poolLon, originLat, originLon, config, centroids) {
+  const ratedCost = shipment.rate?.totalCharge ?? 0;
+  const destCentroid = getZipCentroid(shipment.destPostal, centroids);
+  const origCentroid = getZipCentroid(shipment.origPostal, centroids);
+
+  // Need valid rated cost for proportional method
+  if (!ratedCost || !isFinite(ratedCost) || ratedCost <= 0) {
+    return computeFlatFallback(shipment, poolLat, poolLon, config, centroids, 'no-rated-cost');
+  }
+
+  // Need dest centroid for any distance calc
+  if (!destCentroid) {
+    return computeFlatFallback(shipment, poolLat, poolLon, config, centroids, 'no-dest-centroid');
+  }
+
+  // Origin coords: prefer centroid from origin ZIP, fall back to origin param (which is origin-group centroid)
+  const oLat = origCentroid?.lat ?? originLat;
+  const oLon = origCentroid?.lon ?? originLon;
+
+  const originToDestDist = haversineDistance(oLat, oLon, destCentroid.lat, destCentroid.lon);
+  const poolToDestDist = haversineDistance(poolLat, poolLon, destCentroid.lat, destCentroid.lon);
+
+  // Guard: origin and dest effectively co-located
+  if (originToDestDist < 1) {
+    return computeFlatFallback(shipment, poolLat, poolLon, config, centroids, 'origin-dest-colocated');
+  }
+
+  const distanceRatio = poolToDestDist / originToDestDist;
+
+  // If pool is farther from dest than origin, proportional doesn't make sense
+  if (distanceRatio > 1.0) {
+    return computeFlatFallback(shipment, poolLat, poolLon, config, centroids, 'fallback-flat');
+  }
+
+  const proportionalCost = Math.max(ratedCost * distanceRatio, config.finalMileMinCharge);
+
+  return {
+    cost: proportionalCost,
+    method: 'proportional',
+    note: null,
+    distanceRatio,
+    poolToDestDist,
+    originToDestDist,
+  };
+}
+
+function computeFlatFallback(shipment, poolLat, poolLon, config, centroids, reason) {
+  const destCentroid = getZipCentroid(shipment.destPostal, centroids);
+  let finalMileDist = 50;
+  if (destCentroid) {
+    finalMileDist = roadDistance(poolLat, poolLon, destCentroid.lat, destCentroid.lon);
+  }
+  const directCost = shipment.rate?.totalCharge ?? 0;
+  const directDist = shipment.rate?.distance || 500;
+  const distRatio = directDist > 0 ? Math.min(finalMileDist / directDist, 1) : 0.3;
+  const est = Math.max(
+    directCost * distRatio * (1 - config.estimateDiscountPct / 100),
+    config.finalMileMinCharge
+  );
+  return {
+    cost: est,
+    method: 'flat',
+    note: reason,
+    distanceRatio: distRatio,
+    poolToDestDist: finalMileDist,
+    originToDestDist: null,
+  };
+}
+
 function calculateConsolidationCost(pool, origin, config) {
   const { cluster } = pool;
   const shipments = cluster.shipments;
@@ -320,22 +395,58 @@ function calculateConsolidationCost(pool, origin, config) {
   // C) Final mile
   let totalFinalMile = 0;
   const finalMileDetails = [];
+  const finalMileBreakdown = { proportional: 0, flatFallback: 0, noRatedCost: 0 };
 
   for (const s of shipments) {
-    const destCentroid = getZipCentroid(s.destPostal, ZIP_CENTROIDS);
-    let finalMileDist = 50; // default
-    if (destCentroid) {
-      finalMileDist = roadDistance(pool.lat, pool.lon, destCentroid.lat, destCentroid.lon);
+    if (config.finalMileMethod === 'proportional') {
+      const estimate = estimateFinalMileCost(s, pool.lat, pool.lon, origin.lat, origin.lon, config, ZIP_CENTROIDS);
+      totalFinalMile += estimate.cost;
+
+      if (estimate.method === 'proportional') {
+        finalMileBreakdown.proportional++;
+      } else if (estimate.note === 'no-rated-cost') {
+        finalMileBreakdown.noRatedCost++;
+      } else {
+        finalMileBreakdown.flatFallback++;
+      }
+
+      finalMileDetails.push({
+        reference: s.reference,
+        destPostal: s.destPostal,
+        distance: estimate.poolToDestDist,
+        estimatedCost: estimate.cost,
+        directCost: s.rate?.totalCharge ?? 0,
+        finalMileMethod: estimate.method,
+        finalMileNote: estimate.note,
+        distanceRatio: estimate.distanceRatio,
+      });
+    } else {
+      // Legacy flat discount path
+      const destCentroid = getZipCentroid(s.destPostal, ZIP_CENTROIDS);
+      let finalMileDist = 50;
+      if (destCentroid) {
+        finalMileDist = roadDistance(pool.lat, pool.lon, destCentroid.lat, destCentroid.lon);
+      }
+      const directCost = s.rate?.totalCharge ?? 0;
+      const directDist = s.rate?.distance || 500;
+      const distRatio = directDist > 0 ? Math.min(finalMileDist / directDist, 1) : 0.3;
+      const est = Math.max(
+        directCost * distRatio * (1 - config.estimateDiscountPct / 100),
+        config.finalMileMinCharge
+      );
+      totalFinalMile += est;
+      finalMileBreakdown.flatFallback++;
+      finalMileDetails.push({
+        reference: s.reference,
+        destPostal: s.destPostal,
+        distance: finalMileDist,
+        estimatedCost: est,
+        directCost,
+        finalMileMethod: 'flat',
+        finalMileNote: null,
+        distanceRatio: distRatio,
+      });
     }
-    const directCost = s.rate?.totalCharge ?? 0;
-    const directDist = s.rate?.distance || 500;
-    const distRatio = directDist > 0 ? Math.min(finalMileDist / directDist, 1) : 0.3;
-    const est = Math.max(
-      directCost * distRatio * (1 - config.estimateDiscountPct / 100),
-      config.finalMileMinCharge
-    );
-    totalFinalMile += est;
-    finalMileDetails.push({ reference: s.reference, destPostal: s.destPostal, distance: finalMileDist, estimatedCost: est, directCost });
   }
 
   // D) Total
@@ -353,7 +464,7 @@ function calculateConsolidationCost(pool, origin, config) {
   return {
     linehaulCost, linehaulDist, handlingCost, totalFinalMile,
     consolidatedCost, currentCost, savings, savingsPct,
-    truckLoads, finalMileDetails,
+    truckLoads, finalMileDetails, finalMileBreakdown,
   };
 }
 
@@ -612,7 +723,8 @@ export function buildOptimizationCsv(result) {
 
   lines.push('SHIPMENT ASSIGNMENTS');
   lines.push(['Reference', 'Origin', 'Orig ZIP', 'Dest ZIP', 'Weight', 'Direct LTL Cost',
-    'Assigned Pool', 'Pool ZIP', 'Est Final Mile $', 'Est Total $', 'Savings $'].map(escCsv).join(','));
+    'Assigned Pool', 'Pool ZIP', 'Est Final Mile $', 'Final Mile Method', 'Distance Ratio',
+    'Final Mile Note', 'Est Total $', 'Savings $'].map(escCsv).join(','));
   for (const p of result.poolPoints) {
     for (const fm of p.finalMileDetails) {
       const s = p.cluster.shipments.find(sh => sh.reference === fm.reference);
@@ -621,6 +733,9 @@ export function buildOptimizationCsv(result) {
         fm.directCost.toFixed(2),
         `${p.city}, ${p.state}`, p.zip,
         fm.estimatedCost.toFixed(2),
+        fm.finalMileMethod || 'flat',
+        fm.distanceRatio != null ? fm.distanceRatio.toFixed(3) : '',
+        fm.finalMileNote || '',
         '', // individual total not computed
         (fm.directCost - fm.estimatedCost).toFixed(2),
       ].map(escCsv).join(','));

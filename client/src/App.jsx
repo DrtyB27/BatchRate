@@ -2,6 +2,7 @@ import React, { useState, useCallback, useRef, useEffect } from 'react';
 import CredentialScreen from './screens/CredentialScreen.jsx';
 import InputScreen from './screens/InputScreen.jsx';
 import ResultsScreen from './screens/ResultsScreen.jsx';
+import RateLoadValidator from './rateload/RateLoadValidator.jsx';
 import { deserializeRun, readJsonFile, validateRunFile } from './services/runPersistence.js';
 
 export default function App() {
@@ -332,27 +333,39 @@ export default function App() {
             <p className="text-[11px] font-medium text-[#39b6e6] leading-tight">Batch Rate Analytics Tool</p>
           </div>
         </div>
-        {screen !== 'credentials' && (
-          <div className="flex items-center gap-3">
-            {loadedFromFile ? (
-              <span className="flex items-center gap-1.5 text-xs text-gray-300">
-                <span className="w-2 h-2 rounded-full bg-amber-400 inline-block" />
-                Loaded from file
-              </span>
-            ) : credentials ? (
-              <span className="flex items-center gap-1.5 text-xs text-gray-300">
-                <span className="w-2 h-2 rounded-full bg-green-400 inline-block" />
-                Connected to {connectionHost}
-              </span>
-            ) : null}
-            <button
-              onClick={handleReconnect}
-              className="text-sm bg-[#39b6e6]/20 border border-[#39b6e6] text-[#39b6e6] hover:bg-[#39b6e6]/30 px-3 py-1.5 rounded transition-colors"
-            >
-              {credentials ? 'Edit Connection' : 'Connect to 3G TMS'}
-            </button>
-          </div>
-        )}
+        <div className="flex items-center gap-3">
+          {screen !== 'credentials' && (
+            <>
+              {loadedFromFile ? (
+                <span className="flex items-center gap-1.5 text-xs text-gray-300">
+                  <span className="w-2 h-2 rounded-full bg-amber-400 inline-block" />
+                  Loaded from file
+                </span>
+              ) : credentials ? (
+                <span className="flex items-center gap-1.5 text-xs text-gray-300">
+                  <span className="w-2 h-2 rounded-full bg-green-400 inline-block" />
+                  Connected to {connectionHost}
+                </span>
+              ) : null}
+              <button
+                onClick={handleReconnect}
+                className="text-sm bg-[#39b6e6]/20 border border-[#39b6e6] text-[#39b6e6] hover:bg-[#39b6e6]/30 px-3 py-1.5 rounded transition-colors"
+              >
+                {credentials ? 'Edit Connection' : 'Connect to 3G TMS'}
+              </button>
+            </>
+          )}
+          <button
+            onClick={() => setScreen(screen === 'rateValidator' ? (credentials ? 'input' : 'credentials') : 'rateValidator')}
+            className={`text-sm px-3 py-1.5 rounded transition-colors border ${
+              screen === 'rateValidator'
+                ? 'bg-[#39b6e6] text-white border-[#39b6e6]'
+                : 'bg-[#39b6e6]/20 border-[#39b6e6] text-[#39b6e6] hover:bg-[#39b6e6]/30'
+            }`}
+          >
+            Rate Validator
+          </button>
+        </div>
       </header>
 
       {loadingFile && (
@@ -387,6 +400,7 @@ export default function App() {
             existingResults={results}
           />
         )}
+        {screen === 'rateValidator' && <RateLoadValidator />}
         {screen === 'results' && (
           <ResultsScreen
             results={results}

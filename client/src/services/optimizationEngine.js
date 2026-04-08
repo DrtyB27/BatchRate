@@ -73,6 +73,11 @@ export const DEFAULT_CONFIG = {
   allowWeekendDwell: true,
   maxClusterRadius: 75,
   minShipmentsPerCluster: 3,
+  // Direct consolidation rerate
+  consolidationMatchLevel: 'zip5',
+  consolidationMinSavingsPercent: 5,
+  reratesConcurrency: 2,
+  reratesDelayMs: 200,
 };
 
 // ============================================================
@@ -751,6 +756,36 @@ export function buildOptimizationCsv(result) {
       (s.historicCost || s.rate?.totalCharge || 0).toFixed(2),
       'Below cluster minimum or negative savings',
     ].map(escCsv).join(','));
+  }
+
+  // Direct consolidation section (if candidates provided)
+  if (result.consolidationCandidates && result.consolidationCandidates.length > 0) {
+    lines.push('');
+    lines.push('DIRECT CONSOLIDATION SUMMARY');
+    lines.push(['Lane', 'Shipment Count', 'Individual Weights', 'Combined Weight',
+      'Break Crossed', 'Individual Total Cost', 'Rerated Cost', 'Savings $', 'Savings %',
+      'Mixed Class', 'Pickup Window', 'Status'].map(escCsv).join(','));
+    for (const c of result.consolidationCandidates) {
+      const breakStr = c.breakCrossed ? `${c.currentMaxBreak} -> ${c.targetBreak}` : 'None';
+      const savings = c.reratedCost != null ? c.individualTotalCost - c.reratedCost : null;
+      const savingsPct = savings != null && c.individualTotalCost > 0
+        ? ((savings / c.individualTotalCost) * 100).toFixed(1) : '';
+      lines.push([
+        `${c.lane.originZip} -> ${c.lane.destZip}`,
+        c.shipments.length,
+        c.individualWeights.map(w => w.toFixed(0)).join(' | '),
+        c.combinedWeight.toFixed(0),
+        breakStr,
+        c.individualTotalCost.toFixed(2),
+        c.reratedCost != null ? c.reratedCost.toFixed(2) : '',
+        savings != null ? savings.toFixed(2) : '',
+        savingsPct,
+        c.mixedClass ? 'Y' : '',
+        c.pickupWindow.earliest && c.pickupWindow.latest
+          ? `${c.pickupWindow.earliest} - ${c.pickupWindow.latest}` : '',
+        c.rerateStatus,
+      ].map(escCsv).join(','));
+    }
   }
 
   return lines.join('\n');

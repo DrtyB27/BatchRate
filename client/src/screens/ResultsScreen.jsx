@@ -765,7 +765,7 @@ export default function ResultsScreen({
           hasHistoric={hasHistoric}
         />
       ) : viewMode === 'optimize' ? (
-        <OptimizationDashboard flatRows={flatRows} />
+        <OptimizationDashboard flatRows={flatRows} sampleWeeks={sampleWeeks} />
       ) : viewMode === 'performance' ? (
         <BatchPerformance results={results} batchMeta={batchMeta} totalRows={totalRows} onRetryInPlace={onRetryInPlace} retryProgress={retryProgress} />
       ) : viewMode === 'feedback' ? (

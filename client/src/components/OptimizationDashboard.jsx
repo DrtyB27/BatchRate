@@ -5,6 +5,7 @@ import NetworkSummary from './optimization/NetworkSummary.jsx';
 import PoolPointCard from './optimization/PoolPointCard.jsx';
 import OpportunityTable from './optimization/OpportunityTable.jsx';
 import CustomerSummary from './optimization/CustomerSummary.jsx';
+import ConsolidationCompare from './optimization/ConsolidationCompare.jsx';
 
 function downloadCsv(filename, csvContent) {
   const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -20,14 +21,14 @@ function timestamp() {
   return new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 }
 
-export default function OptimizationDashboard({ flatRows }) {
+export default function OptimizationDashboard({ flatRows, sampleWeeks }) {
   const [config, setConfig] = useState({ ...DEFAULT_CONFIG });
   const [result, setResult] = useState(null);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState('');
   const [error, setError] = useState(null);
   const [selectedPool, setSelectedPool] = useState(null);
-  const [subView, setSubView] = useState('summary'); // summary | detail | shipments
+  const [subView, setSubView] = useState('summary'); // summary | detail | shipments | compare
   const [activeOrigin, setActiveOrigin] = useState(null); // null = all origins
 
   const handleRun = useCallback(async () => {
@@ -126,8 +127,19 @@ export default function OptimizationDashboard({ flatRows }) {
                 </button>
               </div>
               <button
+                onClick={() => setSubView('compare')}
+                className={`ml-auto text-xs px-3 py-1.5 rounded font-medium transition-colors ${
+                  subView === 'compare'
+                    ? 'bg-[#39b6e6] text-white'
+                    : 'bg-[#39b6e6]/10 text-[#002144] hover:bg-[#39b6e6]/20 border border-[#39b6e6]'
+                }`}
+                style={{ fontFamily: "'Montserrat', Arial, sans-serif" }}
+              >
+                Apply to Annual Award &rarr;
+              </button>
+              <button
                 onClick={handleExportCsv}
-                className="ml-auto text-xs bg-[#002144] hover:bg-[#003366] text-white px-3 py-1.5 rounded font-medium transition-colors"
+                className="text-xs bg-[#002144] hover:bg-[#003366] text-white px-3 py-1.5 rounded font-medium transition-colors"
                 style={{ fontFamily: "'Montserrat', Arial, sans-serif" }}
               >
                 Export CSV
@@ -153,7 +165,7 @@ export default function OptimizationDashboard({ flatRows }) {
         )}
 
         {/* Origin filter row */}
-        {result && result.originCount > 1 && subView !== 'summary' && (
+        {result && result.originCount > 1 && subView !== 'summary' && subView !== 'compare' && (
           <div className="px-4 py-1.5 bg-gray-50 border-b border-gray-200 flex items-center gap-1.5 overflow-x-auto shrink-0">
             <span className="text-[10px] text-gray-500 font-medium mr-1">Origin:</span>
             <button className={originBtnCls(null)} onClick={() => setActiveOrigin(null)}>
@@ -225,6 +237,14 @@ export default function OptimizationDashboard({ flatRows }) {
             )}
             <OpportunityTable result={filteredResult} selectedPool={selectedPool} />
           </div>
+        )}
+
+        {result && subView === 'compare' && (
+          <ConsolidationCompare
+            optimizationResult={result}
+            sampleWeeks={sampleWeeks || 1}
+            onBack={() => setSubView('summary')}
+          />
         )}
       </div>
     </div>

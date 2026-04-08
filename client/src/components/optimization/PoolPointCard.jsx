@@ -75,6 +75,16 @@ export default function PoolPointCard({ pool, index, isSelected, onClick }) {
         </div>
       </div>
 
+      {/* Final mile method indicator */}
+      {pool.finalMileBreakdown && (pool.finalMileBreakdown.flatFallback > 0 || pool.finalMileBreakdown.noRatedCost > 0) && (
+        <div className="px-3 pb-1.5">
+          <div className="text-[9px] text-amber-600 bg-amber-50 border border-amber-100 rounded px-2 py-1">
+            {pool.finalMileBreakdown.flatFallback + pool.finalMileBreakdown.noRatedCost} of {pool.shipmentCount} shipments used flat estimate
+            {pool.finalMileBreakdown.noRatedCost > 0 && ` (${pool.finalMileBreakdown.noRatedCost} no rated cost)`}
+          </div>
+        </div>
+      )}
+
       {/* Risk flags */}
       {pool.riskFlags.length > 0 && (
         <div className="px-3 pb-2 flex flex-wrap gap-1">

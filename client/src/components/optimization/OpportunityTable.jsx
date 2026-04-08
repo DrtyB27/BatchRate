@@ -29,6 +29,8 @@ export default function OpportunityTable({ result, selectedPool }) {
           poolId: pp.poolId,
           finalMileCost: fm.estimatedCost,
           finalMileDist: fm.distance,
+          finalMileMethod: fm.finalMileMethod || 'flat',
+          finalMileNote: fm.finalMileNote || null,
           savings: fm.directCost - fm.estimatedCost,
           ease: pp.ease,
           consolidated: true,
@@ -126,6 +128,7 @@ export default function OpportunityTable({ result, selectedPool }) {
               </th>
               <th className="px-2 py-2 text-left font-semibold whitespace-nowrap">Pool Point</th>
               <th className="px-2 py-2 text-right font-semibold whitespace-nowrap">Final Mile</th>
+              <th className="px-2 py-2 text-center font-semibold whitespace-nowrap">FM Method</th>
               <th className="px-2 py-2 text-right font-semibold whitespace-nowrap cursor-pointer" onClick={() => handleSort('savings')}>
                 Savings{sortInd('savings')}
               </th>
@@ -144,6 +147,17 @@ export default function OpportunityTable({ result, selectedPool }) {
                 </td>
                 <td className="px-2 py-1.5 text-right">
                   {r.consolidated ? fmtMoney(r.finalMileCost) : '-'}
+                </td>
+                <td className="px-2 py-1.5 text-center">
+                  {r.consolidated ? (
+                    <span className={`text-[9px] font-medium px-1.5 py-0.5 rounded-full ${
+                      r.finalMileMethod === 'proportional'
+                        ? 'bg-blue-50 text-blue-600'
+                        : 'bg-amber-50 text-amber-600'
+                    }`} title={r.finalMileNote || ''}>
+                      {r.finalMileMethod === 'proportional' ? 'Proportional' : 'Flat'}
+                    </span>
+                  ) : '-'}
                 </td>
                 <td className={`px-2 py-1.5 text-right font-medium ${r.savings > 0 ? 'text-green-600' : r.savings < 0 ? 'text-red-600' : 'text-gray-400'}`}>
                   {r.consolidated ? fmtMoney(r.savings) : '-'}

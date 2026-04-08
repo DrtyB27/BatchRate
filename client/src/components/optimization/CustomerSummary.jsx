@@ -73,6 +73,23 @@ function OpportunityRow({ pool, index, showOrigin }) {
           <span className="text-[10px] text-green-500">None</span>
         )}
       </td>
+      <td className="px-4 py-3">
+        {pool.finalMileBreakdown ? (
+          <span className={`text-[9px] font-medium px-1.5 py-0.5 rounded-full ${
+            pool.finalMileBreakdown.proportional === pool.shipmentCount
+              ? 'bg-blue-50 text-blue-600'
+              : pool.finalMileBreakdown.proportional > 0
+                ? 'bg-amber-50 text-amber-600'
+                : 'bg-gray-100 text-gray-500'
+          }`}>
+            {pool.finalMileBreakdown.proportional > 0
+              ? `${pool.finalMileBreakdown.proportional}/${pool.shipmentCount} prop.`
+              : 'Flat'}
+          </span>
+        ) : (
+          <span className="text-[10px] text-gray-400">-</span>
+        )}
+      </td>
     </tr>
   );
 }
@@ -195,6 +212,7 @@ export default function CustomerSummary({ result }) {
                 <th className="px-4 py-2 text-center font-semibold">Ease</th>
                 <th className="px-4 py-2 text-center font-semibold">Transit</th>
                 <th className="px-4 py-2 text-left font-semibold">Risk Flags</th>
+                <th className="px-4 py-2 text-center font-semibold">FM Method</th>
               </tr>
             </thead>
             <tbody>

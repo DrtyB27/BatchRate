@@ -34,11 +34,17 @@ export default function ScenarioSummary({ scenarios, currentStateResult, histori
   const isCustomer = view === 'customer';
 
   // Compute customer spend for each scenario (approximate: apply margin to totalSpend / shipments)
+  // Current State holds raw historic cost — it must NEVER be marked up. Use its raw
+  // total spend so historic dollars are identical between internal and customer views.
   const customerSpends = useMemo(() => {
     if (!isCustomer || !markups) return {};
     const spends = {};
     for (const s of scenarios) {
       if (!s.result) continue;
+      if (s.isCurrentState) {
+        spends[s.id] = s.result.summary.totalSpend;
+        continue;
+      }
       // Use per-lane breakdown to get more accurate customer pricing
       let custTotal = 0;
       for (const lb of Object.values(s.result.laneBreakdown || {})) {

@@ -208,24 +208,22 @@ export default function ScenarioDetailTable({ scenarios, currentStateResult, vie
                     );
                   }
 
-                  // Compute display cost
+                  // Compute display cost.
+                  // Current State holds raw historic cost — it must NEVER be marked up,
+                  // even in customer view. Markup applies only to award-side rates.
                   let displayCost = lb.awardedCost;
-                  if (isCustomer && markups && lb.awardedCost != null && lb.awardedSCAC) {
+                  if (isCustomer && markups && lb.awardedCost != null && lb.awardedSCAC && !s.isCurrentState) {
                     const m = applyMargin(lb.awardedCost, lb.awardedSCAC, markups);
                     displayCost = m.customerPrice;
                   }
 
-                  // Savings vs current state
+                  // Savings vs current state.
+                  // csLane.awardedCost is historic cost — pass through untouched in both views.
                   let savings = null;
                   if (currentStateResult && !s.isCurrentState) {
                     const csLane = currentStateResult.laneBreakdown[row.laneKey];
                     if (csLane) {
-                      if (isCustomer && markups) {
-                        const csCustPrice = applyMargin(csLane.awardedCost, csLane.awardedSCAC, markups).customerPrice;
-                        savings = csCustPrice - displayCost;
-                      } else {
-                        savings = csLane.awardedCost - lb.awardedCost;
-                      }
+                      savings = csLane.awardedCost - displayCost;
                     }
                   }
 

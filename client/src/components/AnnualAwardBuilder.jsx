@@ -197,16 +197,23 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
     [custPriceLanes, customerLocations, filteredFlatRows]
   );
 
-  // Effective export data: use customer-price figures when the user is in
-  // Customer Share mode, Customer View, or has explicitly set Award By to Customer Price.
-  const isCustomerPrice = (awardBasis === 'customerPrice' || customerShareMode || viewLevel === 'customer') && custPriceLanes != null;
-  const exportCarrierSummary = isCustomerPrice ? custCarrierSummary : carrierSummary;
-  const exportCsTotals = isCustomerPrice ? custCsTotals : csTotals;
-  const exportSankeyData = isCustomerPrice ? custSankeyData : sankeyData;
-  const exportOriginMix = isCustomerPrice ? custOriginMix : originMix;
-  const exportOriginSummaries = isCustomerPrice ? custOriginSummaries : originSummaries;
-  const exportLanes = isCustomerPrice ? custPriceLanes : lanes;
-  const pricingMode = isCustomerPrice ? 'customerPrice' : 'carrierCost';
+  // Export flag: explicit opt-in via Award By toggle or Customer Share mode
+  const isExportCustomerPrice = (awardBasis === 'customerPrice' || customerShareMode) && custPriceLanes != null;
+  // Display flag: also active in Customer View (on-screen elements show margin-applied data)
+  const isDisplayCustomerPrice = (awardBasis === 'customerPrice' || customerShareMode || viewLevel === 'customer') && custPriceLanes != null;
+
+  // Export data — fed to PDF/CSV/Share handlers
+  const exportCarrierSummary = isExportCustomerPrice ? custCarrierSummary : carrierSummary;
+  const exportCsTotals = isExportCustomerPrice ? custCsTotals : csTotals;
+  const exportSankeyData = isExportCustomerPrice ? custSankeyData : sankeyData;
+  const exportOriginMix = isExportCustomerPrice ? custOriginMix : originMix;
+  const exportOriginSummaries = isExportCustomerPrice ? custOriginSummaries : originSummaries;
+  const exportLanes = isExportCustomerPrice ? custPriceLanes : lanes;
+  const pricingMode = isExportCustomerPrice ? 'customerPrice' : 'carrierCost';
+
+  // Display data — for on-screen rendering (Sankey, lane view table)
+  const displaySankeyData = isDisplayCustomerPrice ? custSankeyData : sankeyData;
+  const displayLanes = isDisplayCustomerPrice ? custPriceLanes : lanes;
 
   const availableScenarios = useMemo(() => {
     const base = computedScenarios
@@ -216,7 +223,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
       base.push({ id: '__custom__', name: ctxScenarioName });
     }
     return base;
-  }, [computedScenarios]);
+  }, [computedScenarios, customScenarioSCACs, ctxScenarioName]);
 
   // Customer view: group lanes by origin state, show carrier shifts
   // Apply margin so customer sees their price, not raw carrier cost
@@ -255,6 +262,30 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
     return { totalLanes, shiftLanes, retainedLanes, newLanes, shiftSpend, totalSpend };
   }, [customerLanes]);
 
+  // Customer view totals — margin-applied, for KPI cards and table footer
+  const customerViewTotals = useMemo(() => {
+    const totalSpend = customerLanes.reduce((s, l) => s + l.custAnnualSpend, 0);
+    const totalHistoric = customerLanes.reduce((s, l) => s + (l.custHistBasis || 0), 0);
+    const totalShipments = customerLanes.reduce((s, l) => s + (l.annualShipments || 0), 0);
+    const delta = totalHistoric > 0 ? totalSpend - totalHistoric : null;
+    const deltaPct = totalHistoric > 0 ? (delta / totalHistoric) * 100 : null;
+    return { totalSpend, totalHistoric, totalShipments, delta, deltaPct };
+  }, [customerLanes]);
+
+  // Lane view footer totals — match the data source (displayLanes)
+  const laneFooterTotals = useMemo(() => {
+    if (!isDisplayCustomerPrice || !custPriceLanes) return totals;
+    const dl = custPriceLanes;
+    const shipments = dl.reduce((s, l) => s + l.shipments, 0);
+    const annualShipments = dl.reduce((s, l) => s + l.annualShipments, 0);
+    const sampleSpend = dl.reduce((s, l) => s + l.sampleSpend, 0);
+    const annualSpend = dl.reduce((s, l) => s + l.annualSpend, 0);
+    const annualHistoric = dl.reduce((s, l) => s + l.annualHistoric, 0);
+    const delta = annualHistoric > 0 ? annualSpend - annualHistoric : 0;
+    const deltaPct = annualHistoric > 0 ? (delta / annualHistoric) * 100 : 0;
+    return { shipments, annualShipments, sampleSpend, annualSpend, annualHistoric, delta, deltaPct };
+  }, [isDisplayCustomerPrice, custPriceLanes, totals]);
+
   const toggleOrigin = (st) => {
     setSelectedOrigins(prev =>
       prev.includes(st) ? prev.filter(s => s !== st) : [...prev, st]
@@ -263,7 +294,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
 
   // CSV export — uses exportLanes/exportCarrierSummary to respect Award By toggle
   const handleExportCsv = () => {
-    const awardByLabel = isCustomerPrice ? 'Award By: Customer Price' : 'Award By: Carrier Cost';
+    const awardByLabel = isExportCustomerPrice ? 'Award By: Customer Price' : 'Award By: Carrier Cost';
 
     // Lane detail headers
     const headers = [
@@ -660,10 +691,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
 
         {/* Customer View KPIs — margin-applied */}
         {viewLevel === 'customer' && (() => {
-          const custTotalSpend = customerLanes.reduce((s, l) => s + l.custAnnualSpend, 0);
-          const custHistoric = customerLanes.reduce((s, l) => s + (l.custHistBasis || 0), 0);
-          const custDelta = custHistoric > 0 ? custTotalSpend - custHistoric : null;
-          const custDeltaPct = custHistoric > 0 ? (custDelta / custHistoric) * 100 : null;
+          const { totalSpend: custTotalSpend, totalHistoric: custHistoric, delta: custDelta, deltaPct: custDeltaPct } = customerViewTotals;
           return <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             {[
@@ -719,7 +747,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
             </button>
             {showSankey && (
               <div className="border-t border-gray-200 p-4">
-                <CarrierSankey ref={sankeyRef} data={sankeyData} />
+                <CarrierSankey ref={sankeyRef} data={displaySankeyData} />
               </div>
             )}
           </div>
@@ -822,7 +850,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
                   </tr>
                 </thead>
                 <tbody>
-                  {lanes.map((l, i) => (
+                  {displayLanes.map((l, i) => (
                     <tr key={`${l.laneKey}-${l.carrierSCAC}`} className={i % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
                       <td className="px-4 py-2 font-medium">{l.laneKey}</td>
                       <td className="px-4 py-2 font-mono">{l.carrierSCAC}</td>
@@ -850,14 +878,14 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
                 </tbody>
                 <tfoot>
                   <tr className="bg-[#002144]/5 font-bold border-t">
-                    <td className="px-4 py-2" colSpan={4}>Total ({lanes.length} lanes)</td>
-                    <td className="px-4 py-2 text-right">{fmtNum(totals.shipments)}</td>
-                    <td className="px-4 py-2 text-right">{fmtNum(totals.annualShipments)}</td>
-                    <td className="px-4 py-2 text-right">{fmt$(totals.sampleSpend)}</td>
-                    <td className="px-4 py-2 text-right">{fmt$(totals.annualSpend)}</td>
-                    <td className="px-4 py-2 text-right">{totals.annualHistoric > 0 ? fmt$(totals.annualHistoric) : '—'}</td>
-                    <td className={`px-4 py-2 text-right ${deltaColor(totals.delta)}`}>{totals.annualHistoric > 0 ? fmt$(totals.delta) : '—'}</td>
-                    <td className={`px-4 py-2 text-right ${deltaColor(totals.deltaPct)}`}>{totals.annualHistoric > 0 ? fmtPct(totals.deltaPct) : '—'}</td>
+                    <td className="px-4 py-2" colSpan={4}>Total ({displayLanes.length} lanes)</td>
+                    <td className="px-4 py-2 text-right">{fmtNum(laneFooterTotals.shipments)}</td>
+                    <td className="px-4 py-2 text-right">{fmtNum(laneFooterTotals.annualShipments)}</td>
+                    <td className="px-4 py-2 text-right">{fmt$(laneFooterTotals.sampleSpend)}</td>
+                    <td className="px-4 py-2 text-right">{fmt$(laneFooterTotals.annualSpend)}</td>
+                    <td className="px-4 py-2 text-right">{laneFooterTotals.annualHistoric > 0 ? fmt$(laneFooterTotals.annualHistoric) : '—'}</td>
+                    <td className={`px-4 py-2 text-right ${deltaColor(laneFooterTotals.delta)}`}>{laneFooterTotals.annualHistoric > 0 ? fmt$(laneFooterTotals.delta) : '—'}</td>
+                    <td className={`px-4 py-2 text-right ${deltaColor(laneFooterTotals.deltaPct)}`}>{laneFooterTotals.annualHistoric > 0 ? fmtPct(laneFooterTotals.deltaPct) : '—'}</td>
                   </tr>
                 </tfoot>
               </table>
@@ -951,10 +979,10 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
                       </span>
                     </td>
                     <td colSpan={4}></td>
-                    <td className="px-3 py-2 text-right">{fmtNum(csTotals.annualShipments)}</td>
-                    <td className="px-3 py-2 text-right">{fmtCompact$(csTotals.projectedAnnSpend)}</td>
-                    <td className={`px-3 py-2 text-right ${csTotals.deltaVsDisplaced != null ? deltaColor(csTotals.deltaVsDisplaced) : ''}`}>
-                      {csTotals.deltaVsDisplaced != null ? `${fmtCompact$(csTotals.deltaVsDisplaced)} (${fmtPct(csTotals.deltaVsDisplacedPct)})` : '—'}
+                    <td className="px-3 py-2 text-right">{fmtNum(customerViewTotals.totalShipments)}</td>
+                    <td className="px-3 py-2 text-right">{fmtCompact$(customerViewTotals.totalSpend)}</td>
+                    <td className={`px-3 py-2 text-right ${customerViewTotals.delta != null ? deltaColor(customerViewTotals.delta) : ''}`}>
+                      {customerViewTotals.delta != null ? `${fmtCompact$(customerViewTotals.delta)} (${fmtPct(customerViewTotals.deltaPct)})` : '—'}
                     </td>
                   </tr>
                 </tfoot>

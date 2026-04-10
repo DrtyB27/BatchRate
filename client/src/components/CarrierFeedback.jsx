@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useCallback } from 'react';
-import { computeCarrierFeedback, computeCarrierFeedbackSummary, computeAnnualAward, computeCarrierSummary, getLaneKey } from '../services/analyticsEngine.js';
+import { computeCarrierFeedback, computeCarrierFeedbackSummary, computeAnnualAward, computeCarrierSummary, computeScenario, getLaneKey } from '../services/analyticsEngine.js';
 import { generateCarrierFeedbackPdf } from '../services/pdfExport.js';
+import { useScenario } from '../context/ScenarioContext.jsx';
 
 const TIER_COLORS = {
   'Top 10%':    'bg-green-100 text-green-800',
@@ -239,6 +240,12 @@ function CarrierSummaryTable({ summary, onSelectCarrier, awardContext }) {
 
 // ── Main Component ──────────────────────────────────────────
 export default function CarrierFeedback({ flatRows, computedScenarios, sampleWeeks }) {
+  const { carrierSelections, scenarioName: ctxScenarioName } = useScenario();
+  const customScenarioSCACs = useMemo(
+    () => Object.entries(carrierSelections).filter(([, v]) => v.awarded).map(([scac]) => scac),
+    [carrierSelections]
+  );
+
   // Get all unique SCACs
   const allSCACs = useMemo(() => {
     const scacs = new Set();
@@ -254,15 +261,22 @@ export default function CarrierFeedback({ flatRows, computedScenarios, sampleWee
   const [selectedScenarioId, setSelectedScenarioId] = useState('');
 
   const availableScenarios = useMemo(() => {
-    if (!computedScenarios) return [];
-    return computedScenarios.filter(s => s.result && Object.keys(s.result.awards || {}).length > 0);
-  }, [computedScenarios]);
+    const base = computedScenarios
+      ? computedScenarios.filter(s => s.result && Object.keys(s.result.awards || {}).length > 0)
+      : [];
+    if (customScenarioSCACs.length > 0 && ctxScenarioName) {
+      base.push({ id: '__custom__', name: ctxScenarioName });
+    }
+    return base;
+  }, [computedScenarios, customScenarioSCACs, ctxScenarioName]);
 
   // Build award context using the same computeAnnualAward + computeCarrierSummary
   // pipeline as the Annual Award tab — ensures numbers match exactly.
   const awardContext = useMemo(() => {
     let scenarioAwards = null;
-    if (selectedScenarioId) {
+    if (selectedScenarioId === '__custom__' && customScenarioSCACs.length > 0) {
+      scenarioAwards = computeScenario(flatRows, customScenarioSCACs).awards;
+    } else if (selectedScenarioId) {
       const sc = computedScenarios?.find(s => s.id === selectedScenarioId);
       scenarioAwards = sc?.result?.awards || null;
     }
@@ -274,7 +288,7 @@ export default function CarrierFeedback({ flatRows, computedScenarios, sampleWee
       ctx[c.scac] = c; // pass the full carrier summary object
     }
     return ctx;
-  }, [flatRows, computedScenarios, selectedScenarioId, sampleWeeks]);
+  }, [flatRows, computedScenarios, selectedScenarioId, customScenarioSCACs, sampleWeeks]);
 
   // Per-lane award status for the selected carrier's drill-down
   // Uses computeAnnualAward lanes to match the Annual Award tab exactly.
@@ -282,7 +296,9 @@ export default function CarrierFeedback({ flatRows, computedScenarios, sampleWee
     if (!selectedSCAC) return {};
 
     let scenarioAwards = null;
-    if (selectedScenarioId) {
+    if (selectedScenarioId === '__custom__' && customScenarioSCACs.length > 0) {
+      scenarioAwards = computeScenario(flatRows, customScenarioSCACs).awards;
+    } else if (selectedScenarioId) {
       const sc = computedScenarios?.find(s => s.id === selectedScenarioId);
       scenarioAwards = sc?.result?.awards || null;
     }
@@ -305,7 +321,7 @@ export default function CarrierFeedback({ flatRows, computedScenarios, sampleWee
     }
 
     return laneStat;
-  }, [flatRows, selectedSCAC, computedScenarios, selectedScenarioId, sampleWeeks]);
+  }, [flatRows, selectedSCAC, computedScenarios, selectedScenarioId, customScenarioSCACs, sampleWeeks]);
 
   const summary = useMemo(() => computeCarrierFeedbackSummary(flatRows), [flatRows]);
 
@@ -352,7 +368,7 @@ export default function CarrierFeedback({ flatRows, computedScenarios, sampleWee
     // Award summary
     const ac = awardContext[feedback.scac];
     if (ac) {
-      lines.push(`Award Basis: ${selectedScenarioId ? availableScenarios.find(s => s.id === selectedScenarioId)?.name : 'Low-Cost Winners'}`);
+      lines.push(`Award Basis: ${selectedScenarioId === '__custom__' ? ctxScenarioName : selectedScenarioId ? availableScenarios.find(s => s.id === selectedScenarioId)?.name : 'Low-Cost Winners'}`);
       lines.push(`Awarded Lanes: ${ac.awardedLanes}`);
       lines.push(`Retained: ${ac.retainedLanes}  Won: ${ac.wonLanes}  Lost: ${ac.lostLanes}`);
       lines.push(`Proj. Spend: ${fmtCompact$(ac.awardSpend)}`);
@@ -395,9 +411,11 @@ export default function CarrierFeedback({ flatRows, computedScenarios, sampleWee
     URL.revokeObjectURL(url);
 
     // Also generate PDF
-    const scenarioName = selectedScenarioId
-      ? availableScenarios.find(s => s.id === selectedScenarioId)?.name
-      : null;
+    const scenarioName = selectedScenarioId === '__custom__'
+      ? ctxScenarioName
+      : selectedScenarioId
+        ? availableScenarios.find(s => s.id === selectedScenarioId)?.name
+        : null;
     const pdf = generateCarrierFeedbackPdf({
       feedback,
       awardContext: awardContext[feedback.scac],
@@ -405,7 +423,7 @@ export default function CarrierFeedback({ flatRows, computedScenarios, sampleWee
       laneAwardStatus,
     });
     pdf.save(`BRAT_Feedback_${feedback.scac}_${ts}.pdf`);
-  }, [feedback, awardContext, laneAwardStatus, selectedScenarioId, availableScenarios]);
+  }, [feedback, awardContext, laneAwardStatus, selectedScenarioId, availableScenarios, ctxScenarioName]);
 
   if (allSCACs.length === 0) {
     return (
@@ -542,7 +560,7 @@ export default function CarrierFeedback({ flatRows, computedScenarios, sampleWee
                   <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wide mb-3">
                     Award Summary — {feedback.scac}
                     <span className="ml-2 font-normal text-gray-400">
-                      ({selectedScenarioId ? availableScenarios.find(s => s.id === selectedScenarioId)?.name : 'Low-Cost Winners'})
+                      ({selectedScenarioId === '__custom__' ? ctxScenarioName : selectedScenarioId ? availableScenarios.find(s => s.id === selectedScenarioId)?.name : 'Low-Cost Winners'})
                     </span>
                   </h4>
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">

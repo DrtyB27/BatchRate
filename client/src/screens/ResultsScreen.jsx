@@ -14,6 +14,7 @@ import {
   detectSampleWeeks,
 } from '../services/analyticsEngine.js';
 import { applyMargin } from '../services/ratingClient.js';
+import { ScenarioProvider } from '../context/ScenarioContext.jsx';
 
 function downloadBlob(filename, blob) {
   const url = URL.createObjectURL(blob);
@@ -495,6 +496,7 @@ export default function ResultsScreen({
     }`;
 
   return (
+    <ScenarioProvider>
     <div className="flex-1 flex flex-col overflow-hidden">
       {/* Batch action banner — shows during execution OR after completion with failures */}
       {results.length > 0 && (!isComplete || retryCount > 0) && (
@@ -830,5 +832,6 @@ export default function ResultsScreen({
         </div>
       )}
     </div>
+    </ScenarioProvider>
   );
 }

@@ -701,7 +701,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             {[
               { label: 'Annual Shipments (est)', value: fmtNum(csTotals.annualShipments) },
-              { label: 'Projected Customer Spend', value: fmtCompact$(custTotalSpend), sublabel: 'with margin applied' },
+              { label: 'Projected Customer Spend', value: fmtCompact$(custTotalSpend), sublabel: 'DLX tariff pricing' },
               { label: 'Was Paying (Historic)', value: custHistoric > 0 ? fmtCompact$(custHistoric) : 'N/A' },
               {
                 label: 'Customer Savings',

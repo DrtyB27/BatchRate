@@ -1,9 +1,10 @@
 import React, { useState, useMemo, useRef, useCallback } from 'react';
-import { computeAnnualAward, computeCarrierSummary, computeSankeyData, computeCarrierMixByOrigin, getLaneKey } from '../services/analyticsEngine.js';
+import { computeAnnualAward, computeCarrierSummary, computeSankeyData, computeCarrierMixByOrigin, computeScenario, getLaneKey } from '../services/analyticsEngine.js';
 import { generateAnnualAwardPdf, downloadBlob } from '../services/pdfExport.js';
 import { applyMargin } from '../services/ratingClient.js';
 import CarrierSankey from './CarrierSankey.jsx';
 import { openAwardSharePdf } from './AwardSharePdf.js';
+import { useScenario } from '../context/ScenarioContext.jsx';
 
 function fmt$(v) {
   return '$' + Number(v || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -32,6 +33,7 @@ function escCsv(val) {
 }
 
 export default function AnnualAwardBuilder({ flatRows, computedScenarios, activeMarkups, sampleWeeks, weeksOverride, onWeeksChange, detectedWeeks }) {
+  const { carrierSelections, scenarioName: ctxScenarioName } = useScenario();
   const [selectedScenarioId, setSelectedScenarioId] = useState('');
   const [viewLevel, setViewLevel] = useState('carrier'); // 'carrier' | 'lane' | 'customer'
   const [showSankey, setShowSankey] = useState(true);
@@ -60,11 +62,20 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
     return flatRows.filter(r => allowed.has(r.origState));
   }, [flatRows, selectedOrigins]);
 
+  const customScenarioSCACs = useMemo(
+    () => Object.entries(carrierSelections).filter(([, v]) => v.awarded).map(([scac]) => scac),
+    [carrierSelections]
+  );
+
   const scenarioAwards = useMemo(() => {
-    if (!selectedScenarioId || !computedScenarios) return null;
+    if (!selectedScenarioId) return null;
+    if (selectedScenarioId === '__custom__' && customScenarioSCACs.length > 0) {
+      return computeScenario(flatRows, customScenarioSCACs).awards;
+    }
+    if (!computedScenarios) return null;
     const sc = computedScenarios.find(s => s.id === selectedScenarioId);
     return sc?.result?.awards || null;
-  }, [selectedScenarioId, computedScenarios]);
+  }, [selectedScenarioId, computedScenarios, customScenarioSCACs, flatRows]);
 
   // When "Customer Price" mode is active, re-select winners by lowest customer price
   // (with per-SCAC markup applied). Respects scenario's eligible SCACs if active.
@@ -73,7 +84,9 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
 
     // Determine eligible SCACs from selected scenario (null = all carriers)
     let eligibleSet = null;
-    if (selectedScenarioId && computedScenarios) {
+    if (selectedScenarioId === '__custom__' && customScenarioSCACs.length > 0) {
+      eligibleSet = new Set(customScenarioSCACs.map(s => s.toUpperCase()));
+    } else if (selectedScenarioId && computedScenarios) {
       const sc = computedScenarios.find(s => s.id === selectedScenarioId);
       if (sc && sc.eligibleSCACs?.length > 0) {
         eligibleSet = new Set(sc.eligibleSCACs.map(s => s.toUpperCase()));
@@ -143,8 +156,13 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
   );
 
   const availableScenarios = useMemo(() => {
-    if (!computedScenarios) return [];
-    return computedScenarios.filter(s => s.result && Object.keys(s.result.awards || {}).length > 0);
+    const base = computedScenarios
+      ? computedScenarios.filter(s => s.result && Object.keys(s.result.awards || {}).length > 0)
+      : [];
+    if (customScenarioSCACs.length > 0 && ctxScenarioName) {
+      base.push({ id: '__custom__', name: ctxScenarioName });
+    }
+    return base;
   }, [computedScenarios]);
 
   // Customer view: group lanes by origin state, show carrier shifts
@@ -274,9 +292,11 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
 
   const handleExportWithPdf = () => {
     const ts = new Date().toISOString().slice(0, 10);
-    const scenarioName = selectedScenarioId
-      ? availableScenarios.find(s => s.id === selectedScenarioId)?.name
-      : null;
+    const scenarioName = selectedScenarioId === '__custom__'
+      ? ctxScenarioName
+      : selectedScenarioId
+        ? availableScenarios.find(s => s.id === selectedScenarioId)?.name
+        : null;
 
     // Generate PDF
     const doc = generateAnnualAwardPdf({

@@ -4,6 +4,7 @@ import TargetSolver from './TargetSolver.jsx';
 import SensitivityChart from './SensitivityChart.jsx';
 import { computeYieldAnalysis, optimizePerScac, computeScenario, computeCurrentState, computeHistoricCarrierMatch, filterRowsByScenario } from '../../services/analyticsEngine.js';
 import { applyMargin } from '../../services/ratingClient.js';
+import { useScenario } from '../../context/ScenarioContext.jsx';
 
 function fmt$(v) {
   if (v == null) return '—';
@@ -35,9 +36,13 @@ export default function YieldOptimizer({ flatRows, activeMarkups, onMarkupsChang
   const [laneSortKey, setLaneSortKey] = useState('marginPct');
   const [laneSortAsc, setLaneSortAsc] = useState(true);
   const [selectedScenario, setSelectedScenario] = useState('all'); // 'all' | 'lowCost' | 'currentState' | 'historicMatch' | custom SCAC list key
-  const [customScenarioSCACs, setCustomScenarioSCACs] = useState([]);
-  const [customScenarioName, setCustomScenarioName] = useState('');
   const [showScenarioBuilder, setShowScenarioBuilder] = useState(false);
+
+  const { carrierSelections, scenarioName: customScenarioName, setCarrierSelections, setScenarioName: setCustomScenarioName, applyScenario } = useScenario();
+  const customScenarioSCACs = useMemo(
+    () => Object.entries(carrierSelections).filter(([, v]) => v.awarded).map(([scac]) => scac),
+    [carrierSelections]
+  );
 
   // Build dropdown options from shared scenario list
   const scenarioOptions = useMemo(() => {
@@ -268,6 +273,18 @@ export default function YieldOptimizer({ flatRows, activeMarkups, onMarkupsChang
                     <button
                       onClick={() => {
                         if (customScenarioSCACs.length > 0 && customScenarioName.trim()) {
+                          // Compute scenario to populate awardedLanes
+                          const result = computeScenario(flatRows, customScenarioSCACs);
+                          const lanesByScac = {};
+                          for (const award of Object.values(result.awards)) {
+                            if (!lanesByScac[award.scac]) lanesByScac[award.scac] = new Set();
+                            lanesByScac[award.scac].add(award.laneKey);
+                          }
+                          const enriched = {};
+                          for (const [scac, sel] of Object.entries(carrierSelections)) {
+                            enriched[scac] = { ...sel, awardedLanes: lanesByScac[scac] ? [...lanesByScac[scac]] : [] };
+                          }
+                          applyScenario(enriched, customScenarioName);
                           setSelectedScenario('custom');
                           setShowScenarioBuilder(false);
                         }
@@ -278,13 +295,13 @@ export default function YieldOptimizer({ flatRows, activeMarkups, onMarkupsChang
                       Apply
                     </button>
                     <button
-                      onClick={() => setCustomScenarioSCACs([...allSCACs])}
+                      onClick={() => setCarrierSelections(Object.fromEntries(allSCACs.map(s => [s, { awarded: true }])))}
                       className="text-[10px] text-gray-500 hover:text-gray-700"
                     >
                       Select All
                     </button>
                     <button
-                      onClick={() => setCustomScenarioSCACs([])}
+                      onClick={() => setCarrierSelections({})}
                       className="text-[10px] text-gray-500 hover:text-gray-700"
                     >
                       Clear
@@ -295,11 +312,12 @@ export default function YieldOptimizer({ flatRows, activeMarkups, onMarkupsChang
                       <label key={scac} className="flex items-center gap-1 text-[10px]">
                         <input
                           type="checkbox"
-                          checked={customScenarioSCACs.includes(scac)}
+                          checked={!!carrierSelections[scac]?.awarded}
                           onChange={() => {
-                            setCustomScenarioSCACs(prev =>
-                              prev.includes(scac) ? prev.filter(s => s !== scac) : [...prev, scac]
-                            );
+                            setCarrierSelections(prev => ({
+                              ...prev,
+                              [scac]: { ...prev[scac], awarded: !prev[scac]?.awarded },
+                            }));
                           }}
                           className="rounded border-gray-300"
                         />

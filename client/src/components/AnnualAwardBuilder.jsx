@@ -163,10 +163,11 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
     [lanes, customerLocations, filteredFlatRows]
   );
 
-  // When awardBasis is 'customerPrice', derive margin-applied versions of lanes,
-  // then recompute all summaries from those for use in PDF/CSV exports.
+  // Derive margin-applied versions of lanes for customer-price exports.
+  // Always computed (not gated on awardBasis) because Customer Share mode
+  // and Customer View always show margin-applied figures.
   const custPriceLanes = useMemo(() => {
-    if (awardBasis !== 'customerPrice' || !activeMarkups) return null;
+    if (!activeMarkups) return null;
     return lanes.map(l => {
       if (l.shipments <= 0) return l;
       const perShipCost = l.sampleSpend / l.shipments;
@@ -177,7 +178,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
       const custDeltaPct = l.annualHistoric > 0 ? (custDelta / l.annualHistoric) * 100 : 0;
       return { ...l, sampleSpend: custSampleSpend, annualSpend: custAnnualSpend, delta: custDelta, deltaPct: custDeltaPct };
     });
-  }, [awardBasis, activeMarkups, lanes, sampleWeeks]);
+  }, [activeMarkups, lanes, sampleWeeks]);
 
   const { carriers: custCarrierSummary, totals: custCsTotals } = useMemo(
     () => custPriceLanes ? computeCarrierSummary(custPriceLanes) : { carriers: [], totals: {} },
@@ -196,8 +197,9 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
     [custPriceLanes, customerLocations, filteredFlatRows]
   );
 
-  // Effective export data: picks customer-price or carrier-cost based on awardBasis
-  const isCustomerPrice = awardBasis === 'customerPrice' && custPriceLanes != null;
+  // Effective export data: use customer-price figures when the user is in
+  // Customer Share mode, Customer View, or has explicitly set Award By to Customer Price.
+  const isCustomerPrice = (awardBasis === 'customerPrice' || customerShareMode || viewLevel === 'customer') && custPriceLanes != null;
   const exportCarrierSummary = isCustomerPrice ? custCarrierSummary : carrierSummary;
   const exportCsTotals = isCustomerPrice ? custCsTotals : csTotals;
   const exportSankeyData = isCustomerPrice ? custSankeyData : sankeyData;

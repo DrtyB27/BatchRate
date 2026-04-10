@@ -211,9 +211,14 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
   const exportLanes = isExportCustomerPrice ? custPriceLanes : lanes;
   const pricingMode = isExportCustomerPrice ? 'customerPrice' : 'carrierCost';
 
-  // Display data — for on-screen rendering (Sankey, lane view table)
+  // Display data — for on-screen rendering (Sankey, lane view table, Share PDF)
   const displaySankeyData = isDisplayCustomerPrice ? custSankeyData : sankeyData;
   const displayLanes = isDisplayCustomerPrice ? custPriceLanes : lanes;
+  const displayCarrierSummary = isDisplayCustomerPrice ? custCarrierSummary : carrierSummary;
+  const displayCsTotals = isDisplayCustomerPrice ? custCsTotals : csTotals;
+  const displayOriginMix = isDisplayCustomerPrice ? custOriginMix : originMix;
+  const displayOriginSummaries = isDisplayCustomerPrice ? custOriginSummaries : originSummaries;
+  const displayPricingMode = isDisplayCustomerPrice ? 'customerPrice' : 'carrierCost';
 
   const availableScenarios = useMemo(() => {
     const base = computedScenarios
@@ -406,20 +411,20 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
 
   const handleSharePdf = useCallback(() => {
     const sankeyHtml = sankeyRef.current?.innerHTML || '';
-    const distinctCarriers = new Set(exportCarrierSummary.filter(c => c.awardedLanes > 0).map(c => c.scac));
+    const distinctCarriers = new Set(displayCarrierSummary.filter(c => c.awardedLanes > 0).map(c => c.scac));
     openAwardSharePdf({
       sankeyHtml,
-      carrierSummary: { carriers: exportCarrierSummary, totals: exportCsTotals },
-      originMix: exportOriginMix,
+      carrierSummary: { carriers: displayCarrierSummary, totals: displayCsTotals },
+      originMix: displayOriginMix,
       sampleWeeks,
       annualizationFactor,
-      totals: exportCsTotals,
+      totals: displayCsTotals,
       customerName,
       carrierCount: distinctCarriers.size,
-      originSummaries: exportOriginSummaries,
-      pricingMode,
+      originSummaries: displayOriginSummaries,
+      pricingMode: displayPricingMode,
     });
-  }, [exportCarrierSummary, exportCsTotals, exportOriginMix, sampleWeeks, annualizationFactor, customerName, exportOriginSummaries, pricingMode]);
+  }, [displayCarrierSummary, displayCsTotals, displayOriginMix, sampleWeeks, annualizationFactor, customerName, displayOriginSummaries, displayPricingMode]);
 
   const deltaColor = (v) => v < 0 ? 'text-green-700' : v > 0 ? 'text-red-600' : 'text-gray-700';
   const netLaneColor = (v) => v > 0 ? 'text-green-700' : v < 0 ? 'text-red-600' : 'text-gray-500';

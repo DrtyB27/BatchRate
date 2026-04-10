@@ -332,7 +332,7 @@ export default function App() {
         <div className="flex items-center gap-3">
           <div>
             <h1 className="text-xl font-bold tracking-tight leading-tight">B.R.A.T.</h1>
-            <p className="text-[11px] font-medium text-[#39b6e6] leading-tight">Batch Rate Analytics Tool</p>
+            <p className="text-[11px] font-medium text-[#39b6e6] leading-tight">Batch Rate Analytics Tool <span className="text-gray-400 font-normal">v{__APP_VERSION__}</span></p>
           </div>
         </div>
         <div className="flex items-center gap-3">

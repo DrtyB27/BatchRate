@@ -163,6 +163,49 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
     [lanes, customerLocations, filteredFlatRows]
   );
 
+  // When awardBasis is 'customerPrice', derive margin-applied versions of lanes,
+  // then recompute all summaries from those for use in PDF/CSV exports.
+  const custPriceLanes = useMemo(() => {
+    if (awardBasis !== 'customerPrice' || !activeMarkups) return null;
+    return lanes.map(l => {
+      if (l.shipments <= 0) return l;
+      const perShipCost = l.sampleSpend / l.shipments;
+      const m = applyMargin(perShipCost, l.carrierSCAC, activeMarkups);
+      const custSampleSpend = m.customerPrice * l.shipments;
+      const custAnnualSpend = custSampleSpend * (52 / Math.max(1, sampleWeeks));
+      const custDelta = l.annualHistoric > 0 ? custAnnualSpend - l.annualHistoric : 0;
+      const custDeltaPct = l.annualHistoric > 0 ? (custDelta / l.annualHistoric) * 100 : 0;
+      return { ...l, sampleSpend: custSampleSpend, annualSpend: custAnnualSpend, delta: custDelta, deltaPct: custDeltaPct };
+    });
+  }, [awardBasis, activeMarkups, lanes, sampleWeeks]);
+
+  const { carriers: custCarrierSummary, totals: custCsTotals } = useMemo(
+    () => custPriceLanes ? computeCarrierSummary(custPriceLanes) : { carriers: [], totals: {} },
+    [custPriceLanes]
+  );
+  const custSankeyData = useMemo(
+    () => custPriceLanes ? computeSankeyData(custPriceLanes, annualizationFactor) : null,
+    [custPriceLanes, annualizationFactor]
+  );
+  const custOriginMix = useMemo(
+    () => custPriceLanes ? computeCarrierMixByOrigin(custPriceLanes, filteredFlatRows) : null,
+    [custPriceLanes, filteredFlatRows]
+  );
+  const custOriginSummaries = useMemo(
+    () => custPriceLanes ? computeOriginSummary(custPriceLanes, customerLocations, filteredFlatRows, 'origin') : null,
+    [custPriceLanes, customerLocations, filteredFlatRows]
+  );
+
+  // Effective export data: picks customer-price or carrier-cost based on awardBasis
+  const isCustomerPrice = awardBasis === 'customerPrice' && custPriceLanes != null;
+  const exportCarrierSummary = isCustomerPrice ? custCarrierSummary : carrierSummary;
+  const exportCsTotals = isCustomerPrice ? custCsTotals : csTotals;
+  const exportSankeyData = isCustomerPrice ? custSankeyData : sankeyData;
+  const exportOriginMix = isCustomerPrice ? custOriginMix : originMix;
+  const exportOriginSummaries = isCustomerPrice ? custOriginSummaries : originSummaries;
+  const exportLanes = isCustomerPrice ? custPriceLanes : lanes;
+  const pricingMode = isCustomerPrice ? 'customerPrice' : 'carrierCost';
+
   const availableScenarios = useMemo(() => {
     const base = computedScenarios
       ? computedScenarios.filter(s => s.result && Object.keys(s.result.awards || {}).length > 0)
@@ -216,8 +259,10 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
     );
   };
 
-  // CSV export
+  // CSV export — uses exportLanes/exportCarrierSummary to respect Award By toggle
   const handleExportCsv = () => {
+    const awardByLabel = isCustomerPrice ? 'Award By: Customer Price' : 'Award By: Carrier Cost';
+
     // Lane detail headers
     const headers = [
       'Lane', 'Carrier SCAC', 'Carrier Name',
@@ -226,7 +271,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
       'Sample Spend', 'Annual Spend (est)',
       'Annual Historic Spend (Attributed)', 'Annual Delta ($)', 'Annual Delta (%)',
     ];
-    const rows = lanes.map(l => [
+    const rows = exportLanes.map(l => [
       l.laneKey, l.carrierSCAC, l.carrierName,
       l.historicCarrier || '', l.historicCarrierPct || '',
       l.historicTotalAnnSpend ? l.historicTotalAnnSpend.toFixed(2) : '0.00',
@@ -241,7 +286,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
       'Proj. Ann. Spend', 'Displaced Historic', '\u0394 ($)', '\u0394 (%)',
       'Incumbent Lanes', 'Net Lanes', 'Retained', 'Won', 'Lost',
     ];
-    const summaryRows = carrierSummary.map(c => [
+    const summaryRows = exportCarrierSummary.map(c => [
       c.scac, c.carrierName, c.awardedLanes, c.sampleShipments, c.annualShipments,
       c.projectedAnnSpend.toFixed(2),
       c.displacedHistoricSpend.toFixed(2),
@@ -273,6 +318,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
       : 'Origin Filter: All';
 
     const csv = [
+      awardByLabel,
       filterNote,
       '',
       headers.join(','),
@@ -306,17 +352,18 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
         ? availableScenarios.find(s => s.id === selectedScenarioId)?.name
         : null;
 
-    // Generate PDF
+    // Generate PDF — uses effective export data (respects Award By toggle)
     const doc = generateAnnualAwardPdf({
       sampleWeeks,
       annualizationFactor,
       scenarioName,
       originFilter: selectedOrigins,
-      csTotals,
-      carrierSummary,
+      csTotals: exportCsTotals,
+      carrierSummary: exportCarrierSummary,
       customerLanes,
       customerSummary,
-      originSummaries,
+      originSummaries: exportOriginSummaries,
+      pricingMode,
     });
     doc.save(`AnnualAward_Summary_${sampleWeeks}wk_${ts}.pdf`);
 
@@ -326,19 +373,20 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
 
   const handleSharePdf = useCallback(() => {
     const sankeyHtml = sankeyRef.current?.innerHTML || '';
-    const distinctCarriers = new Set(carrierSummary.filter(c => c.awardedLanes > 0).map(c => c.scac));
+    const distinctCarriers = new Set(exportCarrierSummary.filter(c => c.awardedLanes > 0).map(c => c.scac));
     openAwardSharePdf({
       sankeyHtml,
-      carrierSummary: { carriers: carrierSummary, totals: csTotals },
-      originMix,
+      carrierSummary: { carriers: exportCarrierSummary, totals: exportCsTotals },
+      originMix: exportOriginMix,
       sampleWeeks,
       annualizationFactor,
-      totals: csTotals,
+      totals: exportCsTotals,
       customerName,
       carrierCount: distinctCarriers.size,
-      originSummaries,
+      originSummaries: exportOriginSummaries,
+      pricingMode,
     });
-  }, [carrierSummary, csTotals, originMix, sampleWeeks, annualizationFactor, customerName, originSummaries]);
+  }, [exportCarrierSummary, exportCsTotals, exportOriginMix, sampleWeeks, annualizationFactor, customerName, exportOriginSummaries, pricingMode]);
 
   const deltaColor = (v) => v < 0 ? 'text-green-700' : v > 0 ? 'text-red-600' : 'text-gray-700';
   const netLaneColor = (v) => v > 0 ? 'text-green-700' : v < 0 ? 'text-red-600' : 'text-gray-500';

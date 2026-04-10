@@ -199,8 +199,13 @@ export function generateAnnualAwardPdf({
   customerLanes,
   customerSummary,
   originSummaries,
+  pricingMode,
 }) {
   const doc = new jsPDF({ orientation: 'landscape' });
+  const isCustPrice = pricingMode === 'customerPrice';
+  const pricingNote = isCustPrice
+    ? 'Figures reflect customer pricing with margin applied'
+    : 'Figures reflect carrier cost';
   const subtitle = [
     `${sampleWeeks}-week sample → 52-week projection (${annualizationFactor.toFixed(1)}x)`,
     scenarioName ? `Scenario: ${scenarioName}` : 'Basis: Low-Cost Winners',
@@ -218,6 +223,14 @@ export function generateAnnualAwardPdf({
     { label: 'Annual Delta', value: csTotals.deltaVsDisplaced != null ? `${fmtMoney(csTotals.deltaVsDisplaced)} (${fmtPct(csTotals.deltaVsDisplacedPct)})` : 'N/A',
       color: csTotals.deltaVsDisplaced < 0 ? GREEN : csTotals.deltaVsDisplaced > 0 ? RED : NAVY },
   ]);
+
+  // Pricing mode indicator
+  doc.setFontSize(7);
+  doc.setFont('helvetica', 'italic');
+  doc.setTextColor(...(isCustPrice ? BLUE : GRAY));
+  doc.text(pricingNote, doc.internal.pageSize.getWidth() / 2, y + 4, { align: 'center' });
+  doc.setFont('helvetica', 'normal');
+  y += 10;
 
   // Carrier Summary Table — condensed with abbreviated headers, 8pt font
   y = drawSectionLabel(doc, y, 'Carrier Summary');

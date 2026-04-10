@@ -284,6 +284,7 @@ export function openAwardSharePdf({
   customerName,
   carrierCount,
   originSummaries,
+  pricingMode,
 }) {
   const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
   const projected = totals.projectedAnnSpend || 0;
@@ -296,6 +297,10 @@ export function openAwardSharePdf({
 
   const nameDisplay = customerName ? escHtml(customerName) : '';
   const nameSubtitle = nameDisplay ? `${nameDisplay} &middot; ` : '';
+  const isCustPrice = pricingMode === 'customerPrice';
+  const pricingNote = isCustPrice
+    ? 'Figures reflect customer pricing with margin applied'
+    : 'Figures reflect carrier cost';
 
   const carrierSummaryHtml = buildCarrierSummarySection(carrierSummary, totals);
   const originSummaryHtml = buildOriginSummarySection(originSummaries);
@@ -454,6 +459,10 @@ export function openAwardSharePdf({
   <div class="sample-note">
     ${sampleWeeks} active week${sampleWeeks !== 1 ? 's' : ''} &middot; ${annualizationFactor.toFixed(1)}&times; annualization factor
     &middot; ${totals.awardedLanes || 0} lanes assigned across ${carrierCount || 0} carrier${carrierCount !== 1 ? 's' : ''}
+  </div>
+
+  <div style="text-align:center;font-size:8px;color:${isCustPrice ? '#0891b2' : '#64748b'};font-style:italic;margin:4px 0 0;">
+    ${escHtml(pricingNote)}
   </div>
 
   ${footerHtml}

@@ -69,6 +69,7 @@ export default function CredentialScreen({ onConnected, onLoadRun }) {
         <div className="text-center mb-2">
           <h2 className="text-2xl font-bold text-[#002144]" style={{ fontFamily: "'Montserrat', Arial, sans-serif" }}>Connect to 3G TMS</h2>
           <p className="text-sm text-gray-500 mt-1">Configure your rating session</p>
+          <p className="text-[10px] text-gray-400 mt-0.5">v{__APP_VERSION__}</p>
           <div className="flex items-center justify-center gap-4 mt-3">
             <button
               type="button"

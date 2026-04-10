@@ -18,6 +18,7 @@ export default function App() {
   const [retryProgress, setRetryProgress] = useState(null);
   const [loadingFile, setLoadingFile] = useState(false);
   const [pendingAutoResume, setPendingAutoResume] = useState(false);
+  const [customerLocations, setCustomerLocations] = useState([]);
 
   // Lifted refs so ResultsScreen can access execution controls
   const orchestratorRef = useRef(null);
@@ -99,6 +100,7 @@ export default function App() {
       setBatchParams(run.metadata);
       setLoadedFromFile(true);
       autoResumeTriggered.current = false;
+      if (run.customerLocations) setCustomerLocations(run.customerLocations);
 
       // Handle resumable files with pending rows
       if (run.pendingRows && run.pendingRows.length > 0) {
@@ -420,6 +422,8 @@ export default function App() {
             onCancelExecution={handleCancelExecution}
             orchestratorRef={orchestratorRef}
             executorRef={executorRef}
+            customerLocations={customerLocations}
+            onCustomerLocationsChange={setCustomerLocations}
           />
         )}
       </div>

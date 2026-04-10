@@ -5,6 +5,8 @@ import { applyMargin } from '../services/ratingClient.js';
 import CarrierSankey from './CarrierSankey.jsx';
 import { openAwardSharePdf } from './AwardSharePdf.js';
 import { useScenario } from '../context/ScenarioContext.jsx';
+import CustomerLocationManager from './CustomerLocationManager.jsx';
+import { computeOriginSummary } from '../utils/locationResolver.js';
 
 function fmt$(v) {
   return '$' + Number(v || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -32,7 +34,7 @@ function escCsv(val) {
   return s;
 }
 
-export default function AnnualAwardBuilder({ flatRows, computedScenarios, activeMarkups, sampleWeeks, weeksOverride, onWeeksChange, detectedWeeks }) {
+export default function AnnualAwardBuilder({ flatRows, computedScenarios, activeMarkups, sampleWeeks, weeksOverride, onWeeksChange, detectedWeeks, customerLocations, onCustomerLocationsChange }) {
   const { carrierSelections, scenarioName: ctxScenarioName } = useScenario();
   const [selectedScenarioId, setSelectedScenarioId] = useState('');
   const [viewLevel, setViewLevel] = useState('carrier'); // 'carrier' | 'lane' | 'customer'
@@ -42,6 +44,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
   const [customerShareMode, setCustomerShareMode] = useState(false); // hides internal views
   const [awardBasis, setAwardBasis] = useState('cost'); // 'cost' | 'customerPrice'
   const [customerName, setCustomerName] = useState('');
+  const [showLocations, setShowLocations] = useState(false);
   const sankeyRef = useRef(null);
 
   const annualizationFactor = 52 / Math.max(1, sampleWeeks);
@@ -153,6 +156,11 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
   const originMix = useMemo(
     () => computeCarrierMixByOrigin(lanes, filteredFlatRows),
     [lanes, filteredFlatRows]
+  );
+
+  const originSummaries = useMemo(
+    () => computeOriginSummary(lanes, customerLocations, filteredFlatRows, 'origin'),
+    [lanes, customerLocations, filteredFlatRows]
   );
 
   const availableScenarios = useMemo(() => {
@@ -308,6 +316,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
       carrierSummary,
       customerLanes,
       customerSummary,
+      originSummaries,
     });
     doc.save(`AnnualAward_Summary_${sampleWeeks}wk_${ts}.pdf`);
 
@@ -327,8 +336,9 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
       totals: csTotals,
       customerName,
       carrierCount: distinctCarriers.size,
+      originSummaries,
     });
-  }, [carrierSummary, csTotals, originMix, sampleWeeks, annualizationFactor, customerName]);
+  }, [carrierSummary, csTotals, originMix, sampleWeeks, annualizationFactor, customerName, originSummaries]);
 
   const deltaColor = (v) => v < 0 ? 'text-green-700' : v > 0 ? 'text-red-600' : 'text-gray-700';
   const netLaneColor = (v) => v > 0 ? 'text-green-700' : v < 0 ? 'text-red-600' : 'text-gray-500';
@@ -525,6 +535,35 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
             </div>
           )}
         </div>
+
+        {/* Locations Section */}
+        {!customerShareMode && (
+          <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+            <button
+              onClick={() => setShowLocations(v => !v)}
+              className="w-full flex items-center justify-between px-4 py-2.5 hover:bg-gray-50 transition-colors"
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-bold text-[#002144]">Customer Locations</span>
+                {customerLocations && customerLocations.length > 0 ? (
+                  <span className="text-xs bg-[#39b6e6]/15 text-[#002144] px-2 py-0.5 rounded-full font-medium">
+                    {customerLocations.length} location{customerLocations.length !== 1 ? 's' : ''} mapped
+                  </span>
+                ) : (
+                  <span className="text-xs text-gray-400">No locations — using city/state defaults</span>
+                )}
+              </div>
+              <svg className={`w-4 h-4 text-gray-400 transform transition-transform ${showLocations ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+            {showLocations && (
+              <div className="border-t border-gray-200 p-4">
+                <CustomerLocationManager locations={customerLocations || []} onLocationsChange={onCustomerLocationsChange} />
+              </div>
+            )}
+          </div>
+        )}
 
         {/* KPI Bar — switches based on view */}
         {viewLevel === 'carrier' ? (

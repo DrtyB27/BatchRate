@@ -84,28 +84,29 @@ function drawTable(doc, y, headers, rows, opts = {}) {
   const margin = 14;
   const tableW = w - margin * 2;
   const colWidths = opts.colWidths || headers.map(() => tableW / headers.length);
-  const rowHeight = 12;
-  const headerHeight = 14;
+  const fontSize = opts.fontSize || 7;
+  const rowHeight = opts.rowHeight || (fontSize <= 7 ? 10 : 12);
+  const headerHeight = rowHeight + 2;
 
   // Header
   doc.setFillColor(...NAVY);
   doc.rect(margin, y, tableW, headerHeight, 'F');
   doc.setTextColor(...WHITE);
-  doc.setFontSize(7);
+  doc.setFontSize(fontSize);
   doc.setFont('helvetica', 'bold');
 
   let cx = margin;
   for (let i = 0; i < headers.length; i++) {
     const align = opts.rightAlign?.includes(i) ? 'right' : 'left';
-    const tx = align === 'right' ? cx + colWidths[i] - 3 : cx + 3;
-    doc.text(headers[i], tx, y + 9, { align });
+    const tx = align === 'right' ? cx + colWidths[i] - 2 : cx + 2;
+    doc.text(headers[i], tx, y + headerHeight - 3, { align });
     cx += colWidths[i];
   }
   y += headerHeight;
 
   // Rows
   doc.setFont('helvetica', 'normal');
-  doc.setFontSize(7);
+  doc.setFontSize(fontSize);
 
   for (let r = 0; r < rows.length; r++) {
     // Check page break
@@ -114,8 +115,12 @@ function drawTable(doc, y, headers, rows, opts = {}) {
       y = 14;
     }
 
-    // Stripe
-    if (r % 2 === 1) {
+    // Total row styling
+    const isTotalRow = opts.totalRowIndex != null && r === opts.totalRowIndex;
+    if (isTotalRow) {
+      doc.setFillColor(...NAVY);
+      doc.rect(margin, y, tableW, rowHeight, 'F');
+    } else if (r % 2 === 1) {
       doc.setFillColor(...LIGHT_GRAY);
       doc.rect(margin, y, tableW, rowHeight, 'F');
     }
@@ -124,23 +129,30 @@ function drawTable(doc, y, headers, rows, opts = {}) {
     for (let i = 0; i < headers.length; i++) {
       const val = String(rows[r][i] ?? '');
       const align = opts.rightAlign?.includes(i) ? 'right' : 'left';
-      const tx = align === 'right' ? cx + colWidths[i] - 3 : cx + 3;
+      const tx = align === 'right' ? cx + colWidths[i] - 2 : cx + 2;
 
-      // Color logic
-      const colorFn = opts.colorFn?.[i];
-      if (colorFn) {
-        const color = colorFn(rows[r][i], rows[r]);
-        doc.setTextColor(...color);
+      if (isTotalRow) {
+        doc.setFont('helvetica', 'bold');
+        doc.setTextColor(...WHITE);
       } else {
-        doc.setTextColor(50, 50, 50);
+        doc.setFont('helvetica', 'normal');
+        // Color logic
+        const colorFn = opts.colorFn?.[i];
+        if (colorFn) {
+          const color = colorFn(rows[r][i], rows[r]);
+          doc.setTextColor(...color);
+        } else {
+          doc.setTextColor(50, 50, 50);
+        }
       }
 
-      doc.text(val, tx, y + 8, { align });
+      doc.text(val, tx, y + rowHeight - 3, { align });
       cx += colWidths[i];
     }
     y += rowHeight;
   }
 
+  doc.setFont('helvetica', 'normal');
   return y;
 }
 
@@ -186,6 +198,7 @@ export function generateAnnualAwardPdf({
   carrierSummary,
   customerLanes,
   customerSummary,
+  originSummaries,
 }) {
   const doc = new jsPDF({ orientation: 'landscape' });
   const subtitle = [
@@ -206,11 +219,18 @@ export function generateAnnualAwardPdf({
       color: csTotals.deltaVsDisplaced < 0 ? GREEN : csTotals.deltaVsDisplaced > 0 ? RED : NAVY },
   ]);
 
-  // Carrier Summary Table
+  // Carrier Summary Table — condensed with abbreviated headers, 8pt font
   y = drawSectionLabel(doc, y, 'Carrier Summary');
 
-  const cHeaders = ['SCAC', 'Carrier', 'Awarded', 'Ann. Ship.', 'Proj. Spend', 'Displaced Hist.', 'Delta ($)', 'Delta (%)', 'Inc.', 'Net', 'Kept', 'Won', 'Lost'];
-  const cWidths = [20, 50, 18, 24, 28, 30, 26, 20, 14, 14, 14, 14, 14];
+  const cHeaders = ['SCAC', 'Carrier', 'Awd', 'Ship.', 'Proj. $', 'Hist. $', 'Δ$', 'Δ%', 'Inc.', 'Net', 'Kept', 'Won', 'Lost'];
+  const cWidths = [20, 48, 16, 22, 28, 28, 26, 20, 14, 14, 14, 14, 14];
+
+  const deltaColorFn = (val) => {
+    const n = parseFloat(String(val).replace(/[^-\d.]/g, ''));
+    if (isNaN(n)) return [100, 100, 100];
+    return n < 0 ? GREEN : n > 0 ? RED : [50, 50, 50];
+  };
+
   const cRows = carrierSummary.map(c => [
     c.scac,
     c.carrierName,
@@ -227,17 +247,81 @@ export function generateAnnualAwardPdf({
     c.lostLanes,
   ]);
 
-  const deltaColorFn = (val) => {
-    const n = parseFloat(String(val).replace(/[^-\d.]/g, ''));
-    if (isNaN(n)) return [100, 100, 100];
-    return n < 0 ? GREEN : n > 0 ? RED : [50, 50, 50];
-  };
+  // Network Totals row
+  const networkRow = [
+    'TOTAL', '',
+    csTotals.awardedLanes,
+    fmtNum(csTotals.annualShipments),
+    fmtMoney(csTotals.projectedAnnSpend),
+    csTotals.displacedHistoricSpend > 0 ? fmtMoney(csTotals.displacedHistoricSpend) : '—',
+    csTotals.deltaVsDisplaced != null ? fmtMoney(csTotals.deltaVsDisplaced) : '—',
+    csTotals.deltaVsDisplacedPct != null ? fmtPct(csTotals.deltaVsDisplacedPct) : '—',
+    csTotals.incumbentLanes,
+    (csTotals.netLaneChange > 0 ? '+' : '') + csTotals.netLaneChange,
+    csTotals.retainedLanes,
+    csTotals.wonLanes,
+    csTotals.lostLanes,
+  ];
+  cRows.push(networkRow);
 
   y = drawTable(doc, y, cHeaders, cRows, {
     colWidths: cWidths,
+    fontSize: 6.5,
+    rowHeight: 9,
     rightAlign: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
     colorFn: { 6: deltaColorFn, 7: deltaColorFn },
+    totalRowIndex: cRows.length - 1,
   });
+
+  // Award Summary by Origin
+  if (originSummaries && originSummaries.length > 0) {
+    doc.addPage();
+    drawHeader(doc, 'Award Summary by Origin', subtitle);
+    y = 48;
+    y = drawSectionLabel(doc, y, 'Award Summary by Origin');
+
+    const oHeaders = ['Origin', 'Awd', 'Ship.', 'Proj. $', 'Hist. $', 'Δ$', 'Δ%', 'Top Carriers'];
+    const oWidths = [60, 16, 24, 28, 28, 26, 20, 66];
+    const oRows = originSummaries.map(o => {
+      const displayName = o.locationName
+        ? `${o.locationName} (${o.city}, ${o.state})`
+        : (o.city && o.state) ? `${o.city}, ${o.state}` : o.origin;
+      return [
+        displayName,
+        o.awardedLanes,
+        fmtNum(o.annualShipments),
+        fmtMoney(o.projectedSpend),
+        o.displacedHistoricSpend > 0 ? fmtMoney(o.displacedHistoricSpend) : '—',
+        o.displacedHistoricSpend > 0 ? fmtMoney(o.delta) : '—',
+        o.displacedHistoricSpend > 0 ? fmtPct(o.deltaPct) : '—',
+        o.topCarriers.join(', '),
+      ];
+    });
+
+    // Origin network totals
+    const oTotalAwd = originSummaries.reduce((s, o) => s + o.awardedLanes, 0);
+    const oTotalShip = originSummaries.reduce((s, o) => s + o.annualShipments, 0);
+    const oTotalProj = originSummaries.reduce((s, o) => s + o.projectedSpend, 0);
+    const oTotalHist = originSummaries.reduce((s, o) => s + o.displacedHistoricSpend, 0);
+    const oTotalDelta = oTotalHist > 0 ? oTotalProj - oTotalHist : 0;
+    const oTotalDeltaPct = oTotalHist > 0 ? (oTotalDelta / oTotalHist) * 100 : 0;
+    oRows.push([
+      'TOTAL', oTotalAwd, fmtNum(oTotalShip), fmtMoney(oTotalProj),
+      oTotalHist > 0 ? fmtMoney(oTotalHist) : '—',
+      oTotalHist > 0 ? fmtMoney(oTotalDelta) : '—',
+      oTotalHist > 0 ? fmtPct(oTotalDeltaPct) : '—',
+      '',
+    ]);
+
+    y = drawTable(doc, y, oHeaders, oRows, {
+      colWidths: oWidths,
+      fontSize: 6.5,
+      rowHeight: 9,
+      rightAlign: [1, 2, 3, 4, 5, 6],
+      colorFn: { 5: deltaColorFn, 6: deltaColorFn },
+      totalRowIndex: oRows.length - 1,
+    });
+  }
 
   // Customer View — carrier changes
   if (customerLanes && customerSummary) {
@@ -250,7 +334,7 @@ export function generateAnnualAwardPdf({
 
     const shifts = customerLanes.filter(l => l.isShift);
     if (shifts.length > 0) {
-      const sHeaders = ['Lane', 'Previous', 'New Carrier', 'New SCAC', 'Ann. Ship.', 'Ann. Spend', 'Savings'];
+      const sHeaders = ['Lane', 'Previous', 'New Carrier', 'New SCAC', 'Ship.', 'Spend', 'Savings'];
       const sWidths = [35, 25, 55, 25, 28, 30, 38];
       const sRows = shifts.map(l => [
         l.laneKey,
@@ -263,6 +347,8 @@ export function generateAnnualAwardPdf({
       ]);
       y = drawTable(doc, y, sHeaders, sRows, {
         colWidths: sWidths,
+        fontSize: 6.5,
+        rowHeight: 9,
         rightAlign: [4, 5, 6],
         colorFn: { 6: deltaColorFn },
       });

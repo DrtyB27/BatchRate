@@ -262,6 +262,7 @@ export default function ResultsScreen({
   results, totalRows, batchParams, batchMeta, credentials, onNewBatch, onLoadRun, onReplaceResults,
   loadedFromFile, initialYieldConfig, csvRows, onRetryFailed, onResumeExecution,
   onCancelExecution, orchestratorRef, executorRef, onRetryInPlace, retryProgress,
+  customerLocations, onCustomerLocationsChange,
 }) {
   const [viewMode, setViewMode] = useState('both');
   const [modal, setModal] = useState(null);
@@ -415,7 +416,7 @@ export default function ResultsScreen({
       isComplete: isComplete,
       csvRows: csvRows,
       slim: true,
-    });
+    }, { customerLocations });
     downloadRunFile(jsonStr, batchMeta?.batchId);
   };
 
@@ -439,7 +440,7 @@ export default function ResultsScreen({
       targetRows: totalRows,
       isComplete: false,
       csvRows: csvRows,
-    });
+    }, { customerLocations });
     const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     const batchSlice = (batchMeta?.batchId || 'unknown').slice(0, 8);
     const filename = `BRAT_Resumable_${batchSlice}_${results.length}of${totalRows}_${ts}.json`;
@@ -461,7 +462,7 @@ export default function ResultsScreen({
       targetRows: totalRows,
       isComplete: isComplete,
       csvRows: csvRows,
-    });
+    }, { customerLocations });
     const batchIdShort = (batchMeta?.batchId || 'unknown').slice(0, 8);
     const ts = timestamp();
 
@@ -773,7 +774,7 @@ export default function ResultsScreen({
       ) : viewMode === 'feedback' ? (
         <CarrierFeedback flatRows={flatRows} computedScenarios={computedScenarios} sampleWeeks={sampleWeeks} />
       ) : viewMode === 'annual' ? (
-        <AnnualAwardBuilder flatRows={flatRows} computedScenarios={computedScenarios} activeMarkups={activeMarkups} sampleWeeks={sampleWeeks} weeksOverride={weeksOverride} onWeeksChange={setWeeksOverride} detectedWeeks={detectedWeeks} />
+        <AnnualAwardBuilder flatRows={flatRows} computedScenarios={computedScenarios} activeMarkups={activeMarkups} sampleWeeks={sampleWeeks} weeksOverride={weeksOverride} onWeeksChange={setWeeksOverride} detectedWeeks={detectedWeeks} customerLocations={customerLocations} onCustomerLocationsChange={onCustomerLocationsChange} />
       ) : (
         <ResultsTable
           flatRows={flatRows}

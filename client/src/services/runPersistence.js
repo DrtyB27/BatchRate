@@ -42,7 +42,7 @@ export function slimResult(r) {
 // ============================================================
 // Serialize a run to JSON
 // ============================================================
-export function serializeRun(results, batchParams, batchMeta, yieldConfig, options = {}) {
+export function serializeRun(results, batchParams, batchMeta, yieldConfig, options = {}, extras = {}) {
   let strippedResults = stripXmlBodies(results);
   if (options.slim) {
     strippedResults = strippedResults.map(slimResult);
@@ -81,6 +81,11 @@ export function serializeRun(results, batchParams, batchMeta, yieldConfig, optio
   // Include yield optimizer config if set
   if (yieldConfig) {
     run.yieldConfig = yieldConfig;
+  }
+
+  // Include customer locations if provided
+  if (extras.customerLocations && extras.customerLocations.length > 0) {
+    run.customerLocations = extras.customerLocations;
   }
 
   // Include unrated CSV rows for resume capability
@@ -165,6 +170,7 @@ export function deserializeRun(json) {
     version: json.version,
     appVersion: json.appVersion,
     yieldConfig: json.yieldConfig || null,
+    customerLocations: json.customerLocations || null,
     batchStatus: json.batchStatus || null,
     pendingRows: json.pendingRows || null,
     pendingRowCount: json.pendingRowCount || 0,

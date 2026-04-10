@@ -299,7 +299,7 @@ export function openAwardSharePdf({
   const nameSubtitle = nameDisplay ? `${nameDisplay} &middot; ` : '';
   const isCustPrice = pricingMode === 'customerPrice';
   const pricingNote = isCustPrice
-    ? 'Figures reflect customer pricing with margin applied'
+    ? 'Figures reflect DLX tariff pricing'
     : 'Figures reflect carrier cost';
 
   const carrierSummaryHtml = buildCarrierSummarySection(carrierSummary, totals);

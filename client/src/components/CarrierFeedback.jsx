@@ -240,7 +240,7 @@ function CarrierSummaryTable({ summary, onSelectCarrier, awardContext }) {
 }
 
 // ── Main Component ──────────────────────────────────────────
-export default function CarrierFeedback({ flatRows, computedScenarios, sampleWeeks, annualization }) {
+export default function CarrierFeedback({ flatRows, computedScenarios, sampleWeeks, annualization, historicBaseline }) {
   const { carrierSelections, scenarioName: ctxScenarioName } = useScenario();
   const customScenarioSCACs = useMemo(
     () => Object.entries(carrierSelections).filter(([, v]) => v.awarded).map(([scac]) => scac),
@@ -580,10 +580,37 @@ export default function CarrierFeedback({ flatRows, computedScenarios, sampleWee
                           <span className="text-gray-500">Was Paying</span>
                           <span className="font-bold text-gray-700">{ac.displacedHistoricSpend > 0 ? fmtCompact$(ac.displacedHistoricSpend) : '—'}</span>
                         </div>
-                        <div className="flex justify-between text-xs text-gray-400 border-t border-gray-100 pt-1">
-                          <span>Was Incumbent</span>
-                          <span>{ac.incumbentLanes} lanes / {ac.incumbentAnnSpend > 0 ? fmtCompact$(ac.incumbentAnnSpend) : '—'}</span>
-                        </div>
+                        {(() => {
+                          // Historic baseline (scenario-invariant) — doesn't change across scenarios.
+                          const hb = historicBaseline?.baselineByCarrier?.[selectedSCAC];
+                          const factor = annualization?.factor ?? (52 / Math.max(1, sampleWeeks));
+                          if (!hb) {
+                            return (
+                              <div className="flex justify-between text-xs text-gray-400 border-t border-gray-100 pt-1">
+                                <span>Historic Lanes (Incumbent)</span>
+                                <span>—</span>
+                              </div>
+                            );
+                          }
+                          const annShip = Math.round(hb.shipments * factor);
+                          const annTons = hb.totalTons * factor;
+                          return (
+                            <>
+                              <div className="flex justify-between text-xs text-gray-500 border-t border-gray-100 pt-1">
+                                <span>Historic Lanes (Incumbent)</span>
+                                <span className="font-medium">{hb.lanes}</span>
+                              </div>
+                              <div className="flex justify-between text-xs text-gray-500">
+                                <span>Annual Historic Shipments</span>
+                                <span className="font-medium">{hb.lanes > 0 ? formatShipments(annShip) : '—'}</span>
+                              </div>
+                              <div className="flex justify-between text-xs text-gray-500" title="US tons (2,000 lb)">
+                                <span>Annual Historic Tonnage</span>
+                                <span className="font-medium">{hb.lanes > 0 && annTons > 0 ? formatTons(annTons) : '—'}</span>
+                              </div>
+                            </>
+                          );
+                        })()}
                       </div>
                     </div>
 

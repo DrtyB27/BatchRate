@@ -15,6 +15,7 @@ import {
 } from '../services/analyticsEngine.js';
 import { applyMargin } from '../services/ratingClient.js';
 import { ScenarioProvider } from '../context/ScenarioContext.jsx';
+import useAnnualization from '../hooks/useAnnualization.js';
 
 function downloadBlob(filename, blob) {
   const url = URL.createObjectURL(blob);
@@ -285,6 +286,8 @@ export default function ResultsScreen({
   const detectedWeeks = useMemo(() => detectSampleWeeks(flatRows), [flatRows]);
   const [weeksOverride, setWeeksOverride] = useState('');
   const sampleWeeks = weeksOverride !== '' ? Math.max(1, parseInt(weeksOverride, 10) || 1) : detectedWeeks.weeks;
+  // Annualization hook — shared across Award + Feedback tabs so factor + data-span label stay in sync
+  const annualization = useAnnualization(flatRows);
 
   const allSCACs = useMemo(() => {
     const scacs = new Set();
@@ -772,9 +775,9 @@ export default function ResultsScreen({
       ) : viewMode === 'performance' ? (
         <BatchPerformance results={results} batchMeta={batchMeta} totalRows={totalRows} onRetryInPlace={onRetryInPlace} retryProgress={retryProgress} />
       ) : viewMode === 'feedback' ? (
-        <CarrierFeedback flatRows={flatRows} computedScenarios={computedScenarios} sampleWeeks={sampleWeeks} />
+        <CarrierFeedback flatRows={flatRows} computedScenarios={computedScenarios} sampleWeeks={sampleWeeks} annualization={annualization} />
       ) : viewMode === 'annual' ? (
-        <AnnualAwardBuilder flatRows={flatRows} computedScenarios={computedScenarios} activeMarkups={activeMarkups} sampleWeeks={sampleWeeks} weeksOverride={weeksOverride} onWeeksChange={setWeeksOverride} detectedWeeks={detectedWeeks} customerLocations={customerLocations} onCustomerLocationsChange={onCustomerLocationsChange} />
+        <AnnualAwardBuilder flatRows={flatRows} computedScenarios={computedScenarios} activeMarkups={activeMarkups} sampleWeeks={sampleWeeks} weeksOverride={weeksOverride} onWeeksChange={setWeeksOverride} detectedWeeks={detectedWeeks} annualization={annualization} customerLocations={customerLocations} onCustomerLocationsChange={onCustomerLocationsChange} />
       ) : (
         <ResultsTable
           flatRows={flatRows}

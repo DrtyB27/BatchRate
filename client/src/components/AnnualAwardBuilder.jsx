@@ -7,6 +7,7 @@ import { openAwardSharePdf } from './AwardSharePdf.js';
 import { useScenario } from '../context/ScenarioContext.jsx';
 import CustomerLocationManager from './CustomerLocationManager.jsx';
 import { computeOriginSummary } from '../utils/locationResolver.js';
+import { formatShipments, formatTons } from '../utils/annualizedMetrics.js';
 
 function fmt$(v) {
   return '$' + Number(v || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -34,7 +35,7 @@ function escCsv(val) {
   return s;
 }
 
-export default function AnnualAwardBuilder({ flatRows, computedScenarios, activeMarkups, sampleWeeks, weeksOverride, onWeeksChange, detectedWeeks, customerLocations, onCustomerLocationsChange }) {
+export default function AnnualAwardBuilder({ flatRows, computedScenarios, activeMarkups, sampleWeeks, weeksOverride, onWeeksChange, detectedWeeks, annualization, customerLocations, onCustomerLocationsChange }) {
   const { carrierSelections, scenarioName: ctxScenarioName } = useScenario();
   const [selectedScenarioId, setSelectedScenarioId] = useState('');
   const [viewLevel, setViewLevel] = useState('carrier'); // 'carrier' | 'lane' | 'customer'
@@ -47,6 +48,9 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
   const [showLocations, setShowLocations] = useState(false);
   const sankeyRef = useRef(null);
 
+  // Keep the weeks-based legacy factor as the authoritative multiplier
+  // (drives existing engine calls) and read the annualization hook for the
+  // display-side data-span label and tonnage formatting.
   const annualizationFactor = 52 / Math.max(1, sampleWeeks);
 
   // Collect all unique origin states for the filter dropdown
@@ -283,12 +287,13 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
     const dl = custPriceLanes;
     const shipments = dl.reduce((s, l) => s + l.shipments, 0);
     const annualShipments = dl.reduce((s, l) => s + l.annualShipments, 0);
+    const annualTons = dl.reduce((s, l) => s + (l.annualTons || 0), 0);
     const sampleSpend = dl.reduce((s, l) => s + l.sampleSpend, 0);
     const annualSpend = dl.reduce((s, l) => s + l.annualSpend, 0);
     const annualHistoric = dl.reduce((s, l) => s + l.annualHistoric, 0);
     const delta = annualHistoric > 0 ? annualSpend - annualHistoric : 0;
     const deltaPct = annualHistoric > 0 ? (delta / annualHistoric) * 100 : 0;
-    return { shipments, annualShipments, sampleSpend, annualSpend, annualHistoric, delta, deltaPct };
+    return { shipments, annualShipments, annualTons, sampleSpend, annualSpend, annualHistoric, delta, deltaPct };
   }, [isDisplayCustomerPrice, custPriceLanes, totals]);
 
   const toggleOrigin = (st) => {
@@ -305,7 +310,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
     const headers = [
       'Lane', 'Carrier SCAC', 'Carrier Name',
       'Hist. Carrier', 'Hist. Carrier %', 'Hist. Total Ann. Spend',
-      'Sample Shipments', 'Annual Shipments (est)',
+      'Sample Shipments', 'Annual Shipments (est)', 'Annual Tons (US)',
       'Sample Spend', 'Annual Spend (est)',
       'Annual Historic Spend (Attributed)', 'Annual Delta ($)', 'Annual Delta (%)',
     ];
@@ -314,6 +319,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
       l.historicCarrier || '', l.historicCarrierPct || '',
       l.historicTotalAnnSpend ? l.historicTotalAnnSpend.toFixed(2) : '0.00',
       l.shipments, l.annualShipments,
+      (l.annualTons || 0).toFixed(1),
       l.sampleSpend.toFixed(2), l.annualSpend.toFixed(2),
       l.annualHistoric.toFixed(2), l.delta.toFixed(2), l.deltaPct.toFixed(1),
     ].map(escCsv));
@@ -321,11 +327,13 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
     // Carrier Summary section
     const summaryHeaders = [
       'SCAC', 'Carrier', 'Awarded Lanes', 'Sample Shipments', 'Annual Shipments',
+      'Annual Tons (US)',
       'Proj. Ann. Spend', 'Displaced Historic', '\u0394 ($)', '\u0394 (%)',
       'Incumbent Lanes', 'Net Lanes', 'Retained', 'Won', 'Lost',
     ];
     const summaryRows = exportCarrierSummary.map(c => [
       c.scac, c.carrierName, c.awardedLanes, c.sampleShipments, c.annualShipments,
+      (c.annualTons || 0).toFixed(1),
       c.projectedAnnSpend.toFixed(2),
       c.displacedHistoricSpend.toFixed(2),
       c.deltaVsDisplaced != null ? c.deltaVsDisplaced.toFixed(2) : '',
@@ -617,7 +625,10 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
 
           {!customerShareMode && (
             <div className="text-xs text-gray-500">
-              Annualization factor: <strong>{annualizationFactor.toFixed(1)}x</strong> ({sampleWeeks} wk &rarr; 52 wk)
+              Annualization factor: <strong>{annualizationFactor.toFixed(2)}x</strong> ({sampleWeeks} wk &rarr; 52 wk)
+              {annualization?.sourceLabel && (
+                <span className="ml-2 text-gray-400">— {annualization.sourceLabel}</span>
+              )}
             </div>
           )}
         </div>
@@ -771,6 +782,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
                     <th className="px-3 py-2 text-right">Awarded Lanes</th>
                     <th className="px-3 py-2 text-right">Sample Ship.</th>
                     <th className="px-3 py-2 text-right">Ann. Ship.</th>
+                    <th className="px-3 py-2 text-right" title="Annualized tonnage (US tons, 2,000 lb)">Ann. Tons</th>
                     <th className="px-3 py-2 text-right">Proj. Ann. Spend</th>
                     {/* Group 2 — Benchmark */}
                     <th className="px-3 py-2 text-right border-l-2 border-gray-300" title="What DLX was paying on these lanes before, regardless of carrier">Displaced Historic</th>
@@ -793,8 +805,9 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
                       <td className="px-3 py-2 font-mono font-medium text-[#002144]">{c.scac}</td>
                       <td className="px-3 py-2">{c.carrierName}</td>
                       <td className="px-3 py-2 text-right">{c.awardedLanes || '—'}</td>
-                      <td className="px-3 py-2 text-right">{fmtNum(c.sampleShipments)}</td>
-                      <td className="px-3 py-2 text-right">{fmtNum(c.annualShipments)}</td>
+                      <td className="px-3 py-2 text-right">{formatShipments(c.sampleShipments)}</td>
+                      <td className="px-3 py-2 text-right">{formatShipments(c.annualShipments)}</td>
+                      <td className="px-3 py-2 text-right" title="Annualized US tons (2,000 lb)">{c.annualTons > 0 ? formatTons(c.annualTons) : '—'}</td>
                       <td className="px-3 py-2 text-right font-semibold text-[#002144]">{c.projectedAnnSpend > 0 ? fmtCompact$(c.projectedAnnSpend) : '—'}</td>
                       <td className="px-3 py-2 text-right border-l-2 border-gray-300" title="What DLX was paying on these lanes before, regardless of carrier">{c.displacedHistoricSpend > 0 ? fmtCompact$(c.displacedHistoricSpend) : '—'}</td>
                       <td className={`px-3 py-2 text-right font-medium border-l-2 border-gray-300 ${c.deltaVsDisplaced != null ? deltaColor(c.deltaVsDisplaced) : 'text-gray-400'}`}>
@@ -817,8 +830,9 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
                   <tr className="bg-[#002144]/5 font-bold border-t">
                     <td className="px-3 py-2" colSpan={2}>Total</td>
                     <td className="px-3 py-2 text-right">{csTotals.awardedLanes}</td>
-                    <td className="px-3 py-2 text-right">{fmtNum(csTotals.sampleShipments)}</td>
-                    <td className="px-3 py-2 text-right">{fmtNum(csTotals.annualShipments)}</td>
+                    <td className="px-3 py-2 text-right">{formatShipments(csTotals.sampleShipments)}</td>
+                    <td className="px-3 py-2 text-right">{formatShipments(csTotals.annualShipments)}</td>
+                    <td className="px-3 py-2 text-right">{csTotals.annualTons > 0 ? formatTons(csTotals.annualTons) : '—'}</td>
                     <td className="px-3 py-2 text-right font-semibold">{fmtCompact$(csTotals.projectedAnnSpend)}</td>
                     <td className="px-3 py-2 text-right border-l-2 border-gray-300">{csTotals.displacedHistoricSpend > 0 ? fmtCompact$(csTotals.displacedHistoricSpend) : '—'}</td>
                     <td className={`px-3 py-2 text-right border-l-2 border-gray-300 ${csTotals.deltaVsDisplaced != null ? deltaColor(csTotals.deltaVsDisplaced) : ''}`}>
@@ -847,6 +861,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
                     <th className="px-4 py-2">Hist. Carrier</th>
                     <th className="px-4 py-2 text-right">Sample Ship.</th>
                     <th className="px-4 py-2 text-right">Annual Ship.</th>
+                    <th className="px-4 py-2 text-right" title="Annualized tonnage (US tons, 2,000 lb)">Ann. Tons</th>
                     <th className="px-4 py-2 text-right">Sample Spend</th>
                     <th className="px-4 py-2 text-right">Annual Spend</th>
                     <th className="px-4 py-2 text-right">Annual Historic</th>
@@ -871,8 +886,9 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
                           </span>
                         )}
                       </td>
-                      <td className="px-4 py-2 text-right">{fmtNum(l.shipments)}</td>
-                      <td className="px-4 py-2 text-right">{fmtNum(l.annualShipments)}</td>
+                      <td className="px-4 py-2 text-right">{formatShipments(l.shipments)}</td>
+                      <td className="px-4 py-2 text-right">{formatShipments(l.annualShipments)}</td>
+                      <td className="px-4 py-2 text-right">{l.annualTons > 0 ? formatTons(l.annualTons) : '—'}</td>
                       <td className="px-4 py-2 text-right">{fmt$(l.sampleSpend)}</td>
                       <td className="px-4 py-2 text-right font-medium">{fmt$(l.annualSpend)}</td>
                       <td className="px-4 py-2 text-right">{l.annualHistoric > 0 ? fmt$(l.annualHistoric) : '—'}</td>
@@ -884,8 +900,9 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
                 <tfoot>
                   <tr className="bg-[#002144]/5 font-bold border-t">
                     <td className="px-4 py-2" colSpan={4}>Total ({displayLanes.length} lanes)</td>
-                    <td className="px-4 py-2 text-right">{fmtNum(laneFooterTotals.shipments)}</td>
-                    <td className="px-4 py-2 text-right">{fmtNum(laneFooterTotals.annualShipments)}</td>
+                    <td className="px-4 py-2 text-right">{formatShipments(laneFooterTotals.shipments)}</td>
+                    <td className="px-4 py-2 text-right">{formatShipments(laneFooterTotals.annualShipments)}</td>
+                    <td className="px-4 py-2 text-right">{laneFooterTotals.annualTons > 0 ? formatTons(laneFooterTotals.annualTons) : '—'}</td>
                     <td className="px-4 py-2 text-right">{fmt$(laneFooterTotals.sampleSpend)}</td>
                     <td className="px-4 py-2 text-right">{fmt$(laneFooterTotals.annualSpend)}</td>
                     <td className="px-4 py-2 text-right">{laneFooterTotals.annualHistoric > 0 ? fmt$(laneFooterTotals.annualHistoric) : '—'}</td>

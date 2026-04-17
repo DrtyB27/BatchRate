@@ -2,6 +2,7 @@ import React, { useState, useMemo, useCallback } from 'react';
 import { computeCarrierFeedback, computeCarrierFeedbackSummary, computeAnnualAward, computeCarrierSummary, computeScenario, getLaneKey } from '../services/analyticsEngine.js';
 import { generateCarrierFeedbackPdf } from '../services/pdfExport.js';
 import { useScenario } from '../context/ScenarioContext.jsx';
+import { formatShipments, formatTons } from '../utils/annualizedMetrics.js';
 
 const TIER_COLORS = {
   'Top 10%':    'bg-green-100 text-green-800',
@@ -239,7 +240,7 @@ function CarrierSummaryTable({ summary, onSelectCarrier, awardContext }) {
 }
 
 // ── Main Component ──────────────────────────────────────────
-export default function CarrierFeedback({ flatRows, computedScenarios, sampleWeeks }) {
+export default function CarrierFeedback({ flatRows, computedScenarios, sampleWeeks, annualization }) {
   const { carrierSelections, scenarioName: ctxScenarioName } = useScenario();
   const customScenarioSCACs = useMemo(
     () => Object.entries(carrierSelections).filter(([, v]) => v.awarded).map(([scac]) => scac),
@@ -596,6 +597,18 @@ export default function CarrierFeedback({ flatRows, computedScenarios, sampleWee
                         <div className="flex justify-between">
                           <span className="text-gray-500">Awarded Lanes</span>
                           <span className="font-bold text-[#002144]">{ac.awardedLanes}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">Annual Shipments Awarded</span>
+                          <span className="font-bold text-[#002144]">
+                            {ac.awardedLanes > 0 ? formatShipments(ac.annualShipments) : '—'}
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-500" title="US tons (2,000 lb)">Annual Tonnage Awarded</span>
+                          <span className="font-bold text-[#002144]">
+                            {ac.awardedLanes > 0 && ac.annualTons > 0 ? formatTons(ac.annualTons) : '—'}
+                          </span>
                         </div>
                         <div className="flex justify-between">
                           <span className="text-gray-500">Proj. Annual Spend</span>

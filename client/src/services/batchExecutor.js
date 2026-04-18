@@ -9,17 +9,18 @@ import { parseRatingResponse } from './xmlParser.js';
 
 export const DEFAULT_INITIAL_DELAY_MS = 200;
 
-// Errors worth retrying (transient). Throttle responses (429/503, "throttled",
-// "rate limit", "too many requests") are intentionally excluded so they fall
-// through to the throttle-handling path in the worker loop, which applies a
-// hard backoff and force-pauses after enough consecutive throttles. Retrying
-// them silently would mask the throttle signal.
-const RETRYABLE_PATTERNS = ['timed out', 'timeout', 'abort', 'http 502', 'http 504', 'proxy error', 'proxy timeout', 'failed to fetch', 'networkerror'];
+// Errors worth retrying (transient). 429/503 and other throttle signatures
+// are included because most throttle blips are short-lived — a single retry
+// usually succeeds, and the call would otherwise come back with zero rates.
+// If throttling is sustained, the retry will also fail and the result will
+// commit as THROTTLE_RESPONSE, which feeds the hard-backoff / force-pause
+// path in the worker loop. Throttle visibility is therefore preserved
+// without dropping rates on every transient blip.
+const RETRYABLE_PATTERNS = ['timed out', 'timeout', 'abort', 'http 429', 'http 502', 'http 503', 'http 504', 'proxy error', 'proxy timeout', 'failed to fetch', 'networkerror'];
 const THROTTLE_ERROR_PATTERNS = ['http 429', 'http 503', 'throttl', 'rate limit', 'rate-limit', 'too many requests'];
 
 function isRetryable(errorMessage) {
   const msg = (errorMessage || '').toLowerCase();
-  if (THROTTLE_ERROR_PATTERNS.some(p => msg.includes(p))) return false;
   return RETRYABLE_PATTERNS.some(p => msg.includes(p));
 }
 

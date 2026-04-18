@@ -766,6 +766,10 @@ export function createBatchOrchestrator(config) {
         if (a.state === 'running' && a.executor) {
           a.executor.pause();
           a.state = 'paused';
+          // Keep activeAgentCount in sync with `resume()`/`resumeAgent()`,
+          // which re-increment on the way back. Without this, the count
+          // drifts up on each pause/resume cycle and starves the queue.
+          if (activeAgentCount > 0) activeAgentCount--;
         }
       });
       emitProgress();
@@ -778,6 +782,7 @@ export function createBatchOrchestrator(config) {
         if (a.state === 'paused' && a.executor) {
           a.executor.resume();
           a.state = 'running';
+          activeAgentCount++;
         }
       });
       emitProgress();

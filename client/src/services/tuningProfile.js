@@ -10,7 +10,8 @@ const PROFILE_VERSION = '1.0';
 // ============================================================
 export function buildTuningProfile(results, batchMeta, tunerState) {
   const times = results.filter(r => r.success).map(r => r.elapsedMs || 0);
-  if (times.length < 10) return null;
+  // Require at least 50 successes so p95 is not dominated by a single outlier.
+  if (times.length < 50) return null;
 
   const sorted = [...times].sort((a, b) => a - b);
   const avg = times.reduce((a, b) => a + b, 0) / times.length;
@@ -18,19 +19,24 @@ export function buildTuningProfile(results, batchMeta, tunerState) {
   const p95 = sorted[Math.floor(sorted.length * 0.95)];
   const p99 = sorted[Math.floor(sorted.length * 0.99)] || p95;
 
-  // Determine optimal concurrency from tuner history or from results
+  // Determine optimal concurrency from tuner history or from results.
+  // Tuner history entries use `toConc` (not `to`); PROBE_COMPLETE entries
+  // have no concurrency field, so filter those out.
   let optimalConcurrency = batchMeta?.concurrency || 4;
   if (tunerState?.history?.length > 0) {
-    // Find the concurrency level that produced the best throughput
-    const concLevels = tunerState.history.map(h => h.to);
-    concLevels.push(tunerState.current);
-    // Use the most common level in the second half of adjustments (after warm-up)
-    const secondHalf = concLevels.slice(Math.floor(concLevels.length / 2));
-    const counts = {};
-    for (const c of secondHalf) counts[c] = (counts[c] || 0) + 1;
-    optimalConcurrency = parseInt(
-      Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0]
-    );
+    const concLevels = tunerState.history
+      .map(h => h.toConc)
+      .filter(c => typeof c === 'number' && c > 0);
+    if (typeof tunerState.current === 'number') concLevels.push(tunerState.current);
+    if (concLevels.length > 0) {
+      // Mode of the second half — after the tuner has settled past the probe.
+      const secondHalf = concLevels.slice(Math.floor(concLevels.length / 2));
+      const counts = {};
+      for (const c of secondHalf) counts[c] = (counts[c] || 0) + 1;
+      const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+      const parsed = parseInt(top[0], 10);
+      if (!Number.isNaN(parsed)) optimalConcurrency = parsed;
+    }
   }
 
   // Compute warning threshold: midpoint between p95 and 2x p95

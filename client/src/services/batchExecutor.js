@@ -9,12 +9,23 @@ import { parseRatingResponse } from './xmlParser.js';
 
 export const DEFAULT_INITIAL_DELAY_MS = 200;
 
-// Errors worth retrying (transient)
-const RETRYABLE_PATTERNS = ['timed out', 'timeout', 'abort', 'http 429', 'http 502', 'http 503', 'http 504', 'proxy error', 'proxy timeout', 'failed to fetch', 'networkerror'];
+// Errors worth retrying (transient). Throttle responses (429/503, "throttled",
+// "rate limit", "too many requests") are intentionally excluded so they fall
+// through to the throttle-handling path in the worker loop, which applies a
+// hard backoff and force-pauses after enough consecutive throttles. Retrying
+// them silently would mask the throttle signal.
+const RETRYABLE_PATTERNS = ['timed out', 'timeout', 'abort', 'http 502', 'http 504', 'proxy error', 'proxy timeout', 'failed to fetch', 'networkerror'];
+const THROTTLE_ERROR_PATTERNS = ['http 429', 'http 503', 'throttl', 'rate limit', 'rate-limit', 'too many requests'];
 
 function isRetryable(errorMessage) {
   const msg = (errorMessage || '').toLowerCase();
+  if (THROTTLE_ERROR_PATTERNS.some(p => msg.includes(p))) return false;
   return RETRYABLE_PATTERNS.some(p => msg.includes(p));
+}
+
+function isThrottleError(errorMessage) {
+  const msg = (errorMessage || '').toLowerCase();
+  return THROTTLE_ERROR_PATTERNS.some(p => msg.includes(p));
 }
 
 // ── Spike-Aware Auto-Tuner ──
@@ -320,9 +331,9 @@ export function createBatchExecutor(config) {
     const now = Date.now();
     const elapsed = now - startTimeMs;
 
-    const cutoff = now - 10000;
-    const recentCompletions = completionTimestamps.filter(t => t > cutoff).length;
-    const throughput = recentCompletions / 10;
+    // completionTimestamps is trimmed to the last 10s on each push, so
+    // its length is already the rolling-window count.
+    const throughput = completionTimestamps.length / 10;
 
     const remaining = queue.length + activeCount;
     const estimatedRemainingMs = throughput > 0 ? (remaining / throughput) * 1000 : 0;
@@ -408,6 +419,13 @@ export function createBatchExecutor(config) {
         currentConcurrency = Math.min(concurrency, currentConcurrency + 1);
       }
     }
+
+    // Snap delay fully back to baseline after a long clean streak. Halving
+    // cannot reach a 0ms baseline and leaves tiny residual delays around.
+    if (consecutiveSuccesses >= THROTTLE_RECOVERY_SUCCESS_STREAK && currentDelay > delayMs) {
+      currentDelay = delayMs;
+      backoffTriggered = false;
+    }
   }
 
   // ── Throttle detection signatures ──
@@ -423,7 +441,13 @@ export function createBatchExecutor(config) {
   // Consecutive throttle counter for forced pause
   let consecutiveThrottles = 0;
   const THROTTLE_EXTRA_DELAY_MS = 5000;
+  const THROTTLE_MAX_DELAY_MS = 10000;
   const CONSECUTIVE_THROTTLE_PAUSE_THRESHOLD = 3;
+  // After this many consecutive successes post-throttle, snap delay back to
+  // baseline in one step instead of halving. Halving from 10s with a 0ms
+  // baseline takes ~14 successful intervals to decay, which is unnecessarily
+  // slow once the server is healthy again.
+  const THROTTLE_RECOVERY_SUCCESS_STREAK = 15;
 
   // ── Failure message classification ──
   function classifyFailureMessage(ratingMessage, requestWeightLbs, rawWeight, httpStatus) {
@@ -499,6 +523,9 @@ export function createBatchExecutor(config) {
       rateResponseXml: params.saveResponseXml && responseXml ? responseXml : '',
       rates: ratesWithMargin,
       timeoutRetry,
+      // Preserve dedup metadata so InputScreen can expand representative
+      // rates back to all group members. Undefined when dedup is off.
+      _dedup: row._dedup,
       failureReason: !success && !failureReason
         ? classifyFailureMessage(
             err ? err.message : (parsed?.ratingMessage || ''),
@@ -572,6 +599,9 @@ export function createBatchExecutor(config) {
       let error = null;
       let timeoutRetry = false;
       let failureReason = '';
+      // Set when the row should be re-queued instead of committed as a result
+      // (e.g. multi-status loop broken mid-way by pause/cancel).
+      let requeue = false;
 
       // Helper: unwrap postToG3 response (may be plain string or {text, timeoutRetry})
       function unwrapResponse(resp) {
@@ -593,8 +623,10 @@ export function createBatchExecutor(config) {
           let lastXml = null;
           let lastResponseXml = null;
           let ratingMessage = '';
+          let interrupted = false;
 
-          for (const status of statuses) {
+          for (let i = 0; i < statuses.length; i++) {
+            const status = statuses[i];
             const statusParams = { ...params, contractStatus: [status] };
             const reqXml = buildRatingRequest(row, statusParams, credentials);
             const rawResp = await postToG3(reqXml, credentials, timeoutMs);
@@ -614,13 +646,24 @@ export function createBatchExecutor(config) {
               ratingMessage += (ratingMessage ? ' | ' : '') + `[${status}] ${parsedResp.ratingMessage}`;
             }
 
-            // Respect pause/cancel between status calls
-            if (state !== 'RUNNING') break;
+            // If pause/cancel arrived mid-loop and we have more statuses to
+            // call, treat the row as not-yet-completed and re-queue on pause.
+            if (state !== 'RUNNING' && i < statuses.length - 1) {
+              interrupted = true;
+              break;
+            }
           }
 
-          xml = lastXml;
-          responseXml = lastResponseXml;
-          parsed = { rates: allRates, ratingMessage };
+          if (interrupted) {
+            requeue = (state === 'PAUSED' || state === 'AUTO_PAUSED');
+            xml = lastXml;
+            responseXml = lastResponseXml;
+            parsed = null;
+          } else {
+            xml = lastXml;
+            responseXml = lastResponseXml;
+            parsed = { rates: allRates, ratingMessage };
+          }
         } else {
           // Single status — normal path
           xml = buildRatingRequest(row, params, credentials);
@@ -632,10 +675,24 @@ export function createBatchExecutor(config) {
         error = err;
         if (err.timeoutRetry) timeoutRetry = true;
         if (err.failureReason) failureReason = err.failureReason;
+        // Classify throttle errors up-front so the result carries the right
+        // reason without relying on body-text pattern matching later.
+        if (!failureReason && isThrottleError(err.message)) {
+          failureReason = 'THROTTLE_RESPONSE';
+        }
       }
 
       activeCount--;
       const elapsedMs = Date.now() - startTime;
+
+      // Row was interrupted mid multi-status by pause/cancel: put it back
+      // on the queue so we don't record a partial result. On cancel we
+      // simply drop it — state cleanup is handled by cancel().
+      if (requeue) {
+        queue.unshift({ rowIndex, attempt });
+        if (onProgress) onProgress(buildProgress());
+        break;
+      }
 
       // Update telemetry counters
       updateRolling(elapsedMs);
@@ -665,7 +722,14 @@ export function createBatchExecutor(config) {
       // Final result
       const result = buildResult(row, rowIndex, parsed, xml, responseXml, elapsedMs, workerIdx, error, startTime, dispatchTimestamp, activeWorkerSnapshot, queueSnapshot, timeoutRetry, failureReason);
       results.push(result);
-      completionTimestamps.push(Date.now());
+      const nowTs = Date.now();
+      completionTimestamps.push(nowTs);
+      // Only the last 10s of completions contribute to throughput. Trim
+      // here so the array doesn't grow O(N) for the lifetime of the batch.
+      const tsCutoff = nowTs - 10000;
+      while (completionTimestamps.length > 0 && completionTimestamps[0] < tsCutoff) {
+        completionTimestamps.shift();
+      }
 
       // Update success/failure counters
       if (result.success) {
@@ -679,8 +743,9 @@ export function createBatchExecutor(config) {
         // ── Throttle hard backoff ──
         if (result.failureReason === 'THROTTLE_RESPONSE') {
           consecutiveThrottles++;
-          // Immediate hard backoff: add fixed 5s on top of current delay
-          currentDelay = currentDelay + THROTTLE_EXTRA_DELAY_MS;
+          // Immediate hard backoff: add fixed 5s on top of current delay,
+          // capped so a burst of throttles can't ratchet the delay to minutes.
+          currentDelay = Math.min(THROTTLE_MAX_DELAY_MS, currentDelay + THROTTLE_EXTRA_DELAY_MS);
 
           // If 3+ consecutive throttles, force-pause the entire batch
           if (consecutiveThrottles >= CONSECUTIVE_THROTTLE_PAUSE_THRESHOLD && state === 'RUNNING') {

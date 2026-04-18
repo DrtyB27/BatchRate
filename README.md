@@ -37,6 +37,18 @@ Or use the one-click script:
 
 Opens at **http://localhost:5173**.
 
+## Deploy to GitHub Pages
+
+Pushes to `main` trigger `.github/workflows/static.yml`, which runs
+`npm ci && npm run build` in `client/` and publishes `client/dist/` via
+`actions/deploy-pages`. The built artifact is no longer tracked in the repo —
+`docs/` and `client/dist/` are both gitignored.
+
+> **Repo setting:** Settings → Pages → **Source** must be set to
+> **GitHub Actions** (not "Deploy from a branch"). If it's still pointed at
+> `/docs` on `main`, the workflow will succeed but the live site will not
+> update.
+
 ## Deploy to SharePoint
 
 1. Build the static files:

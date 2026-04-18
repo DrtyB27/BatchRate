@@ -7,6 +7,7 @@ import { openAwardSharePdf } from './AwardSharePdf.js';
 import { useScenario } from '../context/ScenarioContext.jsx';
 import CustomerLocationManager from './CustomerLocationManager.jsx';
 import { computeOriginSummary } from '../utils/locationResolver.js';
+import { formatShipments, formatTons } from '../utils/annualizedMetrics.js';
 
 function fmt$(v) {
   return '$' + Number(v || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -34,7 +35,7 @@ function escCsv(val) {
   return s;
 }
 
-export default function AnnualAwardBuilder({ flatRows, computedScenarios, activeMarkups, sampleWeeks, weeksOverride, onWeeksChange, detectedWeeks, customerLocations, onCustomerLocationsChange }) {
+export default function AnnualAwardBuilder({ flatRows, computedScenarios, activeMarkups, sampleWeeks, weeksOverride, onWeeksChange, detectedWeeks, annualization, historicBaseline, customerLocations, onCustomerLocationsChange }) {
   const { carrierSelections, scenarioName: ctxScenarioName } = useScenario();
   const [selectedScenarioId, setSelectedScenarioId] = useState('');
   const [viewLevel, setViewLevel] = useState('carrier'); // 'carrier' | 'lane' | 'customer'
@@ -47,6 +48,9 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
   const [showLocations, setShowLocations] = useState(false);
   const sankeyRef = useRef(null);
 
+  // Keep the weeks-based legacy factor as the authoritative multiplier
+  // (drives existing engine calls) and read the annualization hook for the
+  // display-side data-span label and tonnage formatting.
   const annualizationFactor = 52 / Math.max(1, sampleWeeks);
 
   // Collect all unique origin states for the filter dropdown
@@ -143,10 +147,101 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
 
   const { lanes, carriers, totals } = result;
 
-  const { carriers: carrierSummary, totals: csTotals } = useMemo(
+  const { carriers: rawCarrierSummary, totals: rawCsTotals } = useMemo(
     () => computeCarrierSummary(lanes),
     [lanes]
   );
+
+  // Overlay scenario-invariant incumbent baseline onto per-carrier rows.
+  // Incumbent columns (lanes, annual spend, retained status) must not shift as
+  // the user switches scenarios or strategies.  Baseline comes from raw rows.
+  const { carriers: carrierSummary, totals: csTotals } = useMemo(() => {
+    const factor = annualization?.factor ?? annualizationFactor;
+    const baseline = historicBaseline?.baselineByCarrier || {};
+    const seen = new Set();
+    const merged = rawCarrierSummary.map(c => {
+      seen.add(c.scac);
+      const b = baseline[c.scac];
+      if (!b) return { ...c, incumbentLanes: 0, incumbentAnnSpend: 0, incumbentAnnTons: 0, hasIncumbent: false };
+      return {
+        ...c,
+        incumbentLanes: b.lanes,
+        incumbentAnnSpend: b.spend != null ? b.spend * factor : 0,
+        incumbentAnnTons: b.totalTons * factor,
+        incumbentAnnShipments: Math.round(b.shipments * factor),
+        hasIncumbent: true,
+      };
+    });
+
+    // Append carriers who were incumbent but received zero awards in this
+    // scenario — they still deserve a row so losing incumbents are visible.
+    for (const [scac, b] of Object.entries(baseline)) {
+      if (seen.has(scac)) continue;
+      merged.push({
+        scac,
+        carrierName: '',
+        incumbentLanes: b.lanes,
+        incumbentAnnSpend: b.spend != null ? b.spend * factor : 0,
+        incumbentAnnTons: b.totalTons * factor,
+        incumbentAnnShipments: Math.round(b.shipments * factor),
+        awardedLanes: 0,
+        projectedAnnSpend: 0,
+        displacedHistoricSpend: 0,
+        sampleShipments: 0,
+        annualShipments: 0,
+        sampleLbs: 0,
+        annualLbs: 0,
+        sampleTons: 0,
+        annualTons: 0,
+        retainedLanes: 0,
+        wonLanes: 0,
+        lostLanes: b.lanes,
+        netLaneChange: -b.lanes,
+        deltaVsDisplaced: null,
+        deltaVsDisplacedPct: null,
+        hasIncumbent: true,
+      });
+    }
+
+    // Recompute totals from merged set so incumbent numbers reflect the baseline.
+    const totals = merged.reduce((t, c) => {
+      t.incumbentLanes += c.incumbentLanes || 0;
+      t.incumbentAnnSpend += c.incumbentAnnSpend || 0;
+      t.incumbentAnnTons += c.incumbentAnnTons || 0;
+      t.awardedLanes += c.awardedLanes || 0;
+      t.projectedAnnSpend += c.projectedAnnSpend || 0;
+      t.displacedHistoricSpend += c.displacedHistoricSpend || 0;
+      t.sampleShipments += c.sampleShipments || 0;
+      t.annualShipments += c.annualShipments || 0;
+      t.sampleLbs += c.sampleLbs || 0;
+      t.annualLbs += c.annualLbs || 0;
+      t.sampleTons += c.sampleTons || 0;
+      t.annualTons += c.annualTons || 0;
+      t.retainedLanes += c.retainedLanes || 0;
+      t.wonLanes += c.wonLanes || 0;
+      t.lostLanes += c.lostLanes || 0;
+      return t;
+    }, {
+      incumbentLanes: 0, incumbentAnnSpend: 0, incumbentAnnTons: 0,
+      awardedLanes: 0, projectedAnnSpend: 0, displacedHistoricSpend: 0,
+      sampleShipments: 0, annualShipments: 0,
+      sampleLbs: 0, annualLbs: 0, sampleTons: 0, annualTons: 0,
+      retainedLanes: 0, wonLanes: 0, lostLanes: 0,
+    });
+    totals.netLaneChange = totals.awardedLanes - totals.incumbentLanes;
+    const tHasBoth = totals.projectedAnnSpend > 0 && totals.displacedHistoricSpend > 0;
+    totals.deltaVsDisplaced = tHasBoth ? totals.projectedAnnSpend - totals.displacedHistoricSpend : null;
+    totals.deltaVsDisplacedPct = totals.displacedHistoricSpend > 0
+      ? (totals.deltaVsDisplaced / totals.displacedHistoricSpend) * 100
+      : null;
+
+    merged.sort((a, b) => (b.displacedHistoricSpend || 0) - (a.displacedHistoricSpend || 0));
+    return { carriers: merged, totals };
+  }, [rawCarrierSummary, historicBaseline, annualization, annualizationFactor]);
+
+  // Raw (scenario-dependent) totals kept in scope only if needed by the lane
+  // footer aggregates; the carrier table/KPIs below always read csTotals.
+  void rawCsTotals;
 
   const sankeyData = useMemo(
     () => computeSankeyData(lanes, annualizationFactor),
@@ -283,12 +378,13 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
     const dl = custPriceLanes;
     const shipments = dl.reduce((s, l) => s + l.shipments, 0);
     const annualShipments = dl.reduce((s, l) => s + l.annualShipments, 0);
+    const annualTons = dl.reduce((s, l) => s + (l.annualTons || 0), 0);
     const sampleSpend = dl.reduce((s, l) => s + l.sampleSpend, 0);
     const annualSpend = dl.reduce((s, l) => s + l.annualSpend, 0);
     const annualHistoric = dl.reduce((s, l) => s + l.annualHistoric, 0);
     const delta = annualHistoric > 0 ? annualSpend - annualHistoric : 0;
     const deltaPct = annualHistoric > 0 ? (delta / annualHistoric) * 100 : 0;
-    return { shipments, annualShipments, sampleSpend, annualSpend, annualHistoric, delta, deltaPct };
+    return { shipments, annualShipments, annualTons, sampleSpend, annualSpend, annualHistoric, delta, deltaPct };
   }, [isDisplayCustomerPrice, custPriceLanes, totals]);
 
   const toggleOrigin = (st) => {
@@ -305,7 +401,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
     const headers = [
       'Lane', 'Carrier SCAC', 'Carrier Name',
       'Hist. Carrier', 'Hist. Carrier %', 'Hist. Total Ann. Spend',
-      'Sample Shipments', 'Annual Shipments (est)',
+      'Sample Shipments', 'Annual Shipments (est)', 'Annual Tons (US)',
       'Sample Spend', 'Annual Spend (est)',
       'Annual Historic Spend (Attributed)', 'Annual Delta ($)', 'Annual Delta (%)',
     ];
@@ -314,6 +410,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
       l.historicCarrier || '', l.historicCarrierPct || '',
       l.historicTotalAnnSpend ? l.historicTotalAnnSpend.toFixed(2) : '0.00',
       l.shipments, l.annualShipments,
+      (l.annualTons || 0).toFixed(1),
       l.sampleSpend.toFixed(2), l.annualSpend.toFixed(2),
       l.annualHistoric.toFixed(2), l.delta.toFixed(2), l.deltaPct.toFixed(1),
     ].map(escCsv));
@@ -321,11 +418,13 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
     // Carrier Summary section
     const summaryHeaders = [
       'SCAC', 'Carrier', 'Awarded Lanes', 'Sample Shipments', 'Annual Shipments',
+      'Annual Tons (US)',
       'Proj. Ann. Spend', 'Displaced Historic', '\u0394 ($)', '\u0394 (%)',
       'Incumbent Lanes', 'Net Lanes', 'Retained', 'Won', 'Lost',
     ];
     const summaryRows = exportCarrierSummary.map(c => [
       c.scac, c.carrierName, c.awardedLanes, c.sampleShipments, c.annualShipments,
+      (c.annualTons || 0).toFixed(1),
       c.projectedAnnSpend.toFixed(2),
       c.displacedHistoricSpend.toFixed(2),
       c.deltaVsDisplaced != null ? c.deltaVsDisplaced.toFixed(2) : '',
@@ -617,7 +716,10 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
 
           {!customerShareMode && (
             <div className="text-xs text-gray-500">
-              Annualization factor: <strong>{annualizationFactor.toFixed(1)}x</strong> ({sampleWeeks} wk &rarr; 52 wk)
+              Annualization factor: <strong>{annualizationFactor.toFixed(2)}x</strong> ({sampleWeeks} wk &rarr; 52 wk)
+              {annualization?.sourceLabel && (
+                <span className="ml-2 text-gray-400">— {annualization.sourceLabel}</span>
+              )}
             </div>
           )}
         </div>
@@ -648,6 +750,16 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
                 <CustomerLocationManager locations={customerLocations || []} onLocationsChange={onCustomerLocationsChange} />
               </div>
             )}
+          </div>
+        )}
+
+        {/* Missing-incumbent disclosure — informational only */}
+        {!customerShareMode && historicBaseline?.missingIncumbentRows > 0 && (
+          <div
+            className="text-xs rounded-md px-3 py-2 bg-gray-50 border-l-4 border-[#39b6e6] text-[#002144]"
+            style={{ fontFamily: "'Montserrat', Arial, sans-serif" }}
+          >
+            {historicBaseline.missingIncumbentRows.toLocaleString()} lane{historicBaseline.missingIncumbentRows === 1 ? '' : 's'} have no incumbent carrier identified. These are excluded from historic baseline totals.
           </div>
         )}
 
@@ -771,6 +883,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
                     <th className="px-3 py-2 text-right">Awarded Lanes</th>
                     <th className="px-3 py-2 text-right">Sample Ship.</th>
                     <th className="px-3 py-2 text-right">Ann. Ship.</th>
+                    <th className="px-3 py-2 text-right" title="Annualized tonnage (US tons, 2,000 lb)">Ann. Tons</th>
                     <th className="px-3 py-2 text-right">Proj. Ann. Spend</th>
                     {/* Group 2 — Benchmark */}
                     <th className="px-3 py-2 text-right border-l-2 border-gray-300" title="What DLX was paying on these lanes before, regardless of carrier">Displaced Historic</th>
@@ -793,8 +906,9 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
                       <td className="px-3 py-2 font-mono font-medium text-[#002144]">{c.scac}</td>
                       <td className="px-3 py-2">{c.carrierName}</td>
                       <td className="px-3 py-2 text-right">{c.awardedLanes || '—'}</td>
-                      <td className="px-3 py-2 text-right">{fmtNum(c.sampleShipments)}</td>
-                      <td className="px-3 py-2 text-right">{fmtNum(c.annualShipments)}</td>
+                      <td className="px-3 py-2 text-right">{c.awardedLanes > 0 ? formatShipments(c.sampleShipments) : '—'}</td>
+                      <td className="px-3 py-2 text-right">{c.awardedLanes > 0 ? formatShipments(c.annualShipments) : '—'}</td>
+                      <td className="px-3 py-2 text-right" title="Annualized US tons (2,000 lb)">{c.awardedLanes > 0 && c.annualTons > 0 ? formatTons(c.annualTons) : '—'}</td>
                       <td className="px-3 py-2 text-right font-semibold text-[#002144]">{c.projectedAnnSpend > 0 ? fmtCompact$(c.projectedAnnSpend) : '—'}</td>
                       <td className="px-3 py-2 text-right border-l-2 border-gray-300" title="What DLX was paying on these lanes before, regardless of carrier">{c.displacedHistoricSpend > 0 ? fmtCompact$(c.displacedHistoricSpend) : '—'}</td>
                       <td className={`px-3 py-2 text-right font-medium border-l-2 border-gray-300 ${c.deltaVsDisplaced != null ? deltaColor(c.deltaVsDisplaced) : 'text-gray-400'}`}>
@@ -817,8 +931,9 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
                   <tr className="bg-[#002144]/5 font-bold border-t">
                     <td className="px-3 py-2" colSpan={2}>Total</td>
                     <td className="px-3 py-2 text-right">{csTotals.awardedLanes}</td>
-                    <td className="px-3 py-2 text-right">{fmtNum(csTotals.sampleShipments)}</td>
-                    <td className="px-3 py-2 text-right">{fmtNum(csTotals.annualShipments)}</td>
+                    <td className="px-3 py-2 text-right">{formatShipments(csTotals.sampleShipments)}</td>
+                    <td className="px-3 py-2 text-right">{formatShipments(csTotals.annualShipments)}</td>
+                    <td className="px-3 py-2 text-right">{csTotals.annualTons > 0 ? formatTons(csTotals.annualTons) : '—'}</td>
                     <td className="px-3 py-2 text-right font-semibold">{fmtCompact$(csTotals.projectedAnnSpend)}</td>
                     <td className="px-3 py-2 text-right border-l-2 border-gray-300">{csTotals.displacedHistoricSpend > 0 ? fmtCompact$(csTotals.displacedHistoricSpend) : '—'}</td>
                     <td className={`px-3 py-2 text-right border-l-2 border-gray-300 ${csTotals.deltaVsDisplaced != null ? deltaColor(csTotals.deltaVsDisplaced) : ''}`}>
@@ -847,6 +962,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
                     <th className="px-4 py-2">Hist. Carrier</th>
                     <th className="px-4 py-2 text-right">Sample Ship.</th>
                     <th className="px-4 py-2 text-right">Annual Ship.</th>
+                    <th className="px-4 py-2 text-right" title="Annualized tonnage (US tons, 2,000 lb)">Ann. Tons</th>
                     <th className="px-4 py-2 text-right">Sample Spend</th>
                     <th className="px-4 py-2 text-right">Annual Spend</th>
                     <th className="px-4 py-2 text-right">Annual Historic</th>
@@ -871,8 +987,9 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
                           </span>
                         )}
                       </td>
-                      <td className="px-4 py-2 text-right">{fmtNum(l.shipments)}</td>
-                      <td className="px-4 py-2 text-right">{fmtNum(l.annualShipments)}</td>
+                      <td className="px-4 py-2 text-right">{formatShipments(l.shipments)}</td>
+                      <td className="px-4 py-2 text-right">{formatShipments(l.annualShipments)}</td>
+                      <td className="px-4 py-2 text-right">{l.annualTons > 0 ? formatTons(l.annualTons) : '—'}</td>
                       <td className="px-4 py-2 text-right">{fmt$(l.sampleSpend)}</td>
                       <td className="px-4 py-2 text-right font-medium">{fmt$(l.annualSpend)}</td>
                       <td className="px-4 py-2 text-right">{l.annualHistoric > 0 ? fmt$(l.annualHistoric) : '—'}</td>
@@ -884,8 +1001,9 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
                 <tfoot>
                   <tr className="bg-[#002144]/5 font-bold border-t">
                     <td className="px-4 py-2" colSpan={4}>Total ({displayLanes.length} lanes)</td>
-                    <td className="px-4 py-2 text-right">{fmtNum(laneFooterTotals.shipments)}</td>
-                    <td className="px-4 py-2 text-right">{fmtNum(laneFooterTotals.annualShipments)}</td>
+                    <td className="px-4 py-2 text-right">{formatShipments(laneFooterTotals.shipments)}</td>
+                    <td className="px-4 py-2 text-right">{formatShipments(laneFooterTotals.annualShipments)}</td>
+                    <td className="px-4 py-2 text-right">{laneFooterTotals.annualTons > 0 ? formatTons(laneFooterTotals.annualTons) : '—'}</td>
                     <td className="px-4 py-2 text-right">{fmt$(laneFooterTotals.sampleSpend)}</td>
                     <td className="px-4 py-2 text-right">{fmt$(laneFooterTotals.annualSpend)}</td>
                     <td className="px-4 py-2 text-right">{laneFooterTotals.annualHistoric > 0 ? fmt$(laneFooterTotals.annualHistoric) : '—'}</td>

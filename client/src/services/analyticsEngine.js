@@ -1500,6 +1500,7 @@ export function computeAnnualAward(flatRows, scenarioAwards, sampleWeeks) {
         carrierName: row.rate.carrierName || '',
         shipments: 0,
         sampleSpend: 0,
+        sampleLbs: 0,
         historicCostByScac: {},
         historicCarrierVotes: {},
       };
@@ -1507,6 +1508,8 @@ export function computeAnnualAward(flatRows, scenarioAwards, sampleWeeks) {
     const g = laneCarrierMap[groupKey];
     g.shipments++;
     g.sampleSpend += row.rate.totalCharge ?? 0;
+    const wt = parseFloat(row.inputNetWt);
+    if (Number.isFinite(wt)) g.sampleLbs += wt;
     if (row.origPostal) g.origPostals.add(row.origPostal);
     const hc = row.historicCarrier ? String(row.historicCarrier).toUpperCase().trim() : null;
     const hCost = row.historicCost ? parseFloat(row.historicCost) || 0 : 0;
@@ -1523,6 +1526,9 @@ export function computeAnnualAward(flatRows, scenarioAwards, sampleWeeks) {
   const lanes = Object.values(laneCarrierMap).map(g => {
     const annualShipments = Math.round(g.shipments * factor);
     const annualSpend = g.sampleSpend * factor;
+    const annualLbs = g.sampleLbs * factor;
+    const annualTons = annualLbs / 2000;
+    const sampleTons = g.sampleLbs / 2000;
 
     // Determine dominant historic carrier by vote count
     const votes = Object.entries(g.historicCarrierVotes);
@@ -1551,6 +1557,10 @@ export function computeAnnualAward(flatRows, scenarioAwards, sampleWeeks) {
       origPostals: [...g.origPostals],
       shipments: g.shipments,
       annualShipments,
+      sampleLbs: g.sampleLbs,
+      annualLbs,
+      sampleTons,
+      annualTons,
       sampleSpend: g.sampleSpend,
       annualSpend,
       carrierSCAC: g.carrierSCAC,
@@ -1577,6 +1587,10 @@ export function computeAnnualAward(flatRows, scenarioAwards, sampleWeeks) {
         lanes: 0,
         shipments: 0,
         annualShipments: 0,
+        sampleLbs: 0,
+        annualLbs: 0,
+        sampleTons: 0,
+        annualTons: 0,
         sampleSpend: 0,
         annualSpend: 0,
         historicSpend: 0,
@@ -1587,6 +1601,10 @@ export function computeAnnualAward(flatRows, scenarioAwards, sampleWeeks) {
     c.lanes++;
     c.shipments += l.shipments;
     c.annualShipments += l.annualShipments;
+    c.sampleLbs += l.sampleLbs;
+    c.annualLbs += l.annualLbs;
+    c.sampleTons += l.sampleTons;
+    c.annualTons += l.annualTons;
     c.sampleSpend += l.sampleSpend;
     c.annualSpend += l.annualSpend;
     // Only credit historic spend when this carrier was the actual historic carrier
@@ -1606,6 +1624,10 @@ export function computeAnnualAward(flatRows, scenarioAwards, sampleWeeks) {
   // Totals
   const totShipments = lanes.reduce((s, l) => s + l.shipments, 0);
   const totAnnualShip = lanes.reduce((s, l) => s + l.annualShipments, 0);
+  const totSampleLbs = lanes.reduce((s, l) => s + l.sampleLbs, 0);
+  const totAnnualLbs = lanes.reduce((s, l) => s + l.annualLbs, 0);
+  const totSampleTons = totSampleLbs / 2000;
+  const totAnnualTons = totAnnualLbs / 2000;
   const totSampleSpend = lanes.reduce((s, l) => s + l.sampleSpend, 0);
   const totAnnualSpend = lanes.reduce((s, l) => s + l.annualSpend, 0);
   const totHistoric = lanes.reduce((s, l) => s + l.historicSpend, 0);
@@ -1619,6 +1641,10 @@ export function computeAnnualAward(flatRows, scenarioAwards, sampleWeeks) {
     totals: {
       shipments: totShipments,
       annualShipments: totAnnualShip,
+      sampleLbs: totSampleLbs,
+      annualLbs: totAnnualLbs,
+      sampleTons: totSampleTons,
+      annualTons: totAnnualTons,
       sampleSpend: totSampleSpend,
       annualSpend: totAnnualSpend,
       historicSpend: totHistoric,
@@ -1654,6 +1680,10 @@ export function computeCarrierSummary(lanes) {
         displacedHistoricSpend: 0,
         sampleShipments: 0,
         annualShipments: 0,
+        sampleLbs: 0,
+        annualLbs: 0,
+        sampleTons: 0,
+        annualTons: 0,
         retainedLanes: 0,
         wonLanes: 0,
         lostLanes: 0,
@@ -1687,6 +1717,10 @@ export function computeCarrierSummary(lanes) {
       a.displacedHistoricSpend += lane.historicTotalAnnSpend || lane.annualHistoric || 0;
       a.sampleShipments += lane.shipments || 0;
       a.annualShipments += lane.annualShipments || 0;
+      a.sampleLbs += lane.sampleLbs || 0;
+      a.annualLbs += lane.annualLbs || 0;
+      a.sampleTons += lane.sampleTons || 0;
+      a.annualTons += lane.annualTons || 0;
       if (hc && hc !== ac) {
         a.wonLanes++;
       }
@@ -1715,6 +1749,10 @@ export function computeCarrierSummary(lanes) {
     t.displacedHistoricSpend += c.displacedHistoricSpend;
     t.sampleShipments += c.sampleShipments;
     t.annualShipments += c.annualShipments;
+    t.sampleLbs += c.sampleLbs;
+    t.annualLbs += c.annualLbs;
+    t.sampleTons += c.sampleTons;
+    t.annualTons += c.annualTons;
     t.retainedLanes += c.retainedLanes;
     t.wonLanes += c.wonLanes;
     t.lostLanes += c.lostLanes;
@@ -1723,6 +1761,7 @@ export function computeCarrierSummary(lanes) {
     incumbentLanes: 0, incumbentAnnSpend: 0,
     awardedLanes: 0, projectedAnnSpend: 0, displacedHistoricSpend: 0,
     sampleShipments: 0, annualShipments: 0,
+    sampleLbs: 0, annualLbs: 0, sampleTons: 0, annualTons: 0,
     retainedLanes: 0, wonLanes: 0, lostLanes: 0,
   });
   totals.netLaneChange = totals.awardedLanes - totals.incumbentLanes;

@@ -8,6 +8,7 @@
 
 import { postToG3, sleep } from './ratingClient.js';
 import { parseRatingResponse } from './xmlParser.js';
+import { resolveNumberOfRates } from './xmlBuilder.js';
 
 function esc(val) {
   return String(val)
@@ -38,7 +39,7 @@ function buildConsolidationRequest(candidate, batchParams, utcOffset) {
   const contractStatus = Array.isArray(batchParams?.contractStatus)
     ? batchParams.contractStatus[0]
     : (batchParams?.contractStatus || 'BeingEntered');
-  const numberOfRates = batchParams?.numberOfRates || 4;
+  const numberOfRates = resolveNumberOfRates(batchParams);
 
   const pickupDate = pickupWindow.earliest || new Date().toISOString().slice(0, 10);
   const dateStr = `${pickupDate}T00:00:00-${utcOffset || '05:00'}`;

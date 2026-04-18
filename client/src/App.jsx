@@ -400,6 +400,7 @@ export default function App() {
               setScreen('results');
             }}
             existingResults={results}
+            loadedBatchParams={loadedFromFile ? batchParams : null}
           />
         )}
         {screen === 'rateValidator' && <RateLoadValidator />}

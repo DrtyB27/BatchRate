@@ -11,6 +11,12 @@ const CONTRACT_USE_OPTIONS = [
   { key: 'BlanketBenchmark', label: 'BlanketBenchmark' },
 ];
 
+const RATE_MODE_OPTIONS = [
+  { key: 'all',    label: 'All Eligible',    hint: 'Return every qualifying carrier rate' },
+  { key: 'max',    label: 'Max Carriers',    hint: 'Cap at a specific carrier count' },
+  { key: 'single', label: 'Single Low Cost', hint: 'Return only the cheapest rate' },
+];
+
 export default function ParametersSidebar({ params, setParams }) {
   const update = (field, value) => setParams(prev => ({ ...prev, [field]: value }));
 
@@ -138,8 +144,67 @@ export default function ParametersSidebar({ params, setParams }) {
         )}
 
         <div className="mb-2">
-          <label className={labelCls}>Number of Rates</label>
-          <input className={inputCls} type="number" min="1" max="50" value={params.numberOfRates} onChange={e => update('numberOfRates', parseInt(e.target.value) || 4)} />
+          <label className={labelCls}>Rate Selection</label>
+          {(() => {
+            const activeMode = params.rateMode || 'all';
+            const scacCount = parseInt(params._uniqueScacCount, 10) || 0;
+            const allEffective = Math.max(scacCount + 5, 50);
+            const activeHint = (RATE_MODE_OPTIONS.find(o => o.key === activeMode) || RATE_MODE_OPTIONS[0]).hint;
+            return (
+              <>
+                <div className="grid grid-cols-3 gap-1">
+                  {RATE_MODE_OPTIONS.map(({ key, label }) => {
+                    const isActive = activeMode === key;
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => update('rateMode', key)}
+                        className={`text-[11px] font-medium py-1 rounded transition-colors ${
+                          isActive ? 'bg-blue-500 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="text-[10px] text-gray-500 mt-1">{activeHint}</p>
+
+                {activeMode === 'all' && (
+                  <p className="text-[10px] text-gray-600 mt-1">
+                    {scacCount > 0
+                      ? `Detected ${scacCount} unique SCACs in upload — requesting up to ${allEffective} rates per call.`
+                      : `No Historic Carrier data in upload yet — requesting up to ${allEffective} rates per call.`}
+                  </p>
+                )}
+
+                {activeMode === 'max' && (
+                  <>
+                    <input
+                      className={`${inputCls} mt-1`}
+                      type="number"
+                      min="1"
+                      max="50"
+                      value={params.numberOfRates}
+                      onChange={e => update('numberOfRates', parseInt(e.target.value) || 4)}
+                    />
+                    {scacCount > 0 && (
+                      <p className="text-[10px] text-amber-600 mt-1">
+                        {scacCount} SCACs detected in upload — under-capping may miss carriers.
+                      </p>
+                    )}
+                  </>
+                )}
+
+                {activeMode === 'single' && (
+                  <p className="text-[10px] text-gray-600 mt-1">
+                    Only the lowest-cost rate will be returned per shipment.
+                  </p>
+                )}
+              </>
+            );
+          })()}
         </div>
 
         <div className="flex items-center gap-2 mb-2">

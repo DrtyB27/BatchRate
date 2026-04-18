@@ -3,6 +3,30 @@
  * Uses string concatenation — no external dependencies.
  */
 
+/**
+ * Resolve effective NumberOfRates from rate-selection mode + upload SCAC count.
+ *
+ * Modes:
+ *   'all'    — max(uniqueSCACs + 5, 50). Buffer + floor guarantee every
+ *              qualifying carrier returns even when SCAC data is sparse.
+ *   'max'    — respect sidebarParams.numberOfRates (user's explicit cap).
+ *   'single' — return only the cheapest rate (1).
+ *
+ * Legacy runs with no rateMode fall through to numberOfRates || 4.
+ */
+export function resolveNumberOfRates(sidebarParams) {
+  const mode = sidebarParams && sidebarParams.rateMode;
+  if (mode === 'single') return 1;
+  if (mode === 'all') {
+    const uniqueScacs = parseInt(sidebarParams._uniqueScacCount, 10) || 0;
+    return Math.max(uniqueScacs + 5, 50);
+  }
+  if (mode === 'max') {
+    return parseInt(sidebarParams.numberOfRates, 10) || 4;
+  }
+  return parseInt(sidebarParams && sidebarParams.numberOfRates, 10) || 4;
+}
+
 function esc(val) {
   return String(val)
     .replace(/&/g, '&amp;')
@@ -74,7 +98,7 @@ function resolveParams(row, sidebarParams) {
     contractUse: contractUseList,
     useRoutingGuides: sidebarParams.useRoutingGuides || false,
     forceRoutingGuideName: sidebarParams.forceRoutingGuideName || '',
-    numberOfRates: sidebarParams.numberOfRates || 4,
+    numberOfRates: resolveNumberOfRates(sidebarParams),
     showTMSMarkup: sidebarParams.showTMSMarkup || false,
   };
 }

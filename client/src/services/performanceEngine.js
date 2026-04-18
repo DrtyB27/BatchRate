@@ -3,6 +3,20 @@
  * NO side effects, NO DOM access.
  */
 
+// Human-readable summary of the rate-selection mode used for a run.
+function formatRateModeSummary(ec) {
+  if (!ec) return 'all qualifying';
+  if (ec.rateMode === 'single') return 'single low-cost';
+  if (ec.rateMode === 'all') {
+    const scacs = ec.uniqueScacCount;
+    const rates = ec.numberOfRates;
+    if (scacs) return `all eligible (${scacs} SCACs in upload, request sized to ${rates || 'max'})`;
+    return `all eligible (request sized to ${rates || 'max'})`;
+  }
+  if (ec.rateMode === 'max') return `max ${ec.numberOfRates || 'N/A'}`;
+  return ec.numberOfRates || 'all qualifying';
+}
+
 // ============================================================
 // Error Classification
 // ============================================================
@@ -924,7 +938,9 @@ export function buildPerformanceReport(results, batchMeta) {
       retryAttempts: batchMeta?.retryAttempts || 0,
       adaptiveBackoff: batchMeta?.adaptiveBackoff ?? true,
       dedup: batchMeta?.dedupMode || 'off',
+      rateMode: batchMeta?.rateMode || null,
       numberOfRates: batchMeta?.numberOfRates || null,
+      uniqueScacCount: batchMeta?.uniqueScacCount || null,
       contractStatus: batchMeta?.contractStatus || null,
       contractUse: batchMeta?.contractUse || null,
       chunkSize: batchMeta?.chunkSize || null,
@@ -1024,7 +1040,7 @@ export function formatPerformanceReportText(report) {
   ln(`  Concurrency:      ${ec.concurrency || 'N/A'} (max ${ec.maxConcurrency || 'N/A'})`);
   ln(`  Delay:            ${ec.delayMs}ms`);
   ln(`  Dedup:            ${ec.dedup}`);
-  ln(`  Carriers:         ${ec.numberOfRates || 'all'}`);
+  ln(`  Carriers:         ${formatRateModeSummary(ec)}`);
   ln(`  Contract Status:  ${ec.contractStatus || 'N/A'}`);
   ln(`  Chunk Size:       ${ec.chunkSize || 'N/A'}`);
   ln(`  Max Agents:       ${ec.maxAgents || 'N/A'}`);
@@ -1209,7 +1225,7 @@ export function formatInternalSummary(report) {
   const ec = report.executionConfig;
   ln(`  Contract Status: ${ec.contractStatus || 'N/A'}`);
   ln(`  Contract Use: ${Array.isArray(ec.contractUse) ? ec.contractUse.join(', ') : (ec.contractUse || 'N/A')}`);
-  ln(`  Carriers requested per call: ${ec.numberOfRates || 'all qualifying'}`);
+  ln(`  Carriers requested per call: ${formatRateModeSummary(ec)}`);
   ln(`  Concurrent API connections: ${ec.concurrency || 'N/A'}`);
 
   if (hasProblems) {
@@ -1224,7 +1240,7 @@ export function formatInternalSummary(report) {
     }
     if (report.runSummary.avgResponseMs > 5000) {
       ln(`  - Consider reducing the number of carriers evaluated per`);
-      ln(`    request if possible (currently: ${ec.numberOfRates || 'all qualifying'}).`);
+      ln(`    request if possible (currently: ${formatRateModeSummary(ec)}).`);
     }
     if (report.errorAnalysis.categories.some(e => e.category === 'TIMEOUT')) {
       ln(`  - Timeout errors detected. The server may need additional`);

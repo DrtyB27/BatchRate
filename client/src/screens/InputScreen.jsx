@@ -11,6 +11,7 @@ import { deduplicateRows, expandDedupedResults } from '../services/rateDeduplica
 export default function InputScreen({
   credentials, onBatchStart, onResultRow, onBatchEnd, onLoadRun,
   orchestratorRef, executorRef, retryData, onMergeResults, onRetryComplete, existingResults,
+  loadedBatchParams,
 }) {
   const [params, setParams] = useState({
     contRef: '',
@@ -21,6 +22,7 @@ export default function InputScreen({
     contractUse: ['ClientCost'],
     useRoutingGuides: false,
     forceRoutingGuideName: '',
+    rateMode: 'all',
     numberOfRates: 4,
     showTMSMarkup: false,
     margins: { default: { type: '%', value: 0 }, overrides: [] },
@@ -81,6 +83,58 @@ export default function InputScreen({
       }
     }
   }, [retryData]);
+
+  // Derive unique SCAC set from the uploaded CSV's Historic Carrier column.
+  // Feeds the sidebar's "All Eligible" rate-selection mode and is surfaced
+  // in saved run metadata + perf reports.
+  useEffect(() => {
+    if (!csvRows || csvRows.length === 0) {
+      setParams(prev => {
+        if (!prev._uniqueScacCount && !prev._uploadedSCACs) return prev;
+        const next = { ...prev };
+        delete next._uniqueScacCount;
+        delete next._uploadedSCACs;
+        return next;
+      });
+      return;
+    }
+    const seen = new Set();
+    for (const row of csvRows) {
+      const raw = row && row['Historic Carrier'];
+      if (!raw) continue;
+      const scac = String(raw).trim().toUpperCase();
+      if (scac) seen.add(scac);
+    }
+    const list = [...seen].sort();
+    setParams(prev => {
+      if (prev._uniqueScacCount === list.length &&
+          Array.isArray(prev._uploadedSCACs) &&
+          prev._uploadedSCACs.length === list.length &&
+          prev._uploadedSCACs.every((s, i) => s === list[i])) {
+        return prev;
+      }
+      return { ...prev, _uniqueScacCount: list.length, _uploadedSCACs: list };
+    });
+  }, [csvRows]);
+
+  // Hydrate params once from a loaded saved run so the sidebar reflects the
+  // rate-selection mode / rating config that produced those results.
+  const hydratedFromLoadRef = useRef(null);
+  useEffect(() => {
+    if (!loadedBatchParams) return;
+    if (hydratedFromLoadRef.current === loadedBatchParams) return;
+    hydratedFromLoadRef.current = loadedBatchParams;
+    setParams(prev => ({
+      ...prev,
+      rateMode: loadedBatchParams.rateMode ?? prev.rateMode ?? 'all',
+      numberOfRates: loadedBatchParams.numberOfRates ?? prev.numberOfRates,
+      contractStatus: loadedBatchParams.contractStatus ?? prev.contractStatus,
+      contractUse: loadedBatchParams.contractUse ?? prev.contractUse,
+      clientTPNum: loadedBatchParams.clientTPNum ?? prev.clientTPNum,
+      carrierTPNum: loadedBatchParams.carrierTPNum ?? prev.carrierTPNum,
+      contRef: loadedBatchParams.contRef ?? prev.contRef,
+    }));
+  }, [loadedBatchParams]);
 
   const runBatchWithRows = (rowsToRun, isRetry = false) => {
     if (!rowsToRun || rowsToRun.length === 0) return;
@@ -187,7 +241,9 @@ export default function InputScreen({
       batchStartTime,
       requestDelay: execSettings.delayMs,
       concurrency: execSettings.totalMaxConcurrency || 8,
+      rateMode: params.rateMode || 'all',
       numberOfRates: params.numberOfRates,
+      uniqueScacCount: params._uniqueScacCount || 0,
       contractUse: params.contractUse,
       contractStatus: params.contractStatus,
       clientTPNum: params.clientTPNum,

@@ -555,7 +555,6 @@ export default function CarrierFeedback({ flatRows, computedScenarios, sampleWee
             {awardContext[selectedSCAC] && (() => {
               const ac = awardContext[selectedSCAC];
               const netChange = ac.netLaneChange;
-              const deltaColor = ac.deltaVsDisplaced < 0 ? 'text-green-700' : ac.deltaVsDisplaced > 0 ? 'text-red-600' : 'text-gray-500';
               return (
                 <div className="bg-white border border-gray-200 rounded-lg p-4">
                   <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wide mb-3">
@@ -642,21 +641,31 @@ export default function CarrierFeedback({ flatRows, computedScenarios, sampleWee
                           <span className="text-gray-500">Proj. Annual Spend</span>
                           <span className="font-bold text-[#002144]">{fmtCompact$(ac.projectedAnnSpend)}</span>
                         </div>
-                        <div
-                          className="flex justify-between"
-                          title="Annualized historic spend on the lanes this carrier is awarded under the current scenario"
-                        >
-                          <span className="text-gray-500">Was Paying (Awarded Lanes)</span>
-                          <span className="font-bold text-[#002144]">{ac.displacedHistoricSpend > 0 ? fmtCompact$(ac.displacedHistoricSpend) : '—'}</span>
-                        </div>
-                        {ac.deltaVsDisplaced != null && (
-                          <div className="flex justify-between border-t border-gray-200 pt-1">
-                            <span className="text-gray-500">Savings vs Before</span>
-                            <span className={`font-bold ${deltaColor}`}>
-                              {fmtCompact$(ac.deltaVsDisplaced)} ({fmtPct(ac.deltaVsDisplacedPct)})
-                            </span>
-                          </div>
-                        )}
+                        {(() => {
+                          // Carrier-centric delta: how does this scenario's award
+                          // compare to this carrier's scenario-invariant historic
+                          // book? Green when the award grows their book, red when
+                          // it shrinks. Customer-side savings ("they undercut what
+                          // we were paying") lives on the Annual Award tab.
+                          const hb = historicBaseline?.baselineByCarrier?.[selectedSCAC];
+                          const factor = annualization?.factor ?? (52 / Math.max(1, sampleWeeks));
+                          const annHistSpend = hb?.spend != null ? hb.spend * factor : null;
+                          if (annHistSpend == null || annHistSpend === 0) return null;
+                          const delta = ac.projectedAnnSpend - annHistSpend;
+                          const deltaPct = (delta / annHistSpend) * 100;
+                          const cls = delta > 0 ? 'text-green-700' : delta < 0 ? 'text-red-600' : 'text-gray-500';
+                          return (
+                            <div
+                              className="flex justify-between border-t border-gray-200 pt-1"
+                              title="Projected annual award spend vs this carrier's annualized historic spend (scenario-invariant)"
+                            >
+                              <span className="text-gray-500">vs Historic Book</span>
+                              <span className={`font-bold ${cls}`}>
+                                {fmtCompact$(delta)} ({fmtPct(deltaPct)})
+                              </span>
+                            </div>
+                          );
+                        })()}
                       </div>
                     </div>
 

@@ -4,6 +4,28 @@
  */
 
 /**
+ * Per-status RequestToken suffix map. 3GTMS dedupes concurrent rating calls
+ * that share a RequestToken, so fanning out one request per ContractStatus
+ * requires a distinct token per call. Keeping encode (append) and decode
+ * (strip) keyed off this single map prevents the two paths from drifting.
+ */
+export const STATUS_SUFFIX = {
+  BeingEntered: '-BE',
+  UnderReview: '-UR',
+  InProduction: '-IP',
+  OnHold: '-OH',
+};
+
+const STATUS_SUFFIX_REGEX = new RegExp(
+  `-(?:${Object.values(STATUS_SUFFIX).map(s => s.slice(1)).join('|')})$`
+);
+
+export function stripStatusSuffix(token) {
+  if (!token) return token;
+  return String(token).replace(STATUS_SUFFIX_REGEX, '');
+}
+
+/**
  * Resolve effective NumberOfRates from rate-selection mode + upload SCAC count.
  *
  * Modes:
@@ -114,7 +136,13 @@ export function buildRatingRequest(row, sidebarParams, session) {
   lines.push('  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"');
   lines.push('  xsi:schemaLocation="http://schemas.3gtms.com/tms/v1/services/rating 3GTMSRatingRequest.xsd">');
 
-  lines.push(`  <RequestToken>${esc(row['Reference'] || '')}</RequestToken>`);
+  const contractStatusValue = Array.isArray(ep.contractStatus) ? ep.contractStatus[0] : (ep.contractStatus || 'BeingEntered');
+  // 3GTMS dedupes concurrent requests that share a RequestToken, so append
+  // a per-status suffix to make each fanned-out call distinct. Decode path:
+  // stripStatusSuffix() in this module.
+  const tokenSuffix = STATUS_SUFFIX[contractStatusValue] || '';
+  const baseToken = row['Reference'] || '';
+  lines.push(`  <RequestToken>${esc(baseToken + tokenSuffix)}</RequestToken>`);
 
   // Configuration
   lines.push('  <Configuration>');
@@ -127,9 +155,8 @@ export function buildRatingRequest(row, sidebarParams, session) {
   if (ep.carrierTPNum) {
     lines.push(`    <Carrier><TradingPartnerNum>${esc(ep.carrierTPNum)}</TradingPartnerNum></Carrier>`);
   }
-  const contractUseStr = ep.contractUse.length > 0 ? ` ${ep.contractUse.join(' ')} ` : '';
+  const contractUseStr = ep.contractUse.length > 0 ? ep.contractUse.join(' ') : '';
   lines.push(`    <ContractUse>${esc(contractUseStr)}</ContractUse>`);
-  const contractStatusValue = Array.isArray(ep.contractStatus) ? ep.contractStatus[0] : (ep.contractStatus || 'BeingEntered');
   lines.push(`    <ContractStatus>${esc(contractStatusValue)}</ContractStatus>`);
   lines.push(`    <SkipCarrierSafetyCheck>${ep.skipSafety ? '1' : '0'}</SkipCarrierSafetyCheck>`);
   lines.push(`    <EnableRoutingGuides>${ep.useRoutingGuides ? '1' : '0'}</EnableRoutingGuides>`);

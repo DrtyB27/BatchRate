@@ -3,7 +3,7 @@
  * Pure async logic. No React, no DOM.
  */
 
-import { buildRatingRequest } from './xmlBuilder.js';
+import { buildRatingRequest, stripStatusSuffix } from './xmlBuilder.js';
 import { postToG3, applyMargin, sleep, CALL_TIMEOUT_MS } from './ratingClient.js';
 import { parseRatingResponse } from './xmlParser.js';
 
@@ -534,7 +534,10 @@ export function createBatchExecutor(config) {
 
     return {
       rowIndex,
-      reference: row['Reference'] || '',
+      // Defensive strip — RequestToken carries a -BE/-UR/-IP/-OH suffix to
+      // bypass 3GTMS server-side dedup, so make sure nothing leaks into the
+      // reference stored with results or surfaced in UI/exports.
+      reference: stripStatusSuffix(row['Reference'] || ''),
       origCity: row['Orig City'] || '',
       origState: row['Org State'] || '',
       origPostal: row['Org Postal Code'] || '',

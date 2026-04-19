@@ -173,9 +173,8 @@ export default function ParametersSidebar({ params, setParams }) {
 
                 {activeMode === 'all' && (
                   <p className="text-[10px] text-gray-600 mt-1">
-                    {scacCount > 0
-                      ? `Detected ${scacCount} unique SCACs in upload — requesting up to ${allEffective} rates per call.`
-                      : `No Historic Carrier data in upload yet — requesting up to ${allEffective} rates per call.`}
+                    Up to {allEffective} carriers returned per call.
+                    {scacCount > 0 && ` (${scacCount} unique SCACs detected in upload.)`}
                   </p>
                 )}
 

@@ -409,6 +409,7 @@ detectResumeOpportunity(loadedResults, csvRows)
 - Stoplight thresholds: green = winner or gap <=5%, yellow = 5-15%, red = >15%.
 - All pure analytics functions must remain free of React imports -- Java reimplementation candidates.
 - `reference` is the primary join key for Java/downstream ingestion.
+- **Bump `client/package.json` version on every user-visible change** -- the header pill reads `__APP_VERSION__` (baked by `vite.config.js` from `pkg.version`), which is how the user visually confirms a fresh deploy. Patch bump for fixes / copy changes, minor for new tabs or features, major for breaking schema changes to the saved run JSON.
 
 ---
 

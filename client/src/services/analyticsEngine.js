@@ -1547,6 +1547,19 @@ export function computeAnnualAward(flatRows, scenarioAwards, sampleWeeks) {
     const annualHistoric = Math.round(attributedHistCost * factor);
     const historicSpend = attributedHistCost;
 
+    // Per-SCAC historic maps — drop the '_UNKNOWN_' bucket so we never
+    // attribute orphan cost to a real carrier. Every remaining entry is a
+    // true incumbent with shipments in this lane group; downstream roll-ups
+    // (computeCarrierSummary) iterate this map instead of collapsing to the
+    // dominant incumbent.
+    const historicSpendByScac = {};
+    const annualHistoricByScac = {};
+    for (const [scacKey, cost] of Object.entries(g.historicCostByScac)) {
+      if (scacKey === '_UNKNOWN_') continue;
+      historicSpendByScac[scacKey] = cost;
+      annualHistoricByScac[scacKey] = Math.round(cost * factor);
+    }
+
     const delta = annualHistoric > 0 ? annualSpend - annualHistoric : 0;
     const deltaPct = annualHistoric > 0 ? (delta / annualHistoric) * 100 : 0;
 
@@ -1569,6 +1582,8 @@ export function computeAnnualAward(flatRows, scenarioAwards, sampleWeeks) {
       historicCarrierPct,
       historicSpend,
       annualHistoric,
+      historicSpendByScac,
+      annualHistoricByScac,
       historicTotalAnnSpend,
       delta,
       deltaPct,
@@ -1607,8 +1622,13 @@ export function computeAnnualAward(flatRows, scenarioAwards, sampleWeeks) {
     c.annualTons += l.annualTons;
     c.sampleSpend += l.sampleSpend;
     c.annualSpend += l.annualSpend;
-    // Only credit historic spend when this carrier was the actual historic carrier
-    if (l.historicCarrier && l.historicCarrier === l.carrierSCAC) {
+    // Retained historic = the winner's own incumbent cost in this group.
+    // Falls back to the dominant-incumbent path when historicSpendByScac
+    // isn't present (older lane shapes / consumers that bypass the engine).
+    if (l.historicSpendByScac) {
+      c.historicSpend += l.historicSpendByScac[l.carrierSCAC] || 0;
+      c.annualHistoric += (l.annualHistoricByScac && l.annualHistoricByScac[l.carrierSCAC]) || 0;
+    } else if (l.historicCarrier && l.historicCarrier === l.carrierSCAC) {
       c.historicSpend += l.historicSpend;
       c.annualHistoric += l.annualHistoric;
     }
@@ -1630,8 +1650,16 @@ export function computeAnnualAward(flatRows, scenarioAwards, sampleWeeks) {
   const totAnnualTons = totAnnualLbs / 2000;
   const totSampleSpend = lanes.reduce((s, l) => s + l.sampleSpend, 0);
   const totAnnualSpend = lanes.reduce((s, l) => s + l.annualSpend, 0);
-  const totHistoric = lanes.reduce((s, l) => s + l.historicSpend, 0);
-  const totAnnualHistoric = lanes.reduce((s, l) => s + l.annualHistoric, 0);
+  // Historic totals roll up EVERY incumbent per lane (not just the dominant),
+  // so the top-line matches the scenario-invariant per-SCAC baseline.
+  const sumBySCac = (field) => lanes.reduce((s, l) => {
+    const m = l[field];
+    if (!m) return s;
+    for (const v of Object.values(m)) s += v || 0;
+    return s;
+  }, 0);
+  const totHistoric = sumBySCac('historicSpendByScac');
+  const totAnnualHistoric = sumBySCac('annualHistoricByScac');
   const totDelta = totAnnualHistoric > 0 ? totAnnualSpend - totAnnualHistoric : 0;
   const totDeltaPct = totAnnualHistoric > 0 ? (totDelta / totAnnualHistoric) * 100 : 0;
 
@@ -1696,9 +1724,26 @@ export function computeCarrierSummary(lanes) {
   for (const lane of lanes) {
     const hc = lane.historicCarrier;
     const ac = lane.carrierSCAC;
+    const perScac = lane.annualHistoricByScac || null;
 
-    // Incumbent side — credit the historic carrier
-    if (hc) {
+    // Incumbent side — credit EVERY SCAC that had historic shipments in
+    // this lane group, not just the dominant one. Multiple carriers can
+    // legitimately share a state-to-state lane (ZIP/service-area/min-and-
+    // discount splits), and each incumbent's historic spend has to land in
+    // its own bucket or the per-carrier totals drift by scenario.
+    if (perScac) {
+      for (const [inc, annCost] of Object.entries(perScac)) {
+        const h = ensure(inc, null);
+        h.incumbentLanes++;
+        h.incumbentAnnSpend += annCost || 0;
+        if (inc === ac) {
+          h.retainedLanes++;
+        } else {
+          h.lostLanes++;
+        }
+      }
+    } else if (hc) {
+      // Legacy fallback — lane shape without per-SCAC map
       const h = ensure(hc, null);
       h.incumbentLanes++;
       h.incumbentAnnSpend += lane.annualHistoric || 0;
@@ -1721,7 +1766,14 @@ export function computeCarrierSummary(lanes) {
       a.annualLbs += lane.annualLbs || 0;
       a.sampleTons += lane.sampleTons || 0;
       a.annualTons += lane.annualTons || 0;
-      if (hc && hc !== ac) {
+      // A "won" lane = at least one incumbent existed and the winner
+      // wasn't one of them. Pure gains; retained freight doesn't count.
+      if (perScac) {
+        const incs = Object.keys(perScac);
+        if (incs.length > 0 && !(ac in perScac)) {
+          a.wonLanes++;
+        }
+      } else if (hc && hc !== ac) {
         a.wonLanes++;
       }
     }

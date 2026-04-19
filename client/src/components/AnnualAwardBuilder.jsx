@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useRef, useCallback } from 'react';
-import { computeAnnualAward, computeCarrierSummary, computeSankeyData, computeCarrierMixByOrigin, computeScenario, getLaneKey } from '../services/analyticsEngine.js';
+import { computeAnnualAward, computeCarrierSummary, computeSankeyData, computeCarrierMixByOrigin, computeScenario, computePreferredCarrierRanks, getLaneKey } from '../services/analyticsEngine.js';
 import { generateAnnualAwardPdf, downloadBlob } from '../services/pdfExport.js';
 import { applyMargin } from '../services/ratingClient.js';
 import CarrierSankey from './CarrierSankey.jsx';
@@ -33,6 +33,25 @@ function escCsv(val) {
   const s = String(val ?? '');
   if (s.includes(',') || s.includes('"') || s.includes('\n')) return `"${s.replace(/"/g, '""')}"`;
   return s;
+}
+
+// P1/P2/P3 preferred-carrier pill. Auto-ranked by total spend captured as
+// winner. Colors are ordinal (gold/silver/bronze), not semantic.
+const PREFERRED_RANK_STYLES = {
+  1: 'bg-amber-100 text-amber-800 border-amber-300',
+  2: 'bg-slate-200 text-slate-700 border-slate-300',
+  3: 'bg-orange-100 text-orange-800 border-orange-300',
+};
+function PreferredRankBadge({ rank }) {
+  if (!rank || !PREFERRED_RANK_STYLES[rank]) return null;
+  return (
+    <span
+      className={`inline-block ml-1.5 px-1.5 py-0.5 text-[10px] font-bold rounded border ${PREFERRED_RANK_STYLES[rank]}`}
+      title={`Preferred carrier P${rank} — ranked by total projected annual spend captured`}
+    >
+      P{rank}
+    </span>
+  );
 }
 
 export default function AnnualAwardBuilder({ flatRows, computedScenarios, activeMarkups, sampleWeeks, weeksOverride, onWeeksChange, detectedWeeks, annualization, historicBaseline, customerLocations, onCustomerLocationsChange }) {
@@ -314,6 +333,13 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
   const displayOriginMix = isDisplayCustomerPrice ? custOriginMix : originMix;
   const displayOriginSummaries = isDisplayCustomerPrice ? custOriginSummaries : originSummaries;
   const displayPricingMode = isDisplayCustomerPrice ? 'customerPrice' : 'carrierCost';
+
+  // Preferred-carrier ranks (P1/P2/P3) — derived from whichever carrier summary
+  // the user is currently viewing, ranked by total spend captured as winner.
+  const preferredRanks = useMemo(
+    () => computePreferredCarrierRanks(displayCarrierSummary, 3),
+    [displayCarrierSummary]
+  );
 
   const availableScenarios = useMemo(() => {
     const base = computedScenarios
@@ -903,7 +929,10 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
                       key={c.scac}
                       className={`${i % 2 === 0 ? 'bg-white' : 'bg-gray-50'} ${c.awardedLanes === 0 ? 'opacity-50 bg-gray-100' : ''}`}
                     >
-                      <td className="px-3 py-2 font-mono font-medium text-[#002144]">{c.scac}</td>
+                      <td className="px-3 py-2 font-mono font-medium text-[#002144] whitespace-nowrap">
+                        {c.scac}
+                        <PreferredRankBadge rank={preferredRanks.get(c.scac)} />
+                      </td>
                       <td className="px-3 py-2">{c.carrierName}</td>
                       <td className="px-3 py-2 text-right">{c.awardedLanes || '—'}</td>
                       <td className="px-3 py-2 text-right">{c.awardedLanes > 0 ? formatShipments(c.sampleShipments) : '—'}</td>
@@ -974,7 +1003,10 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
                   {displayLanes.map((l, i) => (
                     <tr key={`${l.laneKey}-${l.carrierSCAC}`} className={i % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
                       <td className="px-4 py-2 font-medium">{l.laneKey}</td>
-                      <td className="px-4 py-2 font-mono">{l.carrierSCAC}</td>
+                      <td className="px-4 py-2 font-mono whitespace-nowrap">
+                        {l.carrierSCAC}
+                        <PreferredRankBadge rank={preferredRanks.get(l.carrierSCAC)} />
+                      </td>
                       <td className="px-4 py-2">{l.carrierName}</td>
                       <td className="px-4 py-2 font-mono">
                         {l.historicCarrier || '—'}
@@ -1082,6 +1114,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
                           <span className={`inline-block px-2 py-0.5 rounded text-xs font-mono font-medium ${l.isShift ? 'bg-amber-100 text-amber-800 font-bold' : 'bg-gray-100 text-gray-700'}`}>
                             {l.carrierSCAC}
                           </span>
+                          <PreferredRankBadge rank={preferredRanks.get(l.carrierSCAC)} />
                           <span className="block text-[10px] text-gray-400 mt-0.5">{l.carrierName}</span>
                         </td>
                         <td className="px-3 py-2 text-right">{fmtNum(l.annualShipments)}</td>

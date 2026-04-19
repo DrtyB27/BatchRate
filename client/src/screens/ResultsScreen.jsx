@@ -422,7 +422,6 @@ export default function ResultsScreen({
       targetRows: totalRows,
       isComplete: isComplete,
       csvRows: csvRows,
-      slim: true,
     }, { customerLocations });
     downloadRunFile(jsonStr, batchMeta?.batchId);
   };
@@ -638,7 +637,7 @@ export default function ResultsScreen({
           >
             Save Run
           </button>
-          <span className="text-[10px] text-gray-400" title="Saved files are slimmed (telemetry removed, top 4 rates kept) for faster loading">slim</span>
+          <span className="text-[10px] text-gray-400" title="Saved files include all carrier rates per shipment so Scenarios and Analytics can be rebuilt on reload">full rates</span>
         </div>
         {retryCount > 0 && hasCsvRows && (
           <button

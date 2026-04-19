@@ -29,6 +29,20 @@ function isThrottleError(errorMessage) {
   return THROTTLE_ERROR_PATTERNS.some(p => msg.includes(p));
 }
 
+// Row-level 'Cont. Status' column, if present, overrides the sidebar and is
+// always single-status. Otherwise, use the sidebar value (string or array).
+// Never returns an empty list.
+function resolveExpectedStatuses(row, sidebarParams) {
+  const rowStatus = row && row['Cont. Status'];
+  if (rowStatus !== undefined && rowStatus !== null && String(rowStatus).trim() !== '') {
+    return [String(rowStatus).trim()];
+  }
+  const s = sidebarParams && sidebarParams.contractStatus;
+  if (Array.isArray(s) && s.length > 0) return [...s];
+  if (typeof s === 'string' && s.trim() !== '') return [s.trim()];
+  return ['BeingEntered'];
+}
+
 // ── Spike-Aware Auto-Tuner ──
 // Detects bimodal SMC3 queue saturation pattern and adjusts both
 // concurrency AND delay. Uses spike rate as primary signal instead
@@ -269,6 +283,32 @@ export function createBatchExecutor(config) {
   let completionCounter = 0;
   let startTimeMs = 0;
 
+  // Map<rowIndex, RowState> — accumulates per-tuple results for a multi-status
+  // row until all expected statuses have reported, at which point the row is
+  // committed to results[] and the entry deleted. For single-status rows, the
+  // entry lives for exactly one tuple turnaround.
+  const pendingRowState = new Map();
+
+  function makeRowState(row, rowIndex, expectedStatuses) {
+    return {
+      row,
+      rowIndex,
+      expectedStatuses,
+      allRates: [],
+      xmlChunks: [],
+      responseChunks: [],
+      statusBreakdown: [],
+      ratingMessage: '',
+      firstRetryableError: null,
+      firstAnyError: null,
+      timeoutRetry: false,
+      failureReason: '',
+      startTime: null,
+      firstDispatchTs: null,
+      dispatchSnapshots: { activeWorkers: 0, pendingQueue: 0 },
+    };
+  }
+
   // Adaptive backoff state (kept for error-rate-based pausing)
   let currentDelay = delayMs;
   let currentConcurrency = concurrency;
@@ -366,6 +406,10 @@ export function createBatchExecutor(config) {
       spikeRate: tuner ? tuner.getSpikeRate() : 0,
       medianMs: tuner ? tuner.getMedian() : 0,
       tunerDelay: tuner ? tuner.currentDelay : currentDelay,
+      // Tuple-level diagnostics (additive — optional for consumers).
+      totalApiCalls: successCounter + failureCounter + totalRetried,
+      pendingTuples: queue.length,
+      rowsInFlight: pendingRowState.size,
     };
   }
 
@@ -478,7 +522,7 @@ export function createBatchExecutor(config) {
   }
 
   // ── Build result object with telemetry ──
-  function buildResult(row, rowIndex, parsed, xml, responseXml, elapsedMs, workerIdx, err, callStartTime, dispatchTimestamp, activeWorkerSnapshot, queueSnapshot, timeoutRetry = false, failureReason = '') {
+  function buildResult(row, rowIndex, parsed, xml, responseXml, elapsedMs, workerIdx, err, callStartTime, dispatchTimestamp, activeWorkerSnapshot, queueSnapshot, timeoutRetry = false, failureReason = '', multiStatusBreakdown = null) {
     const success = !err && parsed && parsed.rates.length > 0;
     const rateCount = success ? parsed.rates.length : 0;
     const ratesWithMargin = success
@@ -524,6 +568,7 @@ export function createBatchExecutor(config) {
       rateResponseXml: params.saveResponseXml && responseXml ? responseXml : '',
       rates: ratesWithMargin,
       timeoutRetry,
+      multiStatusBreakdown,
       // Preserve dedup metadata so InputScreen can expand representative
       // rates back to all group members. Undefined when dedup is off.
       _dedup: row._dedup,
@@ -568,229 +613,273 @@ export function createBatchExecutor(config) {
     };
   }
 
-  // ── Worker loop ──
+  // ── Worker loop (per-tuple dispatch) ──
+  // One iteration = one 3G call (one row × one contract status). Multi-status
+  // rows accumulate per-tuple results into pendingRowState and commit as a
+  // single merged row result when all expected statuses have reported.
   async function workerLoop(workerIdx) {
     while (queue.length > 0 && (state === 'RUNNING')) {
-      // Check if we should be idle (tuner reduced concurrency below our index)
       if (tuner && workerIdx >= currentConcurrency) break;
 
-      const item = queue.shift();
-      if (!item) break;
-      const { rowIndex, attempt } = item;
+      const tuple = queue.shift();
+      if (!tuple) break;
+      const { rowIndex, status, callIndex, totalCalls, attempt } = tuple;
       const row = csvRows[rowIndex];
+      const rowState = pendingRowState.get(rowIndex);
+      if (!rowState) {
+        // Defensive: row already committed but a stale tuple is in-flight.
+        continue;
+      }
 
       activeCount++;
       if (activeCount > peakActive) peakActive = activeCount;
 
-      // Dispatch delay
       if (currentDelay > 0) {
         await sleep(currentDelay);
-        if (state !== 'RUNNING') { activeCount--; queue.unshift(item); break; }
+        if (state !== 'RUNNING') {
+          activeCount--;
+          queue.unshift(tuple);
+          break;
+        }
       }
 
-      // Snapshot context before dispatch
-      const dispatchTimestamp = new Date().toISOString();
+      const dispatchedAt = new Date().toISOString();
       const activeWorkerSnapshot = activeCount;
       const queueSnapshot = queue.length;
+      const iterStart = Date.now();
 
-      const startTime = Date.now();
-      let xml = null;
-      let responseXml = null;
-      let parsed = null;
-      let error = null;
-      let timeoutRetry = false;
-      let failureReason = '';
-      // Set when the row should be re-queued instead of committed as a result
-      // (e.g. multi-status loop broken mid-way by pause/cancel).
-      let requeue = false;
+      // Capture row-level dispatch metadata on the first tuple that runs for
+      // this row. Used later when buildResult is called.
+      if (rowState.startTime === null) {
+        rowState.startTime = iterStart;
+        rowState.firstDispatchTs = dispatchedAt;
+        rowState.dispatchSnapshots = {
+          activeWorkers: activeWorkerSnapshot,
+          pendingQueue: queueSnapshot,
+        };
+      }
 
-      // Helper: unwrap postToG3 response (may be plain string or {text, timeoutRetry})
+      let iterReqXml = null;
+      let iterRespXml = null;
+      let iterParsed = null;
+      let iterError = null;
+      let iterTimeoutRetry = false;
+      let iterFailureReason = '';
+
       function unwrapResponse(resp) {
         if (resp && typeof resp === 'object' && resp.text !== undefined) {
-          if (resp.timeoutRetry) timeoutRetry = true;
+          if (resp.timeoutRetry) iterTimeoutRetry = true;
           return resp.text;
         }
         return resp;
       }
 
       try {
-        const statuses = Array.isArray(params.contractStatus) && params.contractStatus.length > 1
-          ? params.contractStatus
-          : null;
-
-        if (statuses) {
-          // Multi-status mode: one API call per status, merge rates
-          const allRates = [];
-          let lastXml = null;
-          let lastResponseXml = null;
-          let ratingMessage = '';
-          let interrupted = false;
-
-          for (let i = 0; i < statuses.length; i++) {
-            const status = statuses[i];
-            const statusParams = { ...params, contractStatus: [status] };
-            const reqXml = buildRatingRequest(row, statusParams, credentials);
-            const rawResp = await postToG3(reqXml, credentials, timeoutMs);
-            const respXml = unwrapResponse(rawResp);
-            const parsedResp = parseRatingResponse(respXml);
-
-            lastXml = reqXml;
-            lastResponseXml = respXml;
-
-            if (parsedResp && parsedResp.rates && parsedResp.rates.length > 0) {
-              for (const rate of parsedResp.rates) {
-                rate.contractStatusSource = status;
-              }
-              allRates.push(...parsedResp.rates);
-            }
-            if (parsedResp?.ratingMessage) {
-              ratingMessage += (ratingMessage ? ' | ' : '') + `[${status}] ${parsedResp.ratingMessage}`;
-            }
-
-            // If pause/cancel arrived mid-loop and we have more statuses to
-            // call, treat the row as not-yet-completed and re-queue on pause.
-            if (state !== 'RUNNING' && i < statuses.length - 1) {
-              interrupted = true;
-              break;
-            }
-          }
-
-          if (interrupted) {
-            requeue = (state === 'PAUSED' || state === 'AUTO_PAUSED');
-            xml = lastXml;
-            responseXml = lastResponseXml;
-            parsed = null;
-          } else {
-            xml = lastXml;
-            responseXml = lastResponseXml;
-            parsed = { rates: allRates, ratingMessage };
-          }
-        } else {
-          // Single status — normal path
-          xml = buildRatingRequest(row, params, credentials);
-          const rawResp = await postToG3(xml, credentials, timeoutMs);
-          responseXml = unwrapResponse(rawResp);
-          parsed = parseRatingResponse(responseXml);
-        }
+        const callParams = { ...params, contractStatus: [status] };
+        iterReqXml = buildRatingRequest(row, callParams, credentials);
+        const rawResp = await postToG3(iterReqXml, credentials, timeoutMs);
+        iterRespXml = unwrapResponse(rawResp);
+        iterParsed = parseRatingResponse(iterRespXml);
       } catch (err) {
-        error = err;
-        if (err.timeoutRetry) timeoutRetry = true;
-        if (err.failureReason) failureReason = err.failureReason;
-        // Classify throttle errors up-front so the result carries the right
-        // reason without relying on body-text pattern matching later.
-        if (!failureReason && isThrottleError(err.message)) {
-          failureReason = 'THROTTLE_RESPONSE';
+        iterError = err;
+        if (err.timeoutRetry) iterTimeoutRetry = true;
+        if (err.failureReason) iterFailureReason = err.failureReason;
+        if (!iterFailureReason && isThrottleError(err.message)) {
+          iterFailureReason = 'THROTTLE_RESPONSE';
         }
       }
 
       activeCount--;
-      const elapsedMs = Date.now() - startTime;
+      const iterElapsed = Date.now() - iterStart;
 
-      // Row was interrupted mid multi-status by pause/cancel: put it back
-      // on the queue so we don't record a partial result. On cancel we
-      // simply drop it — state cleanup is handled by cancel().
-      if (requeue) {
-        queue.unshift({ rowIndex, attempt });
-        if (onProgress) onProgress(buildProgress());
-        break;
-      }
-
-      // Update telemetry counters
-      updateRolling(elapsedMs);
-      cumulativeResponseTime += elapsedMs;
-
-      // Retry logic
-      if (error && retryAttempts > 0 && isRetryable(error.message)) {
-        const retry = retryMap.get(rowIndex) || { attemptsLeft: retryAttempts };
+      // ── Per-tuple retry ──
+      // Keyed on (rowIndex, status) so a failing InProduction on row 47 does
+      // not consume retry budget for BeingEntered on row 47.
+      if (iterError && retryAttempts > 0 && isRetryable(iterError.message)) {
+        const retryKey = `${rowIndex}:${status}`;
+        const retry = retryMap.get(retryKey) || { attemptsLeft: retryAttempts };
         if (retry.attemptsLeft > 0) {
           retry.attemptsLeft--;
-          retryMap.set(rowIndex, retry);
+          retryMap.set(retryKey, retry);
           totalRetried++;
           const waitMs = retryDelayMs * (retryAttempts - retry.attemptsLeft);
           await sleep(waitMs);
           if (state === 'RUNNING' || state === 'AUTO_PAUSED') {
-            queue.push({ rowIndex, attempt: attempt + 1 });
+            queue.push({ rowIndex, status, callIndex, totalCalls, attempt: attempt + 1 });
           }
           failureCounter++;
           consecutiveFailures++;
           consecutiveSuccesses = 0;
           updateAdaptiveBackoff(false);
+          updateRolling(iterElapsed);
+          cumulativeResponseTime += iterElapsed;
           if (onProgress) onProgress(buildProgress());
           continue;
         }
       }
 
-      // Final result
-      const result = buildResult(row, rowIndex, parsed, xml, responseXml, elapsedMs, workerIdx, error, startTime, dispatchTimestamp, activeWorkerSnapshot, queueSnapshot, timeoutRetry, failureReason);
-      results.push(result);
-      const nowTs = Date.now();
-      completionTimestamps.push(nowTs);
-      // Only the last 10s of completions contribute to throughput. Trim
-      // here so the array doesn't grow O(N) for the lifetime of the batch.
-      const tsCutoff = nowTs - 10000;
-      while (completionTimestamps.length > 0 && completionTimestamps[0] < tsCutoff) {
-        completionTimestamps.shift();
-      }
+      // ── Record tuple result into rowState ──
+      const iterRateCount = iterParsed?.rates?.length || 0;
+      const iterSuccess = !iterError && iterRateCount > 0;
 
-      // Update success/failure counters
-      if (result.success) {
-        successCounter++;
-        consecutiveFailures = 0;
-        consecutiveThrottles = 0; // reset throttle streak on success
-      } else {
-        failureCounter++;
-        consecutiveFailures++;
-
-        // ── Throttle hard backoff ──
-        if (result.failureReason === 'THROTTLE_RESPONSE') {
-          consecutiveThrottles++;
-          // Immediate hard backoff: add fixed 5s on top of current delay,
-          // capped so a burst of throttles can't ratchet the delay to minutes.
-          currentDelay = Math.min(THROTTLE_MAX_DELAY_MS, currentDelay + THROTTLE_EXTRA_DELAY_MS);
-
-          // If 3+ consecutive throttles, force-pause the entire batch
-          if (consecutiveThrottles >= CONSECUTIVE_THROTTLE_PAUSE_THRESHOLD && state === 'RUNNING') {
-            state = 'AUTO_PAUSED';
-            backoffTriggered = true;
-            if (onResult) onResult(result);
-            if (onProgress) onProgress(buildProgress());
-            break;
-          }
-        } else {
-          consecutiveThrottles = 0;
+      if (iterSuccess) {
+        for (const rate of iterParsed.rates) {
+          rate.contractStatusSource = status;
         }
+        rowState.allRates.push(...iterParsed.rates);
       }
 
-      updateAdaptiveBackoff(result.success);
+      const iterMsg = iterError
+        ? iterError.message
+        : (iterParsed && iterParsed.ratingMessage) || '';
+      if (iterMsg) {
+        rowState.ratingMessage += (rowState.ratingMessage ? ' | ' : '') + `[${status}] ${iterMsg}`;
+      }
 
-      // Spike-aware auto-tuner: adjusts both concurrency AND delay
+      if (iterReqXml) {
+        rowState.xmlChunks.push(
+          `<!-- ==========================================================\n` +
+          `     ContractStatus: ${status} (call ${callIndex} of ${totalCalls})\n` +
+          `     Dispatched:     ${dispatchedAt}\n` +
+          `     Elapsed:        ${iterElapsed}ms\n` +
+          `     Rates returned: ${iterRateCount}\n` +
+          (iterError ? `     Error:          ${iterError.message}\n` : '') +
+          `========================================================== -->\n` +
+          iterReqXml
+        );
+      }
+      rowState.responseChunks.push(
+        `<!-- ==========================================================\n` +
+        `     ContractStatus: ${status} (call ${callIndex} of ${totalCalls})\n` +
+        `     Responded:      ${new Date().toISOString()}\n` +
+        `     Elapsed:        ${iterElapsed}ms\n` +
+        `     Rates parsed:   ${iterRateCount}\n` +
+        (iterError ? `     Error:          ${iterError.message}\n` : '') +
+        `========================================================== -->\n` +
+        (iterRespXml || `<!-- no response body (error: ${iterError ? iterError.message : 'unknown'}) -->`)
+      );
+
+      rowState.statusBreakdown.push({
+        status,
+        callIndex,
+        totalCalls,
+        dispatchedAt,
+        elapsedMs: iterElapsed,
+        rateCount: iterRateCount,
+        success: iterSuccess,
+        ratingMessage: iterMsg,
+        failureReason: iterFailureReason,
+        timeoutRetry: iterTimeoutRetry,
+      });
+
+      if (iterError && !rowState.firstAnyError) rowState.firstAnyError = iterError;
+      if (iterError && !rowState.firstRetryableError && isRetryable(iterError.message)) {
+        rowState.firstRetryableError = iterError;
+      }
+      if (iterTimeoutRetry) rowState.timeoutRetry = true;
+      if (iterFailureReason && !rowState.failureReason) rowState.failureReason = iterFailureReason;
+
+      // Rolling stats feed the tuner. Per-tuple is INTENTIONAL — the tuner
+      // models 3G response time, which is a per-call property, not per-row.
+      updateRolling(iterElapsed);
+      cumulativeResponseTime += iterElapsed;
+
       if (tuner) {
-        tuner.recordResult(elapsedMs);
+        tuner.recordResult(iterElapsed);
         const settings = tuner.getOptimalSettings();
-
-        // Apply concurrency change
         if (settings.concurrency !== currentConcurrency) {
           const prevConc = currentConcurrency;
           currentConcurrency = settings.concurrency;
-          // If we need more workers, launch them
           if (settings.concurrency > prevConc && queue.length > 0) {
             for (let w = activeCount; w < settings.concurrency && queue.length > 0; w++) {
               workerPromises.push(workerLoop(w));
             }
           }
         }
-
-        // Apply delay change
         if (settings.delayMs !== currentDelay) {
           currentDelay = settings.delayMs;
         }
       }
 
-      if (onResult) onResult(result);
-      if (onProgress) onProgress(buildProgress());
+      // ── Is this row complete? ──
+      // Length-based (not Set.size) so a duplicate status in expectedStatuses
+      // still commits based on # tuples seen.
+      if (rowState.statusBreakdown.length >= rowState.expectedStatuses.length) {
+        let parsedForResult;
+        let rowError = null;
+        if (rowState.allRates.length > 0) {
+          parsedForResult = { rates: rowState.allRates, ratingMessage: rowState.ratingMessage };
+        } else {
+          rowError = rowState.firstRetryableError || rowState.firstAnyError;
+          parsedForResult = { rates: [], ratingMessage: rowState.ratingMessage };
+        }
 
-      // Check if auto-paused
-      if (state === 'AUTO_PAUSED') break;
+        const totalElapsed = Date.now() - rowState.startTime;
+        const xmlCombined = rowState.xmlChunks.join('\n\n');
+        const responseCombined = rowState.responseChunks.join('\n\n');
+
+        const result = buildResult(
+          rowState.row,
+          rowIndex,
+          parsedForResult,
+          xmlCombined,
+          responseCombined,
+          totalElapsed,
+          workerIdx,
+          rowError,
+          rowState.startTime,
+          rowState.firstDispatchTs,
+          rowState.dispatchSnapshots.activeWorkers,
+          rowState.dispatchSnapshots.pendingQueue,
+          rowState.timeoutRetry,
+          rowState.failureReason,
+          rowState.statusBreakdown
+        );
+        results.push(result);
+        pendingRowState.delete(rowIndex);
+
+        const nowTs = Date.now();
+        completionTimestamps.push(nowTs);
+        const tsCutoff = nowTs - 10000;
+        while (completionTimestamps.length > 0 && completionTimestamps[0] < tsCutoff) {
+          completionTimestamps.shift();
+        }
+
+        if (result.success) {
+          successCounter++;
+          consecutiveFailures = 0;
+          consecutiveThrottles = 0;
+        } else {
+          failureCounter++;
+          consecutiveFailures++;
+
+          // ── Throttle hard backoff ──
+          if (result.failureReason === 'THROTTLE_RESPONSE') {
+            consecutiveThrottles++;
+            currentDelay = Math.min(THROTTLE_MAX_DELAY_MS, currentDelay + THROTTLE_EXTRA_DELAY_MS);
+            if (consecutiveThrottles >= CONSECUTIVE_THROTTLE_PAUSE_THRESHOLD && state === 'RUNNING') {
+              state = 'AUTO_PAUSED';
+              backoffTriggered = true;
+              if (onResult) onResult(result);
+              if (onProgress) onProgress(buildProgress());
+              break;
+            }
+          } else {
+            consecutiveThrottles = 0;
+          }
+        }
+
+        // Per-row adaptive-backoff signal (unchanged from today).
+        updateAdaptiveBackoff(result.success);
+
+        if (onResult) onResult(result);
+        if (onProgress) onProgress(buildProgress());
+
+        if (state === 'AUTO_PAUSED') break;
+      } else {
+        // Row not yet complete — surface tuple-level progress only.
+        if (onProgress) onProgress(buildProgress());
+      }
     }
   }
 
@@ -868,8 +957,19 @@ export function createBatchExecutor(config) {
       peakActive = 0;
       activeCount = 0;
 
+      pendingRowState.clear();
       for (let i = 0; i < rows.length; i++) {
-        queue.push({ rowIndex: i, attempt: 0 });
+        const expectedStatuses = resolveExpectedStatuses(rows[i], params);
+        pendingRowState.set(i, makeRowState(rows[i], i, expectedStatuses));
+        for (let s = 0; s < expectedStatuses.length; s++) {
+          queue.push({
+            rowIndex: i,
+            status: expectedStatuses[s],
+            callIndex: s + 1,
+            totalCalls: expectedStatuses.length,
+            attempt: 0,
+          });
+        }
       }
 
       startTimeMs = Date.now();
@@ -906,6 +1006,7 @@ export function createBatchExecutor(config) {
     cancel() {
       state = 'CANCELLED';
       queue.length = 0;
+      pendingRowState.clear();
       for (const [, ctrl] of abortControllers) {
         try { ctrl.abort(); } catch {}
       }

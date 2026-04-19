@@ -1827,6 +1827,35 @@ export function computeCarrierSummary(lanes) {
 }
 
 /**
+ * Rank the top N awarded carriers by total spend captured as winner.
+ *
+ * Drives the P1/P2/P3 "preferred" badge on the Annual Award carrier view.
+ * Input is the carriers[] array from computeCarrierSummary (or the merged
+ * post-baseline-overlay variant AnnualAwardBuilder builds) — we read
+ * projectedAnnSpend since that's the spend the carrier would capture under
+ * the active award basis, which matches how the award tab is already sorted.
+ *
+ * @param {Array} carriers - carriers array from computeCarrierSummary
+ * @param {number} topN - how many ranks to return (default 3 → P1/P2/P3)
+ * @returns {Map<string, number>} scac → rank (1-based). Carriers below the
+ *   cutoff or with zero projected spend are not included.
+ */
+export function computePreferredCarrierRanks(carriers, topN = 3) {
+  const ranks = new Map();
+  if (!Array.isArray(carriers) || carriers.length === 0) return ranks;
+
+  const ranked = carriers
+    .filter(c => c && c.scac && (c.projectedAnnSpend || 0) > 0)
+    .map(c => ({ scac: c.scac, spend: c.projectedAnnSpend || 0 }))
+    .sort((a, b) => b.spend - a.spend);
+
+  for (let i = 0; i < Math.min(topN, ranked.length); i++) {
+    ranks.set(ranked[i].scac, i + 1);
+  }
+  return ranks;
+}
+
+/**
  * Build node/link structure for a Sankey flow diagram showing carrier-to-carrier freight migration.
  *
  * @param {Array} lanes - lanes array from computeAnnualAward

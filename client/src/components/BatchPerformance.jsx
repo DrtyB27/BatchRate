@@ -6,6 +6,7 @@ import CorrelationCharts from './performance/CorrelationCharts.jsx';
 import SizingRecommendations from './performance/SizingRecommendations.jsx';
 import InflectionAnalysis from './performance/InflectionAnalysis.jsx';
 import TelemetryExport from './performance/TelemetryExport.jsx';
+import GovernorPanel from './GovernorPanel.jsx';
 import {
   computePerformanceSummary, computeRollingAverage,
   detectDegradation, computeCorrelations,
@@ -35,6 +36,51 @@ export default function BatchPerformance({ results, batchMeta, totalRows, onRetr
     [summary, degradation, correlations, errorAnalysis, batchMeta]
   );
   const tunerState = batchMeta?.executionSummary?.tunerState || null;
+
+  // Governor history for post-run view. Single-agent executor summaries carry
+  // .governor directly; multi-agent summaries nest them under agentSummaries.
+  // Aggregate event history and roll finals up for the expanded panel.
+  const postRunGovernor = useMemo(() => {
+    const exec = batchMeta?.executionSummary;
+    if (!exec) return null;
+    const bucket = [];
+    let sustainedTotal = 0;
+    let finalEffConc = 0;
+    let finalEffDelay = 0;
+    let finalPhase = null;
+    let haveAny = false;
+
+    const absorb = (gov) => {
+      if (!gov) return;
+      haveAny = true;
+      sustainedTotal += gov.sustainedTriggeredCount || 0;
+      finalEffConc += gov.finalEffectiveConcurrency || 0;
+      if ((gov.finalEffectiveDelayMs || 0) > finalEffDelay) finalEffDelay = gov.finalEffectiveDelayMs || 0;
+      if (!finalPhase && gov.finalPhase) finalPhase = gov.finalPhase;
+      if (Array.isArray(gov.eventHistory)) bucket.push(...gov.eventHistory);
+    };
+
+    absorb(exec.governor);
+    if (Array.isArray(exec.agentSummaries)) {
+      for (const a of exec.agentSummaries) absorb(a?.summary?.governor);
+    }
+
+    if (!haveAny) return null;
+    bucket.sort((a, b) => (a.t || 0) - (b.t || 0));
+    return {
+      backoffActive: false, // post-run snapshot — no live backoff state
+      effectiveConcurrency: finalEffConc,
+      configuredConcurrency: finalEffConc,
+      effectiveDelayMs: finalEffDelay,
+      configuredDelayMs: finalEffDelay,
+      rollingP95Ms: summary?.p95 || 0,
+      rollingSpikeRate: 0,
+      sustainedStreak: 0,
+      sustainedTriggered: sustainedTotal,
+      phase: finalPhase,
+      recentEvents: bucket.slice(-20),
+    };
+  }, [batchMeta, summary]);
 
   // Per-batch breakdown for combined runs
   const batchBreakdown = useMemo(() => {
@@ -92,6 +138,9 @@ export default function BatchPerformance({ results, batchMeta, totalRows, onRetr
 
       {/* Section 1: Executive Summary */}
       <PerformanceSummary summary={summary} batchMeta={batchMeta} />
+
+      {/* Adaptive Governor post-run timeline (v2.3+). Silent for older runs. */}
+      {postRunGovernor && <GovernorPanel governor={postRunGovernor} mode="expanded" />}
 
       {/* ── BATCH RECOVERY — always visible when there are issues ── */}
       {(retryableCount > 0 || !isComplete) && (

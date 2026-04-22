@@ -2,6 +2,7 @@ import React, { useState, useMemo, useRef } from 'react';
 import { deduplicateRows } from '../services/rateDeduplicator.js';
 import { readProfileFile, validateProfile } from '../services/tuningProfile.js';
 import { parseRecommendedConfig } from '../services/performanceEngine.js';
+import GovernorPanel from './GovernorPanel.jsx';
 
 const CONCURRENCY_OPTIONS = [1, 2, 3, 4, 5, 6, 8];
 const DELAY_OPTIONS = [0, 50, 100, 150, 200, 300, 500];
@@ -67,7 +68,7 @@ function StepperControl({ label, value, options, onChange, tooltip, suffix }) {
   );
 }
 
-export default function ExecutionControls({ settings, onChange, onRun, onPause, onResume, onCancel, running, paused, csvLoaded, rowCount, csvRows }) {
+export default function ExecutionControls({ settings, onChange, onRun, onPause, onResume, onCancel, running, paused, csvLoaded, rowCount, csvRows, governor }) {
   const [expanded, setExpanded] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [profileInfo, setProfileInfo] = useState(null); // { profile, filename }
@@ -486,6 +487,13 @@ export default function ExecutionControls({ settings, onChange, onRun, onPause, 
               Saving XML at high concurrency with {rowCount} rows increases memory usage. Consider disabling XML save in the sidebar.
             </p>
           )}
+        </div>
+      )}
+
+      {/* Live governor state (compact) — visible only during an active run */}
+      {(running || paused) && governor && (
+        <div className="px-4 py-2 border-t border-gray-100">
+          <GovernorPanel governor={governor} mode="compact" />
         </div>
       )}
 

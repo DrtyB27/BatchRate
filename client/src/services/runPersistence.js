@@ -50,6 +50,7 @@ export function serializeRun(results, batchParams, batchMeta, yieldConfig, optio
   const safeMeta = stripCredentials({
     ...(batchMeta || {}),
     contractStatus: batchParams?.contractStatus,
+    rateAsOfDate: batchParams?.rateAsOfDate || '',
     contractUse: batchParams?.contractUse,
     rateMode: batchParams?.rateMode ?? batchMeta?.rateMode,
     numberOfRates: batchParams?.numberOfRates,

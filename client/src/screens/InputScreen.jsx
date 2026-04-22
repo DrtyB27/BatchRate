@@ -28,6 +28,7 @@ export default function InputScreen({
     margins: { default: { type: '%', value: 0 }, overrides: [] },
     saveRequestXml: true,
     saveResponseXml: true,
+    rateAsOfDate: '',
   });
 
   const [execSettings, setExecSettings] = useState({
@@ -133,6 +134,7 @@ export default function InputScreen({
       clientTPNum: loadedBatchParams.clientTPNum ?? prev.clientTPNum,
       carrierTPNum: loadedBatchParams.carrierTPNum ?? prev.carrierTPNum,
       contRef: loadedBatchParams.contRef ?? prev.contRef,
+      rateAsOfDate: loadedBatchParams.rateAsOfDate ?? prev.rateAsOfDate ?? '',
     }));
   }, [loadedBatchParams]);
 
@@ -252,6 +254,7 @@ export default function InputScreen({
       dedup: useDedup ? dedupStats : null,
       isRetry,
       invalidInputCount: invalid.length,
+      rateAsOfDate: params.rateAsOfDate || '',
     };
 
     if (isRetry) {

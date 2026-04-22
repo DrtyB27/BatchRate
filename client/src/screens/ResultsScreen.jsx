@@ -52,7 +52,7 @@ function buildRawCsv(flatRows, lowCostFlags) {
     'Reference', 'Historic Carrier', 'Historic Cost',
     'Orig City', 'Org State', 'Org Postal Code', 'Orig Cntry',
     'Dst City', 'Dst State', 'Dst Postal Code', 'Dst Cntry',
-    'Class', 'Net Wt Lb', 'Pcs', 'Ttl HUs', 'Pickup Date',
+    'Class', 'Net Wt Lb', 'Pcs', 'Ttl HUs', 'Pickup Date', 'RateAsOfOverride',
     'SCAC', 'Carrier Name', 'Contract Ref', 'Contract Description',
     'Strategy Description', 'Tier ID', 'Rating Type', 'FAK',
     'Tariff Gross', 'Tariff Discount', 'Tariff Disc %', 'Tariff Net',
@@ -74,7 +74,7 @@ function buildRawCsv(flatRows, lowCostFlags) {
       r.reference, r.historicCarrier || '', r.historicCost || '',
       r.origCity, r.origState, r.origPostal, r.origCountry,
       r.destCity, r.destState, r.destPostal, r.destCountry,
-      r.inputClass, r.inputNetWt, r.inputPcs, r.inputHUs, r.pickupDate,
+      r.inputClass, r.inputNetWt, r.inputPcs, r.inputHUs, r.pickupDate, r.rateAsOfOverride || '',
       r.rate?.carrierSCAC || '', r.rate?.carrierName || '',
       r.rate?.contractRef || '', r.rate?.contractDescription || '',
       r.rate?.strategyDescription || '', r.rate?.tierId || '',
@@ -108,7 +108,7 @@ function buildCustomerCsv(flatRows, lowCostFlags, markups) {
     'Reference', 'Historic Carrier', 'Historic Cost',
     'Orig City', 'Org State', 'Org Postal Code', 'Orig Cntry',
     'Dst City', 'Dst State', 'Dst Postal Code', 'Dst Cntry',
-    'Class', 'Net Wt Lb', 'Pcs', 'Ttl HUs', 'Pickup Date',
+    'Class', 'Net Wt Lb', 'Pcs', 'Ttl HUs', 'Pickup Date', 'RateAsOfOverride',
     'SCAC', 'Carrier Name', 'Contract Ref', 'Contract Description',
     'Strategy Description', 'Tier ID', 'Rating Type',
     'Margin Type', 'Margin Value', 'Markup Source', 'Customer Price',
@@ -150,7 +150,7 @@ function buildCustomerCsv(flatRows, lowCostFlags, markups) {
       r.reference, r.historicCarrier || '', r.historicCost || '',
       r.origCity, r.origState, r.origPostal, r.origCountry,
       r.destCity, r.destState, r.destPostal, r.destCountry,
-      r.inputClass, r.inputNetWt, r.inputPcs, r.inputHUs, r.pickupDate,
+      r.inputClass, r.inputNetWt, r.inputPcs, r.inputHUs, r.pickupDate, r.rateAsOfOverride || '',
       r.rate?.carrierSCAC || '', r.rate?.carrierName || '',
       r.rate?.contractRef || '', r.rate?.contractDescription || '',
       r.rate?.strategyDescription || '', r.rate?.tierId || '',
@@ -223,7 +223,7 @@ const CUSTOM_RATE_HEADERS = [
 ];
 
 function buildCustomRateCsv(flatRows) {
-  const headersWithFlag = [...CUSTOM_RATE_HEADERS, '_minRatedFlag'];
+  const headersWithFlag = [...CUSTOM_RATE_HEADERS, '_minRatedFlag', 'RateAsOfOverride'];
   let detailNum = 1;
   const dataRows = flatRows
     .filter(r => r.hasRate)
@@ -250,6 +250,7 @@ function buildCustomRateCsv(flatRows) {
       row[67] = rate.firstFAK || '';
 
       row.push(rate.isMinimumRated ? 'MIN' : '');
+      row.push(r.rateAsOfOverride || '');
 
       return row.map(escCsv);
     });
@@ -279,6 +280,15 @@ export default function ResultsScreen({
   );
 
   const isComplete = results.length >= totalRows;
+
+  const rateAsOfOverrideActive = useMemo(() => {
+    const fromMeta = batchMeta?.rateAsOfDate;
+    if (fromMeta) return String(fromMeta);
+    for (const r of results) {
+      if (r.rateAsOfOverride) return String(r.rateAsOfOverride);
+    }
+    return '';
+  }, [results, batchMeta]);
 
   const flatRows = useMemo(() => flattenResults(results), [results]);
   const lowCostFlags = useMemo(() => computeLowCostFlags(flatRows), [flatRows]);
@@ -704,6 +714,13 @@ export default function ResultsScreen({
         <span><strong>Avg Time/Row:</strong> {avgTime}ms</span>
         <span><strong>Total Elapsed:</strong> {(totalElapsed / 1000).toFixed(1)}s</span>
       </div>
+
+      {/* Rate As-Of override banner */}
+      {rateAsOfOverrideActive && (
+        <div className="bg-amber-50 border-b border-amber-200 px-6 py-2 text-xs text-amber-800 shrink-0">
+          Rates computed with As-Of Date override: <strong>{rateAsOfOverrideActive}</strong>. Row-level historical pickup dates preserved below.
+        </div>
+      )}
 
       {/* View toggle */}
       <div className="bg-white border-b border-gray-200 px-6 py-2 flex gap-2 shrink-0">

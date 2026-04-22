@@ -85,6 +85,23 @@ export default function ParametersSidebar({ params, setParams }) {
           )}
         </div>
 
+        <div className="mt-3">
+          <label className="block text-sm font-semibold text-[#002144] mb-1">
+            Rate As-Of Date <span className="text-xs font-normal text-slate-500">(optional override)</span>
+          </label>
+          <input
+            type="date"
+            value={params.rateAsOfDate || ''}
+            onChange={e => update('rateAsOfDate', e.target.value)}
+            className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
+          />
+          {params.rateAsOfDate && (
+            <p className="mt-1 text-xs text-amber-700">
+              Rates will be computed as if every shipment picked up on {params.rateAsOfDate}. Row-level historical dates remain preserved in results and exports.
+            </p>
+          )}
+        </div>
+
         <div className="mb-2">
           <label className={labelCls}>Client TP Num</label>
           <input className={inputCls} value={params.clientTPNum} onChange={e => update('clientTPNum', e.target.value)} />

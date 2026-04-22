@@ -168,7 +168,8 @@ export function buildRatingRequest(row, sidebarParams, session) {
   lines.push('  </Configuration>');
 
   // PickupDate
-  lines.push(`  <PickupDate>${formatPickupDate(row['Pickup Date'], session.utcOffset)}</PickupDate>`);
+  const pickupDateForRating = (sidebarParams.rateAsOfDate && String(sidebarParams.rateAsOfDate).trim()) || row['Pickup Date'];
+  lines.push(`  <PickupDate>${formatPickupDate(pickupDateForRating, session.utcOffset)}</PickupDate>`);
   if (row['Del. Date'] && String(row['Del. Date']).trim()) {
     lines.push(`  <DeliveryDate>${formatPickupDate(row['Del. Date'], session.utcOffset)}</DeliveryDate>`);
   }

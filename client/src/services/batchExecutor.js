@@ -551,6 +551,7 @@ export function createBatchExecutor(config) {
       inputPcs: row['Pcs'] || '',
       inputHUs: row['Ttl HUs'] || '',
       pickupDate: row['Pickup Date'] || '',
+      rateAsOfOverride: params.rateAsOfDate || '',
       contRef: row['Cont. Ref'] || params.contRef || '',
       clientTPNum: row['Client TP Num'] || params.clientTPNum || '',
       historicCarrier: row['Historic Carrier'] || '',

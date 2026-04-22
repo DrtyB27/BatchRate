@@ -86,7 +86,7 @@ const COLUMNS = [
   { key: 'inputNetWt', label: 'Net Wt Lb', get: r => r.inputNetWt },
   { key: 'inputPcs', label: 'Pcs', get: r => r.inputPcs },
   { key: 'inputHUs', label: 'Ttl HUs', get: r => r.inputHUs },
-  { key: 'pickupDate', label: 'Pickup Date', get: r => r.pickupDate },
+  { key: 'pickupDate', label: 'Pickup Date', get: r => r.pickupDate, special: 'pickupDate' },
   // Carrier result
   { key: 'scac', label: 'SCAC', get: r => r.rate?.carrierSCAC || '', group: 'carrier' },
   { key: 'carrierName', label: 'Carrier Name', get: r => r.rate?.carrierName || '', group: 'carrier' },
@@ -254,7 +254,20 @@ export default function ResultsTable({ flatRows, lowCostFlags, viewMode, onRowCl
                   let cellVal;
                   let bgClass = '';
 
-                  if (col.special === 'minRated') {
+                  if (col.special === 'pickupDate') {
+                    const date = row.pickupDate || '';
+                    const override = row.rateAsOfOverride || '';
+                    return (
+                      <td key={col.key} className="px-2 py-1.5 whitespace-nowrap">
+                        <span>{date}</span>
+                        {override && (
+                          <span className="ml-2 bg-amber-100 text-amber-800 rounded px-2 py-0.5 text-xs">
+                            AsOf {override}
+                          </span>
+                        )}
+                      </td>
+                    );
+                  } else if (col.special === 'minRated') {
                     cellVal = row.rate?.isMinimumRated ? 'MIN' : '';
                     if (row.rate?.isMinimumRated) bgClass = 'font-bold';
                   } else if (col.special === 'dedup') {

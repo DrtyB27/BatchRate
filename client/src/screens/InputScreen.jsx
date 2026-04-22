@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import ParametersSidebar from '../components/ParametersSidebar.jsx';
 import CsvDropzone from '../components/CsvDropzone.jsx';
 import ExecutionControls from '../components/ExecutionControls.jsx';
@@ -52,6 +52,7 @@ export default function InputScreen({
   const [running, setRunning] = useState(false);
   const [paused, setPaused] = useState(false);
   const [multiProgress, setMultiProgress] = useState(null);
+  const [agentGovernors, setAgentGovernors] = useState({}); // { [agentId]: governor }
   const [dedupInfo, setDedupInfo] = useState(null);
   const [resumeInfo, setResumeInfo] = useState(null); // resume-from-partial dialog
   const [invalidInputRows, setInvalidInputRows] = useState([]); // rows with unparseable numeric fields
@@ -267,6 +268,7 @@ export default function InputScreen({
     setRunning(true);
     setPaused(false);
     setMultiProgress(null);
+    setAgentGovernors({});
 
     // Result handler
     const handleResult = (result) => {
@@ -314,7 +316,15 @@ export default function InputScreen({
       staggerStartMs: execSettings.staggerStartMs || 500,
       autoSavePerAgent: true,
       onResult: handleResult,
-      onAgentProgress: () => {},
+      onAgentProgress: (agentId, snap) => {
+        if (snap && snap.governor) {
+          setAgentGovernors(prev => {
+            const prior = prev[agentId];
+            if (prior && prior === snap.governor) return prev;
+            return { ...prev, [agentId]: snap.governor };
+          });
+        }
+      },
       onProgress: (overall) => {
         setMultiProgress(overall);
         if (overall.state === 'PAUSED') { setPaused(true); setRunning(false); }
@@ -386,6 +396,51 @@ export default function InputScreen({
   const isExecuting = running || paused;
   const isRetryMode = !!retryData;
   const retryCount = retryData?.retryRows?.length || 0;
+
+  // Aggregate per-agent governor snapshots into one compact view for the
+  // ExecutionControls header. Phase preference: orchestrator tuner (richer
+  // PROBE/CALIBRATE/SCALE/SUSTAIN) falls back to per-agent phase.
+  const aggregatedGovernor = useMemo(() => {
+    const entries = Object.values(agentGovernors || {});
+    if (entries.length === 0) return null;
+    const orchestratorPhase = multiProgress?.tunerState?.phase || null;
+    let backoffActive = false;
+    let effectiveConcurrency = 0;
+    let configuredConcurrency = 0;
+    let effectiveDelayMs = 0;
+    let configuredDelayMs = 0;
+    let rollingP95Ms = 0;
+    let rollingSpikeRate = 0;
+    let sustainedStreak = 0;
+    let sustainedTriggered = 0;
+    const events = [];
+    for (const g of entries) {
+      if (g.backoffActive) backoffActive = true;
+      effectiveConcurrency += g.effectiveConcurrency || 0;
+      configuredConcurrency += g.configuredConcurrency || 0;
+      if ((g.effectiveDelayMs || 0) > effectiveDelayMs) effectiveDelayMs = g.effectiveDelayMs || 0;
+      if ((g.configuredDelayMs || 0) > configuredDelayMs) configuredDelayMs = g.configuredDelayMs || 0;
+      if ((g.rollingP95Ms || 0) > rollingP95Ms) rollingP95Ms = g.rollingP95Ms || 0;
+      if ((g.rollingSpikeRate || 0) > rollingSpikeRate) rollingSpikeRate = g.rollingSpikeRate || 0;
+      sustainedStreak += g.sustainedStreak || 0;
+      sustainedTriggered += g.sustainedTriggered || 0;
+      if (Array.isArray(g.recentEvents)) events.push(...g.recentEvents);
+    }
+    events.sort((a, b) => (a.t || 0) - (b.t || 0));
+    return {
+      backoffActive,
+      effectiveConcurrency,
+      configuredConcurrency,
+      effectiveDelayMs,
+      configuredDelayMs,
+      rollingP95Ms,
+      rollingSpikeRate,
+      sustainedStreak,
+      sustainedTriggered,
+      phase: orchestratorPhase || entries[0]?.phase || null,
+      recentEvents: events.slice(-5),
+    };
+  }, [agentGovernors, multiProgress]);
 
   return (
     <div className="flex-1 flex overflow-hidden">
@@ -487,6 +542,7 @@ export default function InputScreen({
             csvLoaded={csvRows && csvRows.length > 0}
             rowCount={csvRows?.length || 0}
             csvRows={csvRows}
+            governor={isExecuting ? aggregatedGovernor : null}
           />
         )}
 

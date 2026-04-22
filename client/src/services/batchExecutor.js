@@ -81,6 +81,19 @@ class ResponseTimeAutoTuner {
     this.cooldownPeriod = 15;             // wait 15 results after throttle before scaling up
     this.consecutiveLowSpike = 0;         // count consecutive low-spike intervals
 
+    // Sustained high-latency trigger: catches the "uniformly slow" case
+    // where no spikes fire but every call is above the 3G SLA band.
+    // Complement to spike-rate logic, not replacement.
+    this.sustainedP95ThresholdMs  = 8000; // P95 above this is "sustained slow"
+    this.sustainedCooldownResults = 20;   // require 20 consecutive results over threshold
+    this.sustainedStreak          = 0;
+    this.sustainedTriggeredCount  = 0;
+
+    // Event ring buffer — audit trail of governor decisions.
+    // Feeds UI (GovernorPanel) and post-run telemetry (executionSummary.governor).
+    this.events = [];
+    this.maxEvents = 200;
+
     // Load from tuning profile if available
     // Always reset delay to baseline — never inherit persisted backoff state
     if (config.profile) {
@@ -143,6 +156,60 @@ class ResponseTimeAutoTuner {
     return sorted[Math.floor(sorted.length * 0.95)];
   }
 
+  // Alias for clarity in sustained-latency path; reuses getP95 logic.
+  _computeRollingP95() {
+    return this.getP95();
+  }
+
+  _recordEvent(type, before, after) {
+    const evt = {
+      t: Date.now(),
+      type,
+      before,
+      after,
+      windowSize: this.window?.length || 0,
+    };
+    this.events.push(evt);
+    if (this.events.length > this.maxEvents) this.events.shift();
+  }
+
+  getEventTail(n = 10) {
+    return this.events.slice(-n);
+  }
+
+  // Derive a coarse phase for UI surfacing. PROBE until baseline is set,
+  // then SUSTAIN. Orchestrator-level tuner has a richer PROBE/CALIBRATE/
+  // SCALE/SUSTAIN progression; this is a local approximation.
+  getPhase() {
+    return this.probeComplete ? 'SUSTAIN' : 'PROBE';
+  }
+
+  // Sustained-latency branch: catches the uniformly-slow case that the
+  // spike-rate trigger misses. Runs on every result (not gated by the
+  // spike-rate adjust interval) so the streak builds up in real time.
+  _checkSustainedLatency() {
+    if (!this.probeComplete) return; // wait for baseline
+    const p95 = this._computeRollingP95();
+    if (p95 > this.sustainedP95ThresholdMs) {
+      this.sustainedStreak++;
+      if (this.sustainedStreak >= this.sustainedCooldownResults && this.current > 1) {
+        const before = { conc: this.current, delay: this.currentDelay, p95 };
+        this.current      = Math.max(1, this.current - 1);
+        this.currentDelay = Math.min(this.currentDelay + this.delayStep, this.maxDelay);
+        this.sustainedStreak = 0;
+        this.sustainedTriggeredCount++;
+        this.callsSinceLastThrottle = 0;
+        this.consecutiveLowSpike = 0;
+        this._recordEvent('SUSTAINED_LATENCY_THROTTLE', before, {
+          conc: this.current,
+          delay: this.currentDelay,
+        });
+      }
+    } else {
+      this.sustainedStreak = 0;
+    }
+  }
+
   shouldAdjust() {
     return this.probeComplete
       && this.resultCount - this.lastAdjustAt >= this.adjustInterval
@@ -151,6 +218,10 @@ class ResponseTimeAutoTuner {
 
   // Returns { concurrency, delayMs } — adjusts both
   getOptimalSettings() {
+    // Sustained-latency check runs on every call (not gated by shouldAdjust)
+    // so the streak counter builds in real time regardless of adjust cadence.
+    this._checkSustainedLatency();
+
     if (!this.shouldAdjust()) {
       return { concurrency: this.current, delayMs: this.currentDelay };
     }
@@ -168,6 +239,9 @@ class ResponseTimeAutoTuner {
       this.callsSinceLastThrottle = 0;
       this.consecutiveLowSpike = 0;
       action = 'CRITICAL_THROTTLE';
+      this._recordEvent('SPIKE_CRITICAL_THROTTLE',
+        { conc: prevConc, delay: prevDelay, spikeRate: Math.round(spikeRate * 100) },
+        { conc: this.current, delay: this.currentDelay });
 
     } else if (spikeRate >= this.spikeRateWarning) {
       // WARNING: >10% spikes — moderate throttle
@@ -176,6 +250,9 @@ class ResponseTimeAutoTuner {
       this.callsSinceLastThrottle = 0;
       this.consecutiveLowSpike = 0;
       action = 'THROTTLE_DOWN';
+      this._recordEvent('SPIKE_THROTTLE',
+        { conc: prevConc, delay: prevDelay, spikeRate: Math.round(spikeRate * 100) },
+        { conc: this.current, delay: this.currentDelay });
 
     } else if (spikeRate <= this.spikeRateTarget) {
       // GOOD: <5% spikes — consider scaling up
@@ -187,11 +264,17 @@ class ResponseTimeAutoTuner {
           // Reduce delay first (cheaper than adding concurrency)
           this.currentDelay = Math.max(this.minDelay, this.currentDelay - this.delayStep);
           action = 'REDUCE_DELAY';
+          this._recordEvent('RECOVERY_SCALE_UP',
+            { conc: prevConc, delay: prevDelay },
+            { conc: this.current, delay: this.currentDelay });
         } else if (this.current < this.maxConcurrency) {
           // Delay is already 0 — try adding a worker
           this.current = Math.min(this.maxConcurrency, this.current + 1);
           this.consecutiveLowSpike = 0; // reset so we re-evaluate after the change
           action = 'SCALE_UP';
+          this._recordEvent('COOLDOWN_SCALE_UP',
+            { conc: prevConc, delay: prevDelay },
+            { conc: this.current, delay: this.currentDelay });
         }
       } else {
         action = 'HOLD_GOOD';
@@ -410,6 +493,22 @@ export function createBatchExecutor(config) {
       totalApiCalls: successCounter + failureCounter + totalRetried,
       pendingTuples: queue.length,
       rowsInFlight: pendingRowState.size,
+      // ── Adaptive governor snapshot for live UI + post-run telemetry.
+      // Consolidates backoff state, effective vs configured capacity, rolling
+      // latency, and recent decision events into one sub-object.
+      governor: {
+        backoffActive: currentDelay > delayMs || currentConcurrency < concurrency,
+        effectiveConcurrency: currentConcurrency,
+        effectiveDelayMs: currentDelay,
+        configuredConcurrency: concurrency,
+        configuredDelayMs: delayMs,
+        rollingP95Ms: getRollingP95(),
+        rollingSpikeRate: tuner ? tuner.getSpikeRate() : 0,
+        sustainedStreak: tuner ? tuner.sustainedStreak : 0,
+        sustainedTriggered: tuner ? tuner.sustainedTriggeredCount : 0,
+        phase: tuner ? tuner.getPhase() : null,
+        recentEvents: tuner ? tuner.getEventTail(5) : [],
+      },
     };
   }
 
@@ -931,6 +1030,16 @@ export function createBatchExecutor(config) {
       adaptiveBackoffTriggered: backoffTriggered,
       peakActiveWorkers: peakActive,
       tunerState: tuner?.getState() || null,
+      // Persisted governor timeline — lets BatchPerformance render a
+      // post-run adaptive-governor view without extra instrumentation.
+      governor: {
+        sustainedTriggeredCount: tuner?.sustainedTriggeredCount || 0,
+        totalEvents: tuner?.events?.length || 0,
+        eventHistory: tuner?.events ? [...tuner.events] : [],
+        finalEffectiveConcurrency: currentConcurrency,
+        finalEffectiveDelayMs: currentDelay,
+        finalPhase: tuner ? tuner.getPhase() : null,
+      },
     };
   }
 

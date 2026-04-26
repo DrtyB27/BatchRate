@@ -1,6 +1,6 @@
 import React, { useMemo, useRef, useState } from 'react';
 import { buildAwardLanes, buildConsolidationSankeyData } from '../../services/awardBridge.js';
-import { computeSankeyData } from '../../services/analyticsEngine.js';
+import { computeSankeyDataLegacy } from '../../services/analyticsEngine.js';
 import CarrierSankey from '../CarrierSankey.jsx';
 
 function fmtMoney(v) {
@@ -116,7 +116,7 @@ export default function ConsolidationCompare({ optimizationResult, sampleWeeks, 
       }
       lanesByCarrier[key].annualSpend += dl.annualCost;
     }
-    return computeSankeyData(Object.values(lanesByCarrier), 1);
+    return computeSankeyDataLegacy(Object.values(lanesByCarrier), 1);
   }, [awardData, sampleWeeks]);
 
   // Build carrier summary for direct scenario

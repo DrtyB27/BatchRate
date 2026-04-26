@@ -1,26 +1,7 @@
 import React, { useState, useMemo } from 'react';
+import { computeSankeyData, SANKEY_CARRIER_PALETTE } from '../services/analyticsEngine.js';
 
-// 18 distinct, colorblind-friendly carrier colors — enough contrast side by side
-const CARRIER_PALETTE = [
-  '#0072B2', // strong blue
-  '#E69F00', // amber
-  '#009E73', // teal
-  '#D55E00', // vermilion
-  '#56B4E9', // sky blue
-  '#CC79A7', // rose
-  '#F0E442', // yellow (nodes only, links darken)
-  '#0A9396', // dark cyan
-  '#EE6C4D', // coral
-  '#6A4C93', // purple
-  '#1B9AAA', // ocean
-  '#E07A5F', // salmon
-  '#3D5A80', // slate blue
-  '#81B29A', // sage
-  '#F2CC8F', // sand
-  '#6D6875', // mauve gray
-  '#118AB2', // cerulean
-  '#EF476F', // hot pink
-];
+const CARRIER_PALETTE = SANKEY_CARRIER_PALETTE;
 
 const COLORS = {
   retained: '#39b6e6',   // DLX bright blue — retained freight badge
@@ -43,7 +24,36 @@ function fmtMoney(v) {
 }
 
 /**
+ * Linear interpolation of link widths between two phases. Links absent in one
+ * side collapse to width 0 so reserved slots stay aligned with the scaffold.
+ */
+function interpolateLinks(fromLinks, toLinks, t) {
+  const fromMap = new Map((fromLinks || []).map(l => [l.key || `${l.source}::${l.target}`, l]));
+  const toMap = new Map((toLinks || []).map(l => [l.key || `${l.source}::${l.target}`, l]));
+  const keys = new Set([...fromMap.keys(), ...toMap.keys()]);
+  const out = [];
+  for (const key of keys) {
+    const f = fromMap.get(key);
+    const tt = toMap.get(key);
+    const fromW = f ? (f.width != null ? f.width : f.value || 0) : 0;
+    const toW = tt ? (tt.width != null ? tt.width : tt.value || 0) : 0;
+    const base = tt || f;
+    if (!base) continue;
+    out.push({
+      key,
+      source: base.source,
+      target: base.target,
+      width: fromW + (toW - fromW) * t,
+      value: fromW + (toW - fromW) * t,
+      lanes: (tt && tt.lanes) || (f && f.lanes) || 0,
+    });
+  }
+  return out;
+}
+
+/**
  * Collapse bottom carriers into "Other (N)" if more than MAX_SIDE_NODES on either side.
+ * Used in legacy single-phase mode only — phase mode keeps the scaffold stable.
  */
 function collapseData(data) {
   if (!data || !data.links.length) return data;
@@ -125,25 +135,43 @@ function collapseData(data) {
 }
 
 /**
- * Compute layout positions for Sankey nodes and links.
+ * Compute layout positions for Sankey nodes and links. When `flowOverride`
+ * is provided (phase mode), node heights are positioned from those fixed
+ * scaffold flows so absent carriers in the active phase still hold their slot.
  */
-function computeLayout(data, width, height) {
+function computeLayout(data, width, height, flowOverride) {
   const padding = { top: 10, bottom: 10, left: 140, right: 140 };
   const usableHeight = height - padding.top - padding.bottom;
   const usableWidth = width - padding.left - padding.right;
 
-  // Compute total flow per source/target
+  // Compute total flow per source/target — either from override scaffold
+  // (phase mode, stable across phases) or from the active links (legacy).
   const sourceFlow = {};
   const targetFlow = {};
-  for (const l of data.links) {
-    sourceFlow[l.source] = (sourceFlow[l.source] || 0) + l.value;
-    targetFlow[l.target] = (targetFlow[l.target] || 0) + l.value;
+  if (flowOverride) {
+    for (const [id, v] of Object.entries(flowOverride.sourceFlowMax || {})) sourceFlow[id] = v;
+    for (const [id, v] of Object.entries(flowOverride.targetFlowMax || {})) targetFlow[id] = v;
+  } else {
+    for (const l of data.links) {
+      sourceFlow[l.source] = (sourceFlow[l.source] || 0) + l.value;
+      targetFlow[l.target] = (targetFlow[l.target] || 0) + l.value;
+    }
   }
 
-  // Left nodes (sources) sorted by flow descending
-  const leftIds = Object.entries(sourceFlow).sort((a, b) => b[1] - a[1]).map(e => e[0]);
-  // Right nodes (targets) sorted by flow descending
-  const rightIds = Object.entries(targetFlow).sort((a, b) => b[1] - a[1]).map(e => e[0]);
+  // Sort source/target lists. For phase mode, honor the scaffold's nodeOrder
+  // so the first-listed (highest-volume) carrier always sits at the top slot.
+  const orderRank = new Map();
+  if (flowOverride && Array.isArray(flowOverride.nodeOrder)) {
+    flowOverride.nodeOrder.forEach((id, i) => orderRank.set(id, i));
+  }
+  const cmp = (a, b) => {
+    const ra = orderRank.has(a[0]) ? orderRank.get(a[0]) : Infinity;
+    const rb = orderRank.has(b[0]) ? orderRank.get(b[0]) : Infinity;
+    if (ra !== rb) return ra - rb;
+    return b[1] - a[1];
+  };
+  const leftIds = Object.entries(sourceFlow).sort(cmp).map(e => e[0]);
+  const rightIds = Object.entries(targetFlow).sort(cmp).map(e => e[0]);
 
   if (leftIds.length === 0 || rightIds.length === 0) return { leftNodes: [], rightNodes: [], paths: [] };
 
@@ -235,14 +263,81 @@ function computeLayout(data, width, height) {
   return { leftNodes, rightNodes, paths };
 }
 
-const CarrierSankey = React.forwardRef(function CarrierSankey({ data, width: propWidth, height: propHeight }, ref) {
+const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
+  const {
+    // Legacy single-phase API (still used by ConsolidationCompare)
+    data,
+    // Multi-phase animated API
+    phaseSequence,
+    awardContext,
+    currentPhaseIndex = 0,
+    animationProgress = 0,
+    phaseIndex,
+    width: propWidth,
+    height: propHeight,
+  } = props;
+
   const [hoverLink, setHoverLink] = useState(null);
   const [hoverNode, setHoverNode] = useState(null);
   const [tooltip, setTooltip] = useState(null);
 
-  const collapsed = useMemo(() => collapseData(data), [data]);
+  const usePhaseMode = !!phaseSequence && !!awardContext;
+
+  // Build phase data once per (phaseSequence, awardContext) pair.
+  const sankeyPhases = useMemo(() => {
+    if (!usePhaseMode) return null;
+    return computeSankeyData(phaseSequence, awardContext);
+  }, [usePhaseMode, phaseSequence, awardContext]);
+
+  // Resolve the data shape consumed by computeLayout.
+  const { effectiveData, scaffoldFlow, phaseColorMap } = useMemo(() => {
+    if (usePhaseMode && sankeyPhases) {
+      const { scaffold, phaseData } = sankeyPhases;
+      const lastIdx = phaseData.length - 1;
+      let activeLinks;
+      if (typeof phaseIndex === 'number') {
+        const idx = Math.max(0, Math.min(phaseIndex, lastIdx));
+        activeLinks = phaseData[idx]?.links || [];
+      } else {
+        const fromIdx = Math.max(0, Math.min(currentPhaseIndex, lastIdx));
+        const toIdx = Math.min(fromIdx + 1, lastIdx);
+        const fromLinks = phaseData[fromIdx]?.links || [];
+        const toLinks = phaseData[toIdx]?.links || [];
+        const t = Math.max(0, Math.min(1, animationProgress || 0));
+        activeLinks = (fromIdx === toIdx) ? fromLinks : interpolateLinks(fromLinks, toLinks, t);
+      }
+      const renderLinks = activeLinks.map(l => ({
+        source: l.source,
+        target: l.target,
+        value: l.width != null ? l.width : (l.value || 0),
+        lanes: l.lanes || 0,
+      }));
+      const renderData = {
+        nodes: scaffold.nodes,
+        links: renderLinks,
+        totalFlow: renderLinks.reduce((s, l) => s + l.value, 0),
+      };
+      return {
+        effectiveData: renderData,
+        scaffoldFlow: {
+          sourceFlowMax: scaffold.sourceFlowMax,
+          targetFlowMax: scaffold.targetFlowMax,
+          nodeOrder: scaffold.nodeOrder,
+        },
+        phaseColorMap: scaffold.colorMap,
+      };
+    }
+    return { effectiveData: data, scaffoldFlow: null, phaseColorMap: null };
+  }, [usePhaseMode, sankeyPhases, phaseIndex, currentPhaseIndex, animationProgress, data]);
+
+  // Legacy collapse only when not in phase mode (phase mode keeps scaffold stable).
+  const collapsed = useMemo(
+    () => usePhaseMode ? effectiveData : collapseData(effectiveData),
+    [usePhaseMode, effectiveData]
+  );
 
   const nodeCount = collapsed ? collapsed.nodes.length : 0;
+  void nodeCount;
   const maxSide = collapsed ? Math.max(
     collapsed.nodes.filter(n => n.side === 'left' || n.side === 'both').length,
     collapsed.nodes.filter(n => n.side === 'right' || n.side === 'both').length
@@ -250,8 +345,10 @@ const CarrierSankey = React.forwardRef(function CarrierSankey({ data, width: pro
   const height = propHeight || Math.max(400, maxSide * 48);
   const width = propWidth || 1100;
 
-  // Build stable carrier → color map from left side (sorted by flow desc)
+  // Build stable carrier → color map. In phase mode, use the scaffold's color
+  // map so SCAC colors don't shuffle as link widths animate.
   const carrierColorMap = useMemo(() => {
+    if (phaseColorMap) return phaseColorMap;
     if (!collapsed) return {};
     const map = {};
     const sourceFlow = {};
@@ -262,7 +359,6 @@ const CarrierSankey = React.forwardRef(function CarrierSankey({ data, width: pro
     sorted.forEach(([id], i) => {
       map[id] = CARRIER_PALETTE[i % CARRIER_PALETTE.length];
     });
-    // Assign colors to right-only nodes too
     const targetFlow = {};
     for (const l of collapsed.links) {
       targetFlow[l.target] = (targetFlow[l.target] || 0) + l.value;
@@ -275,11 +371,11 @@ const CarrierSankey = React.forwardRef(function CarrierSankey({ data, width: pro
       map[id] = CARRIER_PALETTE[(usedCount + i) % CARRIER_PALETTE.length];
     });
     return map;
-  }, [collapsed]);
+  }, [collapsed, phaseColorMap]);
 
   const layout = useMemo(
-    () => collapsed ? computeLayout(collapsed, width, height) : null,
-    [collapsed, width, height]
+    () => collapsed ? computeLayout(collapsed, width, height, scaffoldFlow) : null,
+    [collapsed, width, height, scaffoldFlow]
   );
 
   if (!collapsed || !collapsed.links.length || !layout) {
@@ -335,6 +431,13 @@ const CarrierSankey = React.forwardRef(function CarrierSankey({ data, width: pro
   }
 
   const labelStyle = { fill: COLORS.navy, fontSize: 11, fontFamily: 'ui-monospace, monospace' };
+
+  // Active phase label for the corner badge.
+  const phaseLabel = usePhaseMode && sankeyPhases
+    ? (typeof phaseIndex === 'number'
+        ? sankeyPhases.phaseData[Math.max(0, Math.min(phaseIndex, sankeyPhases.phaseData.length - 1))]?.label
+        : sankeyPhases.phaseData[Math.max(0, Math.min(currentPhaseIndex, sankeyPhases.phaseData.length - 1))]?.label)
+    : null;
 
   return (
     <div ref={ref} className="relative" style={{ width: '100%' }}>
@@ -413,6 +516,16 @@ const CarrierSankey = React.forwardRef(function CarrierSankey({ data, width: pro
           </g>
         ))}
       </svg>
+
+      {/* Phase badge — only in phase mode */}
+      {phaseLabel && (
+        <div
+          className="absolute top-1 right-2 text-[10px] font-bold tracking-wide uppercase px-2 py-0.5 rounded"
+          style={{ backgroundColor: '#002144', color: 'white' }}
+        >
+          {phaseLabel}
+        </div>
+      )}
 
       {/* Column labels */}
       <div className="flex justify-between px-2 mt-1 text-xs font-medium text-gray-400 uppercase tracking-wide" style={{ maxWidth: width }}>

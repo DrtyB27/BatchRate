@@ -34,7 +34,10 @@ export default function CsvDropzone({ onDataLoaded, onClear }) {
           return;
         }
 
-        const rows = result.data;
+        // Drop the 'Req' marker row from the downloadable template if present.
+        // Anything where Reference === 'Req' is a template artifact, not data.
+        const rows = result.data.filter(r => String(r['Reference'] || '').trim() !== 'Req');
+
         setStatus({
           type: 'success',
           message: `${rows.length} rows loaded`,

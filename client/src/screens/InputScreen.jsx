@@ -143,12 +143,25 @@ export default function InputScreen({
     if (!rowsToRun || rowsToRun.length === 0) return;
 
     // ── Sanitize numeric CSV fields (strip commas, dollar signs, whitespace) ──
-    const NUMERIC_FIELDS = ['Net Wt Lb', 'Gross Wt Lb', 'Historic Cost', 'Pcs', 'Ttl HUs',
+    const NUMERIC_FIELDS = [
+      'Net Wt Lb', 'Gross Wt Lb', 'Historic Cost', 'Pcs', 'Ttl HUs',
       'Net Vol CuFt', 'Gross Vol CuFt', 'Lgth Ft', 'Hght Ft', 'Dpth Ft',
+      // Items 2-5: weight + count
       'Net Wt Lb.2', 'Net Wt Lb.3', 'Net Wt Lb.4', 'Net Wt Lb.5',
       'Gross Wt Lb.2', 'Gross Wt Lb.3', 'Gross Wt Lb.4', 'Gross Wt Lb.5',
       'Pcs.2', 'Pcs.3', 'Pcs.4', 'Pcs.5',
-      'Ttl HUs.2', 'Ttl HUs.3', 'Ttl HUs.4', 'Ttl HUs.5'];
+      'Ttl HUs.2', 'Ttl HUs.3', 'Ttl HUs.4', 'Ttl HUs.5',
+      // Items 2-5: volume + dimensions (previously missing)
+      'Net Vol CuFt.2', 'Net Vol CuFt.3', 'Net Vol CuFt.4', 'Net Vol CuFt.5',
+      'Gross Vol CuFt.2', 'Gross Vol CuFt.3', 'Gross Vol CuFt.4', 'Gross Vol CuFt.5',
+      'Lgth Ft.2', 'Lgth Ft.3', 'Lgth Ft.4', 'Lgth Ft.5',
+      'Hght Ft.2', 'Hght Ft.3', 'Hght Ft.4', 'Hght Ft.5',
+      'Dpth Ft.2', 'Dpth Ft.3', 'Dpth Ft.4', 'Dpth Ft.5',
+      // Accessorial quantities
+      'Quantity', 'Quantity2', 'Quantity3', 'Quantity4', 'Quantity5',
+      // Distance / cost
+      'Miles', 'Blanket Cost', 'Client Cost',
+    ];
 
     function sanitizeNumeric(raw) {
       if (raw === null || raw === undefined || raw === '') return '';

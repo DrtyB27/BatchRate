@@ -1,4 +1,5 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { computeSankeyData, SANKEY_CARRIER_PALETTE } from '../services/analyticsEngine.js';
 
 const CARRIER_PALETTE = SANKEY_CARRIER_PALETTE;
@@ -308,13 +309,22 @@ function computeNColumnLayout(scaffold, columnData, flows, width, height) {
       const x1 = tNode.x;
       const midX = (x0 + x1) / 2;
 
-      const isRetained = link.sourceCarrier === link.targetCarrier;
+      const sourceSCAC = link.sourceCarrier;
+      const targetSCAC = link.targetCarrier;
+      const isRetained = sourceSCAC === targetSCAC;
+
+      // Same carrier across adjacent phases → flat straight band (no Bezier),
+      // restoring single-phase Historic→Award visual when shares match.
+      // Cross-carrier links keep the smooth bezier curve.
+      const d = isRetained
+        ? `M${x0},${sy + sHeight / 2} L${x1},${ty + tHeight / 2}`
+        : `M${x0},${sy + sHeight / 2} C${midX},${sy + sHeight / 2} ${midX},${ty + tHeight / 2} ${x1},${ty + tHeight / 2}`;
 
       paths.push({
         link,
         fromColumn: fromIdx,
         toColumn: toIdx,
-        d: `M${x0},${sy + sHeight / 2} C${midX},${sy + sHeight / 2} ${midX},${ty + tHeight / 2} ${x1},${ty + tHeight / 2}`,
+        d,
         strokeWidth: Math.max(MIN_STROKE, (sHeight + tHeight) / 2),
         isRetained,
       });
@@ -370,6 +380,24 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
   const [hoverLink, setHoverLink] = useState(null);
   const [hoverNode, setHoverNode] = useState(null);
   const [tooltip, setTooltip] = useState(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // ESC closes fullscreen.
+  useEffect(() => {
+    if (!isFullscreen) return undefined;
+    const onKey = (e) => { if (e.key === 'Escape') setIsFullscreen(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isFullscreen]);
+
+  // Lock body scroll while fullscreen so the underlying page can't scroll
+  // behind the overlay; restore previous overflow on close.
+  useEffect(() => {
+    if (!isFullscreen) return undefined;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prev; };
+  }, [isFullscreen]);
 
   const useNColumnMode = !!phaseSequence && !!awardContext;
 
@@ -521,96 +549,114 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
     }
     function handleLinkLeave() { setHoverLink(null); setTooltip(null); }
 
-    return (
-      <div ref={ref} className="relative" style={{ width: '100%' }}>
-        <svg
-          width="100%"
-          height={height}
-          viewBox={`0 0 ${width} ${height}`}
-          preserveAspectRatio="xMidYMid meet"
+    // Bi-directional scroll bounds: SVG renders at its natural minimum so wide
+    // multi-phase + tall carrier-stack views scroll on both axes inside the
+    // bounded panel rather than compressing labels.
+    const minSvgWidth = width;
+    const minSvgHeight = height;
+    const PANEL_MAX_HEIGHT = 600;
+
+    const renderSankeyBody = ({ fullscreen }) => (
+      <>
+        <div
+          className="overflow-auto border border-gray-200 rounded bg-white"
+          style={fullscreen ? {} : { maxHeight: `${PANEL_MAX_HEIGHT}px` }}
         >
-          {/* Flows behind nodes */}
-          {paths.map((p, i) => (
-            <path
-              key={i}
-              d={p.d}
-              fill="none"
-              stroke={colorFor(p.link.sourceCarrier)}
-              strokeWidth={p.strokeWidth}
-              opacity={pathOpacity(p)}
-              style={{ transition: 'opacity 0.15s', cursor: 'pointer', pointerEvents: pathOpacity(p) > 0.05 ? 'auto' : 'none' }}
-              onMouseEnter={(e) => handleLinkEnter(e, p)}
-              onMouseLeave={handleLinkLeave}
-            />
-          ))}
+          <div style={{ minWidth: `${minSvgWidth}px` }}>
+            <svg
+              width={fullscreen ? '100%' : minSvgWidth}
+              height={minSvgHeight}
+              viewBox={`0 0 ${minSvgWidth} ${minSvgHeight}`}
+              preserveAspectRatio="xMinYMin meet"
+              style={fullscreen ? { minWidth: `${minSvgWidth}px` } : { display: 'block' }}
+            >
+              {/* Flows behind nodes */}
+              {paths.map((p, i) => (
+                <path
+                  key={i}
+                  d={p.d}
+                  fill="none"
+                  stroke={colorFor(p.link.sourceCarrier)}
+                  strokeWidth={p.strokeWidth}
+                  opacity={pathOpacity(p)}
+                  style={{ transition: 'opacity 0.15s', cursor: 'pointer', pointerEvents: pathOpacity(p) > 0.05 ? 'auto' : 'none' }}
+                  onMouseEnter={(e) => handleLinkEnter(e, p)}
+                  onMouseLeave={handleLinkLeave}
+                />
+              ))}
 
-          {/* Column nodes + labels */}
-          {columns.map((col, ci) => {
-            const colOpacity = opacities[ci] ?? 0;
-            return (
-              <g key={`col-${ci}`} opacity={colOpacity} style={{ transition: 'opacity 0.05s linear' }}>
-                {col.nodes.map(n => (
-                  <g key={`n-${ci}-${n.carrierId}`}
-                    onMouseEnter={() => setHoverNode(n.carrierId)}
-                    onMouseLeave={() => setHoverNode(null)}
-                    style={{ cursor: 'pointer' }}
-                  >
-                    <rect
-                      x={n.x}
-                      y={n.y}
-                      width={n.width}
-                      height={n.height}
-                      fill={colorFor(n.carrierId)}
-                      rx={3}
-                    />
-                    {/* Outer column labels (first column anchor right of node, last column anchor left, middle columns anchor left) */}
-                    {ci === 0 ? (
-                      <text
-                        x={n.x - LABEL_GAP}
-                        y={n.y + n.height / 2}
-                        textAnchor="end"
-                        dominantBaseline="central"
-                        style={labelStyle}
+              {/* Column nodes + labels */}
+              {columns.map((col, ci) => {
+                const colOpacity = opacities[ci] ?? 0;
+                return (
+                  <g key={`col-${ci}`} opacity={colOpacity} style={{ transition: 'opacity 0.05s linear' }}>
+                    {col.nodes.map(n => (
+                      <g key={`n-${ci}-${n.carrierId}`}
+                        onMouseEnter={() => setHoverNode(n.carrierId)}
+                        onMouseLeave={() => setHoverNode(null)}
+                        style={{ cursor: 'pointer' }}
                       >
-                        {n.carrierId} ({fmtMoney(n.flow)})
-                      </text>
-                    ) : (
-                      <text
-                        x={n.x + n.width + LABEL_GAP}
-                        y={n.y + n.height / 2}
-                        textAnchor="start"
-                        dominantBaseline="central"
-                        style={labelStyle}
-                      >
-                        {n.carrierId} ({fmtMoney(n.flow)})
-                      </text>
-                    )}
+                        <rect
+                          x={n.x}
+                          y={n.y}
+                          width={n.width}
+                          height={n.height}
+                          fill={colorFor(n.carrierId)}
+                          rx={3}
+                        />
+                        {ci === 0 ? (
+                          <text
+                            x={n.x - LABEL_GAP}
+                            y={n.y + n.height / 2}
+                            textAnchor="end"
+                            dominantBaseline="central"
+                            style={labelStyle}
+                          >
+                            {n.carrierId} ({fmtMoney(n.flow)})
+                          </text>
+                        ) : (
+                          <text
+                            x={n.x + n.width + LABEL_GAP}
+                            y={n.y + n.height / 2}
+                            textAnchor="start"
+                            dominantBaseline="central"
+                            style={labelStyle}
+                          >
+                            {n.carrierId} ({fmtMoney(n.flow)})
+                          </text>
+                        )}
+                      </g>
+                    ))}
                   </g>
-                ))}
-              </g>
-            );
-          })}
-        </svg>
+                );
+              })}
+            </svg>
 
-        {/* Column header strip */}
-        <div className="flex mt-1 px-1 text-[11px] font-semibold text-[#002144] uppercase tracking-wide" style={{ maxWidth: width }}>
-          {columns.map((col, ci) => {
-            const widthPct = `${100 / columns.length}%`;
-            return (
-              <div
-                key={`hdr-${ci}`}
-                style={{
-                  width: widthPct,
-                  textAlign: 'center',
-                  opacity: opacities[ci] ?? 0,
-                  transition: 'opacity 0.15s linear',
-                }}
-                title={col.label}
-              >
-                <div className="truncate">{col.label}</div>
-              </div>
-            );
-          })}
+            {/* Column header strip lives inside the scroll container so it
+                tracks the SVG's horizontal scroll. */}
+            <div
+              className="flex px-1 py-1 text-[11px] font-semibold text-[#002144] uppercase tracking-wide"
+              style={{ width: fullscreen ? '100%' : `${minSvgWidth}px` }}
+            >
+              {columns.map((col, ci) => {
+                const widthPct = `${100 / columns.length}%`;
+                return (
+                  <div
+                    key={`hdr-${ci}`}
+                    style={{
+                      width: widthPct,
+                      textAlign: 'center',
+                      opacity: opacities[ci] ?? 0,
+                      transition: 'opacity 0.15s linear',
+                    }}
+                    title={col.label}
+                  >
+                    <div className="truncate">{col.label}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
         </div>
 
         {/* Legend */}
@@ -621,16 +667,70 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
             Unassigned
           </span>
         </div>
+      </>
+    );
 
-        {tooltip && (
-          <div
-            className="fixed z-50 px-2 py-1 text-xs font-mono bg-gray-900 text-white rounded shadow-lg pointer-events-none"
-            style={{ left: tooltip.x + 12, top: tooltip.y - 8 }}
-          >
-            {tooltip.text}
+    return (
+      <>
+        <div ref={ref} className="relative" style={{ width: '100%' }}>
+          <div className="flex items-center justify-end mb-2">
+            <button
+              onClick={() => setIsFullscreen(true)}
+              className="text-sm text-[#002144] hover:text-[#39b6e6] flex items-center gap-1 px-2 py-1 rounded border border-gray-200 hover:border-[#39b6e6]"
+              aria-label="Expand Sankey to fullscreen"
+              title="Expand to fullscreen"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="15 3 21 3 21 9" />
+                <polyline points="9 21 3 21 3 15" />
+                <line x1="21" y1="3" x2="14" y2="10" />
+                <line x1="3" y1="21" x2="10" y2="14" />
+              </svg>
+              Expand
+            </button>
           </div>
+          {renderSankeyBody({ fullscreen: false })}
+          {tooltip && !isFullscreen && (
+            <div
+              className="fixed z-[100] px-2 py-1 text-xs font-mono bg-gray-900 text-white rounded shadow-lg pointer-events-none"
+              style={{ left: tooltip.x + 12, top: tooltip.y - 8 }}
+            >
+              {tooltip.text}
+            </div>
+          )}
+        </div>
+
+        {isFullscreen && createPortal(
+          <div className="fixed inset-0 z-50 bg-white flex flex-col">
+            <div className="flex justify-between items-center px-6 py-3 bg-white border-b sticky top-0 z-10">
+              <h2 className="text-lg font-semibold text-[#002144]">Freight Flow — Historic → Award</h2>
+              <button
+                onClick={() => setIsFullscreen(false)}
+                className="text-[#002144] hover:text-[#39b6e6] flex items-center gap-1 px-2 py-1 rounded border border-gray-200 hover:border-[#39b6e6]"
+                aria-label="Close fullscreen"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+                Close (ESC)
+              </button>
+            </div>
+            <div className="flex-1 overflow-auto p-6">
+              {renderSankeyBody({ fullscreen: true })}
+            </div>
+            {tooltip && (
+              <div
+                className="fixed z-[100] px-2 py-1 text-xs font-mono bg-gray-900 text-white rounded shadow-lg pointer-events-none"
+                style={{ left: tooltip.x + 12, top: tooltip.y - 8 }}
+              >
+                {tooltip.text}
+              </div>
+            )}
+          </div>,
+          document.body
         )}
-      </div>
+      </>
     );
   }
 

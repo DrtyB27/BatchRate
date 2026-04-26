@@ -18,6 +18,14 @@ const NODE_WIDTH = 16;
 const LABEL_GAP = 8;
 const NODE_GAP = 4;
 
+// Panel-mode bounds for the N-column Sankey. Fixed pixel sizing on the SVG +
+// fixed height on the wrapper is what forces the bi-directional scroll to
+// engage: any percent-based width or maxHeight lets the SVG scale-to-fit and
+// the wrapper never clips.
+const PHASE_MIN_WIDTH = 320;
+const CARRIER_ROW_HEIGHT = 32;
+const PANEL_HEIGHT = 600;
+
 function fmtMoney(v) {
   if (v >= 1e6) return '$' + (v / 1e6).toFixed(2) + 'M';
   if (v >= 1e3) return '$' + (v / 1e3).toFixed(1) + 'K';
@@ -427,15 +435,24 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
     collapsed.nodes.filter(n => n.side === 'right' || n.side === 'both').length
   ) : (sankeyData ? Math.max(...sankeyData.columnData.map(c => c.nodes.length), 1) : 0);
 
-  const height = propHeight || Math.max(420, maxSide * 48);
+  // Height: legacy mode keeps 48px/row; N-column uses CARRIER_ROW_HEIGHT plus
+  // a fixed buffer so tall stacks reliably exceed PANEL_HEIGHT and trigger
+  // vertical scroll inside the bounded wrapper.
+  const height = propHeight || (
+    useNColumnMode
+      ? Math.max(420, maxSide * CARRIER_ROW_HEIGHT + 100)
+      : Math.max(420, maxSide * 48)
+  );
 
-  // N-column mode needs more horizontal real estate as columns grow.
+  // N-column mode renders one column per phase at a fixed pixel width; this
+  // makes the SVG wider than the panel on any reasonable screen, which is
+  // what triggers horizontal scroll. Don't use a max-with-floor formula: a
+  // floor masks the overflow on wide panels.
   const computedWidth = useMemo(() => {
     if (propWidth) return propWidth;
     if (useNColumnMode && sankeyData) {
       const cc = sankeyData.scaffold.columnCount;
-      // ~360px per inter-column slot + side label gutters.
-      return Math.max(900, 280 + cc * 320);
+      return cc * PHASE_MIN_WIDTH;
     }
     return 1100;
   }, [propWidth, useNColumnMode, sankeyData]);
@@ -549,27 +566,31 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
     }
     function handleLinkLeave() { setHoverLink(null); setTooltip(null); }
 
-    // Bi-directional scroll bounds: SVG renders at its natural minimum so wide
-    // multi-phase + tall carrier-stack views scroll on both axes inside the
-    // bounded panel rather than compressing labels.
+    // Bi-directional scroll bounds. The SVG renders at fixed pixel dimensions
+    // (NOT 100% width) in panel mode so it actually overflows the wrapper;
+    // preserveAspectRatio="none" + flexShrink:0 prevents the layout from
+    // shrinking it back to fit. The wrapper uses a fixed height (not maxHeight)
+    // to enforce vertical clipping even when SVG height < 600.
     const minSvgWidth = width;
     const minSvgHeight = height;
-    const PANEL_MAX_HEIGHT = 600;
 
     const renderSankeyBody = ({ fullscreen }) => (
       <>
         <div
-          className="overflow-auto border border-gray-200 rounded bg-white"
-          style={fullscreen ? {} : { maxHeight: `${PANEL_MAX_HEIGHT}px` }}
+          className="border border-gray-200 rounded bg-white"
+          style={{
+            width: '100%',
+            height: fullscreen ? 'auto' : `${PANEL_HEIGHT}px`,
+            overflow: fullscreen ? 'visible' : 'auto',
+          }}
         >
-          <div style={{ minWidth: `${minSvgWidth}px` }}>
-            <svg
-              width={fullscreen ? '100%' : minSvgWidth}
-              height={minSvgHeight}
-              viewBox={`0 0 ${minSvgWidth} ${minSvgHeight}`}
-              preserveAspectRatio="xMinYMin meet"
-              style={fullscreen ? { minWidth: `${minSvgWidth}px` } : { display: 'block' }}
-            >
+          <svg
+            width={fullscreen ? '100%' : minSvgWidth}
+            height={fullscreen ? '100%' : minSvgHeight}
+            viewBox={`0 0 ${minSvgWidth} ${minSvgHeight}`}
+            preserveAspectRatio={fullscreen ? 'xMidYMid meet' : 'none'}
+            style={{ display: 'block', flexShrink: 0 }}
+          >
               {/* Flows behind nodes */}
               {paths.map((p, i) => (
                 <path
@@ -632,30 +653,29 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
               })}
             </svg>
 
-            {/* Column header strip lives inside the scroll container so it
-                tracks the SVG's horizontal scroll. */}
-            <div
-              className="flex px-1 py-1 text-[11px] font-semibold text-[#002144] uppercase tracking-wide"
-              style={{ width: fullscreen ? '100%' : `${minSvgWidth}px` }}
-            >
-              {columns.map((col, ci) => {
-                const widthPct = `${100 / columns.length}%`;
-                return (
-                  <div
-                    key={`hdr-${ci}`}
-                    style={{
-                      width: widthPct,
-                      textAlign: 'center',
-                      opacity: opacities[ci] ?? 0,
-                      transition: 'opacity 0.15s linear',
-                    }}
-                    title={col.label}
-                  >
-                    <div className="truncate">{col.label}</div>
-                  </div>
-                );
-              })}
-            </div>
+          {/* Column header strip lives inside the scroll container so it
+              tracks the SVG's horizontal scroll. */}
+          <div
+            className="flex px-1 py-1 text-[11px] font-semibold text-[#002144] uppercase tracking-wide"
+            style={{ width: fullscreen ? '100%' : `${minSvgWidth}px`, flexShrink: 0 }}
+          >
+            {columns.map((col, ci) => {
+              const widthPct = `${100 / columns.length}%`;
+              return (
+                <div
+                  key={`hdr-${ci}`}
+                  style={{
+                    width: widthPct,
+                    textAlign: 'center',
+                    opacity: opacities[ci] ?? 0,
+                    transition: 'opacity 0.15s linear',
+                  }}
+                  title={col.label}
+                >
+                  <div className="truncate">{col.label}</div>
+                </div>
+              );
+            })}
           </div>
         </div>
 

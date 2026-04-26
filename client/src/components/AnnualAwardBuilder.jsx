@@ -3,8 +3,8 @@ import { computeAnnualAward, computeCarrierSummary, computeCarrierMixByOrigin, c
 import { generateAnnualAwardPdf, downloadBlob } from '../services/pdfExport.js';
 import { applyMargin } from '../services/ratingClient.js';
 import CarrierSankey from './CarrierSankey.jsx';
-import PhaseSelector from './PhaseSelector.jsx';
-import PhaseScrubber from './PhaseScrubber.jsx';
+import PhaseSelector, { relabelColumns } from './PhaseSelector.jsx';
+import RevealController from './RevealController.jsx';
 import { openAwardSharePdf } from './AwardSharePdf.js';
 import { useScenario } from '../context/ScenarioContext.jsx';
 import CustomerLocationManager from './CustomerLocationManager.jsx';
@@ -35,6 +35,69 @@ function escCsv(val) {
   const s = String(val ?? '');
   if (s.includes(',') || s.includes('"') || s.includes('\n')) return `"${s.replace(/"/g, '""')}"`;
   return s;
+}
+
+/**
+ * Initial phaseSequence shape per mode. Historic mode locks a baseline at
+ * column 0; scenarioOnly omits it. `columns` always starts empty so the user
+ * picks what to compare.
+ */
+function initialPhaseSequence(mode) {
+  if (mode === 'historic') {
+    return {
+      mode: 'historic',
+      baseline: { type: 'historic', label: 'Historic', scenarioId: null, scenarioName: 'Incumbent (historic shipments)' },
+      columns: [],
+    };
+  }
+  return { mode: 'scenarioOnly', baseline: null, columns: [] };
+}
+
+/**
+ * Build "Rate-Adjusted Historic" lanes: same incumbent carrier per reference,
+ * but priced at the bid rates the carrier quoted on this lane. References
+ * whose historic carrier didn't quote are skipped (we can't reprice them).
+ *
+ * Reuses computeAnnualAward downstream so the resulting lanes have the same
+ * shape (annualSpend, annualHistoric, etc.) as scenario lanes. The synthetic
+ * award per reference is { scac: <historicCarrier>, totalCharge: <that
+ * carrier's rate.totalCharge>, ... }.
+ */
+function buildRateAdjustedHistoricLanes(flatRows, sampleWeeks, historicBaseline, computeAnnualAwardFn, getLaneKeyFn) {
+  if (!historicBaseline?.incumbentField) return [];
+  const incumbentField = historicBaseline.incumbentField;
+
+  // For each reference, find the historic carrier and the matching rate row.
+  const awards = {};
+  let skipped = 0;
+  const seenRef = new Set();
+  for (const row of flatRows) {
+    const ref = row?.reference;
+    if (ref == null || ref === '' || seenRef.has(ref)) continue;
+    seenRef.add(ref);
+    const rawHc = row?.[incumbentField];
+    const hc = rawHc != null ? String(rawHc).trim().toUpperCase() : '';
+    if (!hc) { skipped++; continue; }
+    // Find any flat row with this reference whose rate carrier matches the historic carrier.
+    const match = flatRows.find(r =>
+      r.reference === ref && r.hasRate && r.rate?.validRate !== 'false'
+      && (r.rate?.carrierSCAC || '').toUpperCase() === hc
+    );
+    if (!match) { skipped++; continue; }
+    awards[ref] = {
+      scac: match.rate.carrierSCAC,
+      carrierName: match.rate.carrierName || match.rate.carrierSCAC,
+      totalCharge: match.rate.totalCharge,
+      laneKey: getLaneKeyFn(match),
+    };
+  }
+
+  if (skipped > 0 && typeof console !== 'undefined' && console.info) {
+    console.info(`[AnnualAwardBuilder] Rate-Adjusted Historic: ${skipped} reference(s) had no matching incumbent rate.`);
+  }
+
+  if (Object.keys(awards).length === 0) return [];
+  return computeAnnualAwardFn(flatRows, awards, sampleWeeks).lanes;
 }
 
 // P1/P2/P3 preferred-carrier pill. Auto-ranked by total spend captured as
@@ -69,25 +132,34 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
   const [showLocations, setShowLocations] = useState(false);
   const sankeyRef = useRef(null);
 
-  // Multi-phase Sankey state — Historic baseline locked at index 0.
-  // `phases` is appended by user via PhaseSelector. Phase mode is independent
-  // of the dashboard's selected scenario so users can compare phases without
-  // the rest of the screen following along.
-  const [phaseSequence, setPhaseSequence] = useState({
-    baseline: { type: 'historic', label: 'Historic', scenarioId: null, scenarioName: 'Incumbent (historic shipments)' },
-    phases: [],
-  });
-  const [currentPhaseIndex, setCurrentPhaseIndex] = useState(0);
-  const [animationProgress, setAnimationProgress] = useState(0);
+  // Multi-stage Sankey state. Mode is auto-detected from the data: presence of
+  // an incumbent column on the input rows -> 'historic' (Historic locked at
+  // column 0); absence -> 'scenarioOnly' (up to 4 user-ordered scenarios, no
+  // historic chip). The user cannot manually flip modes.
+  const sankeyMode = useMemo(
+    () => (historicBaseline?.incumbentField ? 'historic' : 'scenarioOnly'),
+    [historicBaseline?.incumbentField]
+  );
+
+  const [phaseSequence, setPhaseSequence] = useState(() => initialPhaseSequence(sankeyMode));
+  const [revealedColumnCount, setRevealedColumnCount] = useState(1);
+  const [transitionProgress, setTransitionProgress] = useState(0);
+
+  // Reset to a clean phaseSequence when mode flips (rare — e.g. file reload).
+  useEffect(() => {
+    setPhaseSequence(prev => prev.mode === sankeyMode ? prev : initialPhaseSequence(sankeyMode));
+    setRevealedColumnCount(1);
+    setTransitionProgress(0);
+  }, [sankeyMode]);
 
   // If a saved scenario is removed in Scenario Builder while it's used as a
-  // phase here, drop the dangling phase reference.
+  // column here, drop the dangling reference.
   useEffect(() => {
     const validIds = new Set((computedScenarios || []).map(s => s.id));
     setPhaseSequence(prev => {
-      const filtered = prev.phases.filter(p => validIds.has(p.scenarioId));
-      if (filtered.length === prev.phases.length) return prev;
-      return { ...prev, phases: filtered.map((p, i) => ({ ...p, label: `Phase ${i + 1}` })) };
+      const filtered = prev.columns.filter(c => c.type !== 'scenario' || validIds.has(c.scenarioId));
+      if (filtered.length === prev.columns.length) return prev;
+      return { ...prev, columns: relabelColumns(filtered, prev.mode) };
     });
   }, [computedScenarios]);
 
@@ -403,38 +475,56 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
     });
   }, [filteredFlatRows, sampleWeeks]);
 
-  // Per-phase lanes for the multi-phase Sankey. Phase 0 is the baseline,
-  // phases 1+ pull from saved scenarios via computeAnnualAward. Falls back
-  // gracefully when a phase points to a stale scenarioId.
-  const lanesByPhase = useMemo(() => {
-    const out = [baselineLanes];
-    for (const p of phaseSequence.phases) {
-      const sc = (computedScenarios || []).find(s => s.id === p.scenarioId);
-      const awards = sc?.result?.awards || null;
-      if (!awards || Object.keys(awards).length === 0) {
+  // Per-column lanes for the N-column Sankey. Column 0 is the baseline if
+  // present (historic mode), then user-added columns in order. Each column
+  // produces a `lanes[]` shaped like computeAnnualAward output.
+  const lanesByColumn = useMemo(() => {
+    if (!phaseSequence) return [];
+    const out = [];
+    if (phaseSequence.baseline) {
+      out.push(baselineLanes);
+    }
+    for (const col of phaseSequence.columns) {
+      if (col.type === 'rateAdjustedHistoric') {
+        out.push(buildRateAdjustedHistoricLanes(filteredFlatRows, sampleWeeks, historicBaseline, computeAnnualAward, getLaneKey));
+      } else if (col.type === 'scenario') {
+        const sc = (computedScenarios || []).find(s => s.id === col.scenarioId);
+        const awards = sc?.result?.awards || null;
+        if (!awards || Object.keys(awards).length === 0) {
+          out.push([]);
+          continue;
+        }
+        out.push(computeAnnualAward(filteredFlatRows, awards, sampleWeeks).lanes);
+      } else {
         out.push([]);
-        continue;
       }
-      const phaseLanes = computeAnnualAward(filteredFlatRows, awards, sampleWeeks).lanes;
-      out.push(phaseLanes);
     }
     return out;
-  }, [baselineLanes, phaseSequence.phases, computedScenarios, filteredFlatRows, sampleWeeks]);
+  }, [phaseSequence, baselineLanes, computedScenarios, filteredFlatRows, sampleWeeks, historicBaseline]);
 
-  const sankeyAwardContext = useMemo(() => ({ lanesByPhase }), [lanesByPhase]);
+  const sankeyAwardContext = useMemo(() => ({ lanesByColumn }), [lanesByColumn]);
 
-  // Clamp current phase index when phases change (e.g. user removes one).
+  const visibleColumnCount = (phaseSequence?.baseline ? 1 : 0) + (phaseSequence?.columns?.length || 0);
+
+  // Clamp reveal cursor when the visible column count changes.
   useEffect(() => {
-    const lastIdx = phaseSequence.phases.length; // baseline + N
-    if (currentPhaseIndex > lastIdx) {
-      setCurrentPhaseIndex(lastIdx);
-      setAnimationProgress(0);
+    if (visibleColumnCount === 0) {
+      if (revealedColumnCount !== 0 || transitionProgress !== 0) {
+        setRevealedColumnCount(0);
+        setTransitionProgress(0);
+      }
+      return;
     }
-  }, [phaseSequence.phases.length, currentPhaseIndex]);
+    const clamped = Math.max(1, Math.min(revealedColumnCount, visibleColumnCount));
+    if (clamped !== revealedColumnCount) {
+      setRevealedColumnCount(clamped);
+      setTransitionProgress(0);
+    }
+  }, [visibleColumnCount, revealedColumnCount, transitionProgress]);
 
-  const handleScrubberChange = useCallback(({ currentPhaseIndex: idx, animationProgress: prog }) => {
-    setCurrentPhaseIndex(idx);
-    setAnimationProgress(prog);
+  const handleRevealChange = useCallback(({ revealedColumnCount: r, transitionProgress: t }) => {
+    setRevealedColumnCount(r);
+    setTransitionProgress(t);
   }, []);
 
   // Saved scenarios surfaced in the PhaseSelector dropdown. Drops scenarios
@@ -534,31 +624,48 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
   const handleExportCsv = () => {
     const awardByLabel = isExportCustomerPrice ? 'Award By: Customer Price' : 'Award By: Carrier Cost';
 
-    // Phase metadata header (always present, even for single-phase exports).
+    // Build the visible column list (baseline + user columns) so headers and
+    // per-row column labels stay in sync with what the on-screen Sankey shows.
+    const visibleColumns = [];
+    if (phaseSequence.baseline) {
+      visibleColumns.push({ type: 'historic', label: phaseSequence.baseline.label || 'Historic', scenarioId: null, scenarioName: phaseSequence.baseline.scenarioName || 'Incumbent shipments' });
+    }
+    for (const c of phaseSequence.columns) {
+      visibleColumns.push({ type: c.type, label: c.label, scenarioId: c.scenarioId || null, scenarioName: c.scenarioName || '' });
+    }
+
+    // Column metadata header \u2014 names every column the export covers.
+    const columnMetaLines = visibleColumns.map((col, i) => {
+      const n = i + 1;
+      if (col.type === 'historic') return `# Column ${n}: Historic (Incumbent shipments)`;
+      if (col.type === 'rateAdjustedHistoric') return `# Column ${n}: Historic Carrier \u2014 New Rate`;
+      const idTag = col.scenarioId ? ` (id: ${col.scenarioId})` : '';
+      return `# Column ${n}: ${col.label} \u2014 ${col.scenarioName || ''}${idTag}`;
+    });
+
     const phaseMetaHeader = [
       '# BRAT Annual Award Export',
       `# Generated: ${new Date().toISOString()}`,
-      '# Baseline: Historic (Incumbent shipments)',
-      ...phaseSequence.phases.map((p, i) => `# Phase ${i + 1}: ${p.scenarioName} (id: ${p.scenarioId})`),
+      `# Mode: ${phaseSequence.mode}`,
+      ...columnMetaLines,
     ];
 
-    // Lane detail \u2014 emit one block per configured phase. With no scenarios
-    // added we still output the Historic baseline so the legacy export shape
-    // surfaces lane data.
+    // Lane detail \u2014 one block per configured column. Column field carries the
+    // human-readable label (Historic / Historic Carrier \u2014 New Rate / Phase N
+    // or Scenario N) so consumers can pivot on it.
     const headers = [
-      'Phase', 'Lane', 'Carrier SCAC', 'Carrier Name',
+      'Column', 'Lane', 'Carrier SCAC', 'Carrier Name',
       'Hist. Carrier', 'Hist. Carrier %', 'Hist. Total Ann. Spend',
       'Sample Shipments', 'Annual Shipments (est)', 'Annual Tons (US)',
       'Sample Spend', 'Annual Spend (est)',
       'Annual Historic Spend (Attributed)', 'Annual Delta ($)', 'Annual Delta (%)',
     ];
-    const allPhases = [phaseSequence.baseline, ...phaseSequence.phases];
     const rows = [];
-    allPhases.forEach((phase, idx) => {
-      const lanesForPhase = (lanesByPhase[idx] || []);
-      for (const l of lanesForPhase) {
+    visibleColumns.forEach((col, idx) => {
+      const lanesForColumn = (lanesByColumn[idx] || []);
+      for (const l of lanesForColumn) {
         rows.push([
-          phase.label,
+          col.label,
           l.laneKey, l.carrierSCAC, l.carrierName,
           l.historicCarrier || '', l.historicCarrierPct || '',
           l.historicTotalAnnSpend ? l.historicTotalAnnSpend.toFixed(2) : '0.00',
@@ -570,12 +677,12 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
       }
     });
 
-    // Carrier Summary section \u2014 single-phase view of the dashboard's currently
-    // selected scenario. Phase column reflects the active phase so consumers
-    // can correlate this block with the phased lane detail above.
-    const activePhaseLabel = (allPhases[currentPhaseIndex] || phaseSequence.baseline).label;
+    // Carrier Summary section \u2014 view of the dashboard's currently selected
+    // scenario. Column field reflects the dashboard's awarded view (final
+    // visible column) so the summary correlates with the rightmost column.
+    const activePhaseLabel = (visibleColumns[visibleColumns.length - 1]?.label) || (phaseSequence.baseline?.label || 'Historic');
     const summaryHeaders = [
-      'Phase',
+      'Column',
       'SCAC', 'Carrier', 'Awarded Lanes', 'Sample Shipments', 'Annual Shipments',
       'Annual Tons (US)',
       'Proj. Ann. Spend', 'Displaced Historic', '\u0394 ($)', '\u0394 (%)',
@@ -593,9 +700,9 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
     ].map(escCsv));
 
     // Customer view section — only meaningful for an active scenario.
-    // Phase column reflects the same active-phase label as the carrier summary.
+    // Column field reflects the same active-column label as the carrier summary.
     const custHeaders = [
-      'Phase',
+      'Column',
       'Status', 'Lane', 'Origin Zips', 'Previous Carrier', 'New Carrier SCAC', 'New Carrier Name',
       'Annual Shipments', 'Customer Spend', 'Savings ($)', 'Savings (%)',
     ];
@@ -673,11 +780,11 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
   };
 
   // Carriers eligible for the carrier-view dropdown — union of source AND
-  // target SCACs across all phaseData links so every carrier touching the
+  // target SCACs across all visible columns so every carrier touching the
   // diagram is offered (incumbents and awarded carriers both qualify).
   const exportCarrierOptions = useMemo(() => {
     const seen = new Map(); // scac -> carrier display name
-    for (const lanes of (lanesByPhase || [])) {
+    for (const lanes of (lanesByColumn || [])) {
       for (const lane of (lanes || [])) {
         if (lane.carrierSCAC && !seen.has(lane.carrierSCAC)) {
           seen.set(lane.carrierSCAC, lane.carrierName || lane.carrierSCAC);
@@ -690,7 +797,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
     return [...seen.entries()]
       .map(([scac, name]) => ({ scac, name }))
       .sort((a, b) => a.scac.localeCompare(b.scac));
-  }, [lanesByPhase]);
+  }, [lanesByColumn]);
 
   // Default carrier selection when switching to carrier view — pick the top
   // awarded carrier from the active scenario so the dropdown isn't empty.
@@ -714,9 +821,10 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
   }, [exportViewType, exportCarrierSCAC]);
 
   // Snapshot capture: when pendingExport is set, the hidden container below
-  // mounts one CarrierSankey per phase with the snapshot-mode phaseIndex
-  // prop. We wait two RAF ticks (one for React commit, one for layout), then
-  // serialize each <svg> outerHTML and pass them into openAwardSharePdf.
+  // mounts a single CarrierSankey in snapshot mode (phaseIndex = last visible
+  // column index, so all columns render fully visible with no animation). We
+  // wait two RAF ticks (one for React commit, one for layout), serialize the
+  // <svg> outerHTML, and hand it to openAwardSharePdf.
   useEffect(() => {
     if (!pendingExport) return;
     let cancelled = false;
@@ -727,32 +835,10 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
       raf2 = requestAnimationFrame(() => {
         if (cancelled) return;
         const root = snapshotContainerRef.current;
-        const cells = root ? root.querySelectorAll('[data-snapshot-phase]') : [];
-        const phaseSnapshots = [];
-        cells.forEach(cell => {
-          const phaseIndex = parseInt(cell.getAttribute('data-snapshot-phase'), 10);
-          const label = cell.getAttribute('data-snapshot-label') || '';
-          const svg = cell.querySelector('svg');
-          if (svg) {
-            phaseSnapshots.push({
-              phaseIndex,
-              label,
-              svgHtml: svg.outerHTML,
-              viewBox: svg.getAttribute('viewBox') || '',
-            });
-          }
-        });
-
-        // Sanity check: scaffold should produce identical viewBoxes across
-        // phases. Mismatches indicate a regression in the two-pass builder.
-        if (phaseSnapshots.length > 1) {
-          const first = phaseSnapshots[0].viewBox;
-          const drift = phaseSnapshots.find(s => s.viewBox && s.viewBox !== first);
-          if (drift) {
-            console.warn('[AnnualAwardBuilder] Phase Sankey viewBox drift detected — scaffold may not be stable.',
-              { expected: first, drift: drift.viewBox });
-          }
-        }
+        const svg = root ? root.querySelector('svg') : null;
+        const sankey = svg
+          ? { svgHtml: svg.outerHTML, viewBox: svg.getAttribute('viewBox') || '' }
+          : null;
 
         const carrierObj = pendingExport.carrierSCAC
           ? exportCarrierOptions.find(c => c.scac === pendingExport.carrierSCAC)
@@ -762,11 +848,9 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
           : pendingExport.carrierSCAC || '';
 
         const distinctCarriers = new Set(displayCarrierSummary.filter(c => c.awardedLanes > 0).map(c => c.scac));
-        const sankeyHtml = sankeyRef.current?.innerHTML || '';
 
         openAwardSharePdf({
-          sankeyHtml,
-          phaseSnapshots,
+          sankey,
           phaseSequence,
           viewType: pendingExport.viewType,
           carrierName: carrierDisplayName,
@@ -782,7 +866,6 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
           pricingMode: displayPricingMode,
         });
 
-        // Unmount snapshots after the print window is opened.
         setPendingExport(null);
       });
     });
@@ -1175,18 +1258,19 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
                   availableScenarios={phaseSelectorScenarios}
                   onChange={setPhaseSequence}
                 />
-                <PhaseScrubber
+                <RevealController
                   phaseSequence={phaseSequence}
-                  currentPhaseIndex={currentPhaseIndex}
-                  animationProgress={animationProgress}
-                  onChange={handleScrubberChange}
+                  columnCount={visibleColumnCount}
+                  revealedColumnCount={revealedColumnCount}
+                  transitionProgress={transitionProgress}
+                  onChange={handleRevealChange}
                 />
                 <CarrierSankey
                   ref={sankeyRef}
                   phaseSequence={phaseSequence}
                   awardContext={sankeyAwardContext}
-                  currentPhaseIndex={currentPhaseIndex}
-                  animationProgress={animationProgress}
+                  revealedColumnCount={revealedColumnCount}
+                  transitionProgress={transitionProgress}
                 />
               </div>
             )}
@@ -1453,12 +1537,13 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
         </p>
       </div>
 
-      {/* Hidden snapshot container — mounts one CarrierSankey per phase in
-          snapshot mode (phaseIndex prop) when an export is pending. The
-          useEffect above captures their <svg> outerHTML on the next two RAF
-          ticks, then unmounts by clearing pendingExport. Off-screen rather
-          than display:none so the SVG actually lays out and serializes. */}
-      {pendingExport && (
+      {/* Hidden snapshot container — mounts one CarrierSankey in snapshot
+          mode (phaseIndex = last visible column) when an export is pending.
+          All columns are fully visible with no animation. The useEffect
+          above captures the <svg> outerHTML on the next two RAF ticks, then
+          unmounts by clearing pendingExport. Off-screen rather than
+          display:none so the SVG actually lays out and serializes. */}
+      {pendingExport && visibleColumnCount > 0 && (
         <div
           ref={snapshotContainerRef}
           aria-hidden="true"
@@ -1466,29 +1551,17 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
             position: 'fixed',
             left: '-10000px',
             top: 0,
-            width: 1100,
+            width: 1400,
             pointerEvents: 'none',
             opacity: 0,
           }}
         >
-          {[
-            { phaseIndex: 0, label: phaseSequence.baseline.label || 'Historic' },
-            ...phaseSequence.phases.map((p, i) => ({ phaseIndex: i + 1, label: p.label || `Phase ${i + 1}` })),
-          ].map(({ phaseIndex, label }) => (
-            <div
-              key={phaseIndex}
-              data-snapshot-phase={phaseIndex}
-              data-snapshot-label={label}
-              style={{ width: 1100 }}
-            >
-              <CarrierSankey
-                phaseSequence={phaseSequence}
-                awardContext={sankeyAwardContext}
-                phaseIndex={phaseIndex}
-                width={1100}
-              />
-            </div>
-          ))}
+          <CarrierSankey
+            phaseSequence={phaseSequence}
+            awardContext={sankeyAwardContext}
+            phaseIndex={visibleColumnCount - 1}
+            width={1400}
+          />
         </div>
       )}
     </div>

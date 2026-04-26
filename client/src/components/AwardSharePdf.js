@@ -5,11 +5,11 @@
  * Zero dependencies — uses window.open() + print-optimized HTML + window.print().
  *
  * Page order:
- *   1. Branded cover page (stacked logo, scenario sequence, prepared-by)
+ *   1. Branded cover page (stacked logo, column sequence, prepared-by)
  *   2. KPI summary
  *   3. Carrier Summary (condensed, with network total)
  *   4. Award Summary by Origin
- *   5. Phase Sankey small-multiples (Historic | Phase 1 | Phase 2 | ...)
+ *   5. Multi-stage Sankey (single full-page diagram showing all columns)
  *   6. Carrier mix by origin state tables
  *
  * Every content page carries the navy header/footer bands with horizontal
@@ -19,11 +19,10 @@
  *   - 'customer' -> uses customerName
  *   - 'carrier'  -> uses carrierName (single carrier picked in the export UI)
  *
- * Snapshot mode (Prompt 1's CarrierSankey contract) is consumed externally:
- * AnnualAwardBuilder mounts hidden CarrierSankey instances with phaseIndex
- * props, captures each <svg> outerHTML, and passes them in here as
- * `phaseSnapshots: [{ label, svgHtml, viewBox }]`. We render the snapshots
- * directly — no animation, no morph state.
+ * Snapshot mode (CarrierSankey's phaseIndex contract) is consumed externally:
+ * AnnualAwardBuilder mounts a single hidden CarrierSankey with
+ * phaseIndex = (visibleColumnCount - 1), captures the <svg> outerHTML, and
+ * passes it in as `sankey: { svgHtml, viewBox }`.
  *
  * Logo loading uses the brand assets in /brand/. SVG would take precedence
  * if present (path falls back via <img onerror>). When neither is reachable
@@ -66,25 +65,6 @@ function getConfidentialityLine(viewType, customerName, carrierName) {
     return 'Confidential between Dynamic Logistix and Recipient';
   }
   return `Confidential between Dynamic Logistix and ${counterparty}`;
-}
-
-/**
- * Decide grid column count for the small-multiples layout based on phase
- * count. 1 phase = 1-up (just historic), 2 phases = 2-up, 3+ = 3-up with
- * page wrap at 4+. Chunks the phase array accordingly.
- */
-function chunkPhasesForLayout(phaseSnapshots) {
-  const n = phaseSnapshots.length;
-  if (n === 0) return { cols: 1, pages: [] };
-  if (n === 1) return { cols: 1, pages: [phaseSnapshots] };
-  if (n === 2) return { cols: 2, pages: [phaseSnapshots] };
-  if (n === 3) return { cols: 3, pages: [phaseSnapshots] };
-  // 4+: 3-up, wrap to additional page(s)
-  const pages = [];
-  for (let i = 0; i < n; i += 3) {
-    pages.push(phaseSnapshots.slice(i, i + 3));
-  }
-  return { cols: 3, pages };
 }
 
 const CARRIER_COLORS = [
@@ -338,13 +318,10 @@ function buildOriginMixSection(origin, index) {
  * and triggers the print dialog for "Save as PDF".
  *
  * @param {Object} params
- * @param {string} [params.sankeyHtml] - legacy single-Sankey HTML (still
- *   accepted for back-compat); ignored when phaseSnapshots is provided.
- * @param {Array<{label: string, svgHtml: string, viewBox?: string}>} [params.phaseSnapshots]
- *   Snapshot SVGs captured from hidden CarrierSankey instances, one per phase.
- *   When present, drives the Phase Sankey Small-Multiples section.
- * @param {object} [params.phaseSequence] - { baseline, phases } from PhaseSelector,
- *   used on the cover page to print the phase sequence list.
+ * @param {{ svgHtml: string, viewBox?: string }} [params.sankey] - single
+ *   snapshot SVG of the multi-stage Sankey (all columns visible, no animation).
+ * @param {object} [params.phaseSequence] - { mode, baseline, columns } —
+ *   used on the cover page to render the column sequence summary.
  * @param {'customer'|'carrier'} [params.viewType] - drives counterparty +
  *   confidentiality line. Defaults to 'customer'.
  * @param {string} [params.carrierName] - required when viewType='carrier'.
@@ -360,8 +337,7 @@ function buildOriginMixSection(origin, index) {
  * @param {string} [params.pricingMode]
  */
 export function openAwardSharePdf({
-  sankeyHtml,
-  phaseSnapshots,
+  sankey,
   phaseSequence,
   viewType,
   carrierName,
@@ -405,26 +381,12 @@ export function openAwardSharePdf({
   const originSummaryHtml = buildOriginSummarySection(originSummaries);
   const originMixSections = (originMix?.origins || []).map((o, i) => buildOriginMixSection(o, i)).join('');
 
-  // Sanity check: every snapshot SVG should share the same viewBox because
-  // the two-pass scaffold is stable across phases. Different viewBoxes
-  // indicate a regression in the scaffold.
-  const snapshots = Array.isArray(phaseSnapshots) ? phaseSnapshots.filter(s => s && s.svgHtml) : [];
-  if (snapshots.length > 1) {
-    const first = snapshots[0].viewBox;
-    const mismatch = snapshots.find(s => s.viewBox && s.viewBox !== first);
-    if (mismatch && typeof console !== 'undefined' && console.warn) {
-      console.warn('[AwardSharePdf] Phase Sankey viewBox drift detected — scaffold may not be stable.',
-        { expected: first, mismatch: mismatch.viewBox });
-    }
-  }
-
-  const { cols: phaseCols, pages: phasePages } = chunkPhasesForLayout(snapshots);
+  const sankeySvgHtml = sankey?.svgHtml || '';
 
   // Page count drives the "Page N of M" footer label. Cover + KPIs + Carrier
-  // Summary + Origin Summary + sankey pages + origin mix.
-  const sankeyPageCount = phasePages.length || 1;
+  // Summary + Origin Summary + Sankey (one page) + origin mix.
   const totalPages = 1 /* cover */ + 1 /* KPIs */ + 1 /* Carrier summary */
-    + 1 /* Origin summary */ + sankeyPageCount + 1 /* Origin mix */;
+    + 1 /* Origin summary */ + 1 /* Sankey */ + 1 /* Origin mix */;
 
   // Builds the navy header band rendered at the top of every content page.
   const headerBand = (pageN) => `
@@ -442,16 +404,32 @@ export function openAwardSharePdf({
     </div>`;
 
   // --- Cover page (Section A) -----------------------------------------------
+  // Column-aware sequence summary. Baseline (if present) renders first,
+  // followed by user columns. Each row labels the column type alongside the
+  // user-facing label.
   const phaseRows = (() => {
     if (!phaseSequence) return '';
     const rows = [];
-    rows.push(`<tr><td style="padding:6px 12px;font-weight:700;color:#002144;">Historic</td><td style="padding:6px 12px;color:#334155;">${escHtml(phaseSequence.baseline?.scenarioName || 'Incumbent shipments')}</td></tr>`);
-    (phaseSequence.phases || []).forEach((p, i) => {
-      rows.push(`<tr><td style="padding:6px 12px;font-weight:700;color:#002144;">Phase ${i + 1}</td><td style="padding:6px 12px;color:#334155;">${escHtml(p.scenarioName || p.label || '')}</td></tr>`);
+    if (phaseSequence.baseline) {
+      rows.push(`<tr><td style="padding:6px 12px;font-weight:700;color:#002144;">Historic</td><td style="padding:6px 12px;color:#334155;">${escHtml(phaseSequence.baseline?.scenarioName || 'Incumbent shipments')}</td></tr>`);
+    }
+    (phaseSequence.columns || []).forEach((c) => {
+      let typeLabel;
+      let detail;
+      if (c.type === 'rateAdjustedHistoric') {
+        typeLabel = 'Historic Carrier — New Rate';
+        detail = 'Same incumbents, repriced at the bid rates';
+      } else if (c.type === 'scenario') {
+        typeLabel = c.label || '';
+        detail = c.scenarioName || '';
+      } else {
+        typeLabel = c.label || c.type;
+        detail = '';
+      }
+      rows.push(`<tr><td style="padding:6px 12px;font-weight:700;color:#002144;">${escHtml(typeLabel)}</td><td style="padding:6px 12px;color:#334155;">${escHtml(detail)}</td></tr>`);
     });
-    if (rows.length === 1) {
-      // Baseline-only; flag this so the cover doesn't look incomplete.
-      rows.push('<tr><td colspan="2" style="padding:8px 12px;color:#64748b;font-style:italic;text-align:center;">No comparison phases configured — historic baseline only.</td></tr>');
+    if (rows.length <= 1) {
+      rows.push('<tr><td colspan="2" style="padding:8px 12px;color:#64748b;font-style:italic;text-align:center;">No comparison columns configured.</td></tr>');
     }
     return rows.join('');
   })();
@@ -532,44 +510,40 @@ export function openAwardSharePdf({
       ${footerBand(4)}
     </div>`;
 
-  // --- Phase Sankey small-multiples (Section B) -----------------------------
-  const sankeyPagesHtml = (() => {
-    // Legacy fallback when no phase snapshots were captured: render the
-    // single-sankey HTML the way the old export did.
-    if (snapshots.length === 0) {
-      const pageN = 5;
-      return `
-        <div class="brat-pdf-page">
-          ${headerBand(pageN)}
-          <div style="flex:1;padding:24px;display:flex;flex-direction:column;">
-            <div class="section-title">Carrier Freight Flow &mdash; Incumbent &rarr; Awarded</div>
-            <div class="sankey-container" style="flex:1;">
-              ${sankeyHtml || '<p style="color:#94a3b8;text-align:center;padding:24px;">No Sankey data available</p>'}
-            </div>
-          </div>
-          ${footerBand(pageN)}
-        </div>`;
-    }
-    return phasePages.map((pageSnapshots, pageIdx) => {
-      const pageN = 5 + pageIdx;
-      const cellsHtml = pageSnapshots.map(s => `
-        <div class="brat-pdf-sankey-cell">
-          <div class="brat-pdf-sankey-label">${escHtml(s.label || '')}</div>
-          <div class="brat-pdf-sankey-svg">${s.svgHtml || ''}</div>
-        </div>`).join('');
-      return `
-        <div class="brat-pdf-page">
-          ${headerBand(pageN)}
-          <div class="brat-pdf-body" style="--phase-cols:${phaseCols};">
-            ${cellsHtml}
-          </div>
-          ${footerBand(pageN)}
-        </div>`;
-    }).join('');
+  // --- Multi-stage Sankey page ---------------------------------------------
+  // Single full-page diagram. Phase summary strip mirrors the cover page so
+  // readers can match SVG columns to their column labels.
+  const sankeyPageN = 5;
+  const phaseSummaryStrip = (() => {
+    if (!phaseSequence) return '';
+    const items = [];
+    if (phaseSequence.baseline) items.push('Historic');
+    (phaseSequence.columns || []).forEach(c => {
+      if (c.type === 'rateAdjustedHistoric') items.push('Historic Carrier — New Rate');
+      else if (c.type === 'scenario') items.push(c.label || 'Scenario');
+      else items.push(c.label || c.type);
+    });
+    if (items.length === 0) return '';
+    return `<div style="font-family:Montserrat,sans-serif;font-size:10px;color:#002144;margin-bottom:8px;">
+      ${items.map(escHtml).join(' &rarr; ')}
+    </div>`;
   })();
 
+  const sankeyPageHtml = `
+    <div class="brat-pdf-page">
+      ${headerBand(sankeyPageN)}
+      <div style="flex:1;padding:24px;display:flex;flex-direction:column;">
+        <div class="section-title">Multi-Stage Carrier Freight Flow</div>
+        ${phaseSummaryStrip}
+        <div class="sankey-container" style="flex:1;display:flex;align-items:stretch;">
+          ${sankeySvgHtml || '<p style="color:#94a3b8;text-align:center;padding:24px;flex:1;">No Sankey data available</p>'}
+        </div>
+      </div>
+      ${footerBand(sankeyPageN)}
+    </div>`;
+
   // --- Origin mix page (final content section) ------------------------------
-  const originMixPageN = 5 + sankeyPageCount;
+  const originMixPageN = 6;
   const originMixPage = `
     <div class="brat-pdf-page">
       ${headerBand(originMixPageN)}
@@ -608,10 +582,6 @@ export function openAwardSharePdf({
       .brat-pdf-cover { justify-content: center; align-items: center; text-align: center; }
       .brat-pdf-header { background: #002144; color: #FFFFFF; padding: 12px 24px; display: flex; align-items: center; gap: 16px; }
       .brat-pdf-footer { background: #002144; color: #FFFFFF; padding: 8px 24px; display: flex; justify-content: space-between; font-size: 10px; margin-top: auto; }
-      .brat-pdf-body { flex: 1; display: grid; gap: 16px; padding: 24px; grid-template-columns: repeat(var(--phase-cols, 3), 1fr); }
-      .brat-pdf-sankey-cell { display: flex; flex-direction: column; }
-      .brat-pdf-sankey-label { font-family: 'Montserrat', sans-serif; font-weight: 700; color: #002144; font-size: 14px; margin-bottom: 8px; text-align: center; }
-      .brat-pdf-sankey-cell svg { width: 100%; height: auto; }
     }
     /* Screen preview — same look pre-print so users see the output before
        hitting the system print dialog. */
@@ -621,10 +591,6 @@ export function openAwardSharePdf({
     .brat-pdf-header-name { flex: 1; text-align: center; font-family: Montserrat, sans-serif; font-weight: 700; font-size: 14px; }
     .brat-pdf-header-page { font-family: Montserrat, sans-serif; font-size: 11px; color: #FFFFFF; opacity: 0.85; }
     .brat-pdf-footer { background: #002144; color: #FFFFFF; padding: 8px 24px; display: flex; justify-content: space-between; font-size: 10px; margin-top: auto; }
-    .brat-pdf-body { flex: 1; display: grid; gap: 16px; padding: 24px; grid-template-columns: repeat(var(--phase-cols, 3), 1fr); }
-    .brat-pdf-sankey-cell { display: flex; flex-direction: column; min-width: 0; }
-    .brat-pdf-sankey-label { font-family: 'Montserrat', sans-serif; font-weight: 700; color: #002144; font-size: 14px; margin-bottom: 8px; text-align: center; }
-    .brat-pdf-sankey-svg svg { width: 100%; height: auto; max-height: 480px; }
     .kpi-tile { flex: 1; background: #002144; color: #FFFFFF; border-radius: 6px; padding: 12px 16px; text-align: center; }
     .kpi-tile .label { font-size: 8px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: #94a3b8; margin-bottom: 4px; }
     .kpi-tile .value { font-size: 18px; font-weight: 700; }
@@ -639,7 +605,7 @@ export function openAwardSharePdf({
   ${kpiPage}
   ${carrierPage}
   ${originPage}
-  ${sankeyPagesHtml}
+  ${sankeyPageHtml}
   ${originMixPage}
   <script>
     // Wait for fonts to load before printing — otherwise the print dialog

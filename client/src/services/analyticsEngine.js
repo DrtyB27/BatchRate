@@ -1943,101 +1943,190 @@ export function computeSankeyDataLegacy(lanes, annualizationFactor) {
 }
 
 /**
- * Two-pass Sankey builder for animated multi-phase comparison.
+ * Resolve carrier identity for a single lane within a column based on the
+ * column's type. `historic` and `rateAdjustedHistoric` columns key on the
+ * lane's incumbent SCAC; `scenario` columns key on the awarded SCAC.
+ */
+function laneCarrierForColumn(lane, columnType) {
+  if (columnType === 'historic' || columnType === 'rateAdjustedHistoric') {
+    return lane.historicCarrier || null;
+  }
+  return lane.carrierSCAC || null;
+}
+
+/**
+ * Per-column volume basis. Historic columns use historic spend; scenario and
+ * rate-adjusted columns use awarded annualSpend (the column's own pricing).
+ */
+function laneWeightForColumn(lane, columnType) {
+  if (columnType === 'historic') {
+    return normalizeNumber(lane.historicTotalAnnSpend || lane.annualHistoric || 0);
+  }
+  return normalizeNumber(lane.annualSpend || 0);
+}
+
+/**
+ * Build a stable, multi-stage Sankey scaffold across N visible columns and
+ * the inter-column flows between each adjacent pair.
  *
- * Pass 1 walks every phase to assemble a stable scaffold: union of carriers,
- * deterministic order by total volume across all phases, and a SCAC→color map
- * that doesn't shuffle when the active phase changes. Pass 2 emits per-phase
- * link arrays keyed by `${source}::${target}` so the morph engine in
- * CarrierSankey can match links across phases and interpolate widths.
+ * Pass 1 unions all carrier ids across every column and orders them by total
+ * cross-column volume (with `_UNASSIGNED_` pinned last). The scaffold's
+ * `colorMap` is derived from this stable order so SCAC colors don't shuffle
+ * as a column appears or fades.
  *
- * @param {object} phaseSequence - { baseline: PhaseDescriptor, phases: PhaseDescriptor[] }
- *   PhaseDescriptor: { type, label, scenarioId, scenarioName }
- * @param {object} awardContext - { lanesByPhase: Lane[][] }
- *   lanesByPhase[0] -> baseline lanes, lanesByPhase[1..N] -> phase lanes.
+ * Pass 2a aggregates per-column carrier volume into `columnData[i].nodes`.
+ * Carriers absent in a column are simply omitted from that column's nodes
+ * (their slot collapses for that column).
+ *
+ * Pass 2b builds inter-column flows between every adjacent pair (i, i+1) by
+ * walking each lane's `(sourceCarrier, targetCarrier)` based on column types
+ * and aggregating weight using the column-`i+1` annualSpend (falling back to
+ * the column-`i` lane's annualSpend when the lane only appears in column `i`).
+ *
+ * @param {object} phaseSequence - { mode, baseline?, columns[] }
+ * @param {object} awardContext - { lanesByColumn: Lane[][] } -- one lanes
+ *   array per visible column, in column order (baseline first if present).
  * @returns {{
- *   scaffold: { nodes: Array, nodeOrder: string[], colorMap: Object },
- *   phaseData: Array<{ phaseIndex: number, label: string, links: Array, totalFlow: number }>
+ *   scaffold: { carrierOrder: string[], colorMap: object, columnCount: number, columnLabels: string[] },
+ *   columnData: Array<{ columnIndex: number, label: string, type: string, nodes: Array, totalFlow: number }>,
+ *   flows: Array<{ fromColumn: number, toColumn: number, links: Array }>
  * }}
  */
 export function computeSankeyData(phaseSequence, awardContext) {
-  const baseline = phaseSequence?.baseline || { type: 'historic', label: 'Historic', scenarioId: null, scenarioName: '' };
-  const phases = Array.isArray(phaseSequence?.phases) ? phaseSequence.phases : [];
-  const phaseList = [baseline, ...phases];
+  const baseline = phaseSequence?.baseline || null;
+  const columns = Array.isArray(phaseSequence?.columns) ? phaseSequence.columns : [];
 
-  const lanesByPhase = Array.isArray(awardContext?.lanesByPhase) ? awardContext.lanesByPhase : [];
-
-  // Pre-compute per-phase link aggregates
-  const perPhase = phaseList.map((_, idx) => buildLinkMapForLanes(lanesByPhase[idx] || []));
-
-  // Pass 1 — scaffold: union sources/targets, max source/target flow per carrier
-  // across all phases. Using max (not sum) keeps node heights from inflating
-  // when the same flow is double-counted across phases.
-  const sourceFlowMax = {};
-  const targetFlowMax = {};
-  const sourceUnion = new Set();
-  const targetUnion = new Set();
-  const targetProjectedTotal = {};
-
-  for (const p of perPhase) {
-    const phaseSourceFlow = {};
-    const phaseTargetFlow = {};
-    for (const link of Object.values(p.linkMap)) {
-      phaseSourceFlow[link.source] = (phaseSourceFlow[link.source] || 0) + link.value;
-      phaseTargetFlow[link.target] = (phaseTargetFlow[link.target] || 0) + link.value;
-    }
-    for (const [id, v] of Object.entries(phaseSourceFlow)) {
-      sourceFlowMax[id] = Math.max(sourceFlowMax[id] || 0, v);
-    }
-    for (const [id, v] of Object.entries(phaseTargetFlow)) {
-      targetFlowMax[id] = Math.max(targetFlowMax[id] || 0, v);
-    }
-    for (const s of p.sourceSet) sourceUnion.add(s);
-    for (const t of p.targetSet) targetUnion.add(t);
-    for (const [scac, v] of Object.entries(p.targetProjected)) {
-      targetProjectedTotal[scac] = (targetProjectedTotal[scac] || 0) + v;
-    }
+  // Visible columns in order: baseline first if present, then user columns.
+  const visibleColumns = [];
+  if (baseline) {
+    visibleColumns.push({ type: 'historic', label: baseline.label || 'Historic' });
+  }
+  for (const c of columns) {
+    visibleColumns.push({ type: c.type, label: c.label || '' });
   }
 
-  const carrierTotalVolume = {};
-  for (const id of [...sourceUnion, ...targetUnion]) {
-    carrierTotalVolume[id] = (sourceFlowMax[id] || 0) + (targetFlowMax[id] || 0);
-  }
+  const lanesByColumn = Array.isArray(awardContext?.lanesByColumn) ? awardContext.lanesByColumn : [];
 
-  const allIds = [...new Set([...sourceUnion, ...targetUnion])];
-  const nodeOrder = allIds.sort((a, b) => {
-    if (a === '_UNASSIGNED_') return 1;
-    if (b === '_UNASSIGNED_') return -1;
-    return (carrierTotalVolume[b] || 0) - (carrierTotalVolume[a] || 0);
+  // Pass 1 — scaffold: union of carriers, sort by total cross-column volume.
+  const carrierTotals = {};
+  visibleColumns.forEach((col, idx) => {
+    const lanes = lanesByColumn[idx] || [];
+    for (const lane of lanes) {
+      const cid = laneCarrierForColumn(lane, col.type);
+      if (!cid) continue;
+      carrierTotals[cid] = (carrierTotals[cid] || 0) + laneWeightForColumn(lane, col.type);
+    }
   });
 
-  const nodes = nodeOrder.map(id => {
-    const isSource = sourceUnion.has(id);
-    const isTarget = targetUnion.has(id);
-    const side = isSource && isTarget ? 'both' : isSource ? 'left' : 'right';
-    return { id, label: id, side, projectedSpend: targetProjectedTotal[id] || 0 };
+  const carrierOrder = Object.keys(carrierTotals).sort((a, b) => {
+    if (a === '_UNASSIGNED_') return 1;
+    if (b === '_UNASSIGNED_') return -1;
+    return (carrierTotals[b] || 0) - (carrierTotals[a] || 0);
   });
 
   const colorMap = {};
-  nodeOrder.forEach((id, i) => {
-    if (id === '_UNASSIGNED_') return;
-    colorMap[id] = SANKEY_CARRIER_PALETTE[i % SANKEY_CARRIER_PALETTE.length];
+  let colorIdx = 0;
+  for (const id of carrierOrder) {
+    if (id === '_UNASSIGNED_') continue;
+    colorMap[id] = SANKEY_CARRIER_PALETTE[colorIdx % SANKEY_CARRIER_PALETTE.length];
+    colorIdx++;
+  }
+
+  // Pass 2a — per-column nodes (carriers present in this column with weight > 0).
+  const columnData = visibleColumns.map((col, idx) => {
+    const lanes = lanesByColumn[idx] || [];
+    const totalsByCarrier = {};
+    for (const lane of lanes) {
+      const cid = laneCarrierForColumn(lane, col.type);
+      if (!cid) continue;
+      totalsByCarrier[cid] = (totalsByCarrier[cid] || 0) + laneWeightForColumn(lane, col.type);
+    }
+    const totalFlow = Object.values(totalsByCarrier).reduce((s, v) => s + v, 0);
+    // Order this column's nodes following the global carrierOrder so the
+    // top-volume carrier sits at the top across every column.
+    const nodes = [];
+    for (const cid of carrierOrder) {
+      const share = totalsByCarrier[cid] || 0;
+      if (share <= 0) continue;
+      nodes.push({ carrierId: cid, share, label: cid });
+    }
+    return {
+      columnIndex: idx,
+      label: col.label,
+      type: col.type,
+      nodes,
+      totalFlow,
+    };
   });
 
-  // Pass 2 — per-phase links keyed by source::target
-  const phaseData = phaseList.map((phase, idx) => {
-    const linkMap = perPhase[idx]?.linkMap || {};
-    const links = Object.values(linkMap)
-      .filter(l => l.width > 0)
-      .map(l => ({ key: l.key, source: l.source, target: l.target, width: l.width, value: l.value, lanes: l.lanes }))
-      .sort((a, b) => b.width - a.width);
-    const totalFlow = links.reduce((s, l) => s + l.width, 0);
-    return { phaseIndex: idx, label: phase.label || (idx === 0 ? 'Historic' : `Phase ${idx}`), links, totalFlow };
-  });
+  // Pass 2b — inter-column flows. For each adjacent pair build a lane-keyed
+  // source map and target map, then aggregate weight per (src, tgt) pair.
+  // Weight rule: prefer the column-(i+1) lane's annualSpend (the rate the
+  // shipment will actually pay in the destination column); fall back to
+  // column-i's annualSpend if the lane is absent in column i+1 (e.g. carrier
+  // dropped out). Documented inline so the convention sticks.
+  const flows = [];
+  for (let i = 0; i < visibleColumns.length - 1; i++) {
+    const fromCol = visibleColumns[i];
+    const toCol = visibleColumns[i + 1];
+    const fromLanes = lanesByColumn[i] || [];
+    const toLanes = lanesByColumn[i + 1] || [];
+
+    const fromByLane = new Map(); // laneKey -> { carrier, lane }
+    for (const lane of fromLanes) {
+      const cid = laneCarrierForColumn(lane, fromCol.type);
+      if (!cid || !lane.laneKey) continue;
+      // First-write wins; later duplicates aggregate under the same key.
+      if (!fromByLane.has(lane.laneKey)) {
+        fromByLane.set(lane.laneKey, { carrier: cid, lane });
+      }
+    }
+    const toByLane = new Map();
+    for (const lane of toLanes) {
+      const cid = laneCarrierForColumn(lane, toCol.type);
+      if (!cid || !lane.laneKey) continue;
+      if (!toByLane.has(lane.laneKey)) {
+        toByLane.set(lane.laneKey, { carrier: cid, lane });
+      }
+    }
+
+    const linkMap = {};
+    const allKeys = new Set([...fromByLane.keys(), ...toByLane.keys()]);
+    for (const laneKey of allKeys) {
+      const fromEntry = fromByLane.get(laneKey);
+      const toEntry = toByLane.get(laneKey);
+      const src = fromEntry?.carrier || null;
+      const tgt = toEntry?.carrier || null;
+      if (!src || !tgt) continue;
+      // Prefer the destination column's spend; fall back to source if absent.
+      const weight = toEntry
+        ? normalizeNumber(toEntry.lane.annualSpend || 0)
+        : normalizeNumber(fromEntry.lane.annualSpend || 0);
+      if (weight <= 0) continue;
+      const key = `${src}::${tgt}`;
+      if (!linkMap[key]) {
+        linkMap[key] = { key, sourceCarrier: src, targetCarrier: tgt, weight: 0, lanes: 0 };
+      }
+      linkMap[key].weight += weight;
+      linkMap[key].lanes++;
+    }
+
+    flows.push({
+      fromColumn: i,
+      toColumn: i + 1,
+      links: Object.values(linkMap).sort((a, b) => b.weight - a.weight),
+    });
+  }
 
   return {
-    scaffold: { nodes, nodeOrder, colorMap, sourceFlowMax, targetFlowMax },
-    phaseData,
+    scaffold: {
+      carrierOrder,
+      colorMap,
+      columnCount: visibleColumns.length,
+      columnLabels: visibleColumns.map(c => c.label),
+    },
+    columnData,
+    flows,
   };
 }
 

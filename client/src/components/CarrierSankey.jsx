@@ -4,9 +4,9 @@ import { computeSankeyData, SANKEY_CARRIER_PALETTE } from '../services/analytics
 const CARRIER_PALETTE = SANKEY_CARRIER_PALETTE;
 
 const COLORS = {
-  retained: '#39b6e6',   // DLX bright blue — retained freight badge
-  migrating: '#94a3b8',  // fallback gray
-  unassigned: '#ef4444', // red-500 — unassigned target
+  retained: '#39b6e6',
+  migrating: '#94a3b8',
+  unassigned: '#ef4444',
   navy: '#002144',
 };
 
@@ -24,41 +24,11 @@ function fmtMoney(v) {
 }
 
 /**
- * Linear interpolation of link widths between two phases. Links absent in one
- * side collapse to width 0 so reserved slots stay aligned with the scaffold.
- */
-function interpolateLinks(fromLinks, toLinks, t) {
-  const fromMap = new Map((fromLinks || []).map(l => [l.key || `${l.source}::${l.target}`, l]));
-  const toMap = new Map((toLinks || []).map(l => [l.key || `${l.source}::${l.target}`, l]));
-  const keys = new Set([...fromMap.keys(), ...toMap.keys()]);
-  const out = [];
-  for (const key of keys) {
-    const f = fromMap.get(key);
-    const tt = toMap.get(key);
-    const fromW = f ? (f.width != null ? f.width : f.value || 0) : 0;
-    const toW = tt ? (tt.width != null ? tt.width : tt.value || 0) : 0;
-    const base = tt || f;
-    if (!base) continue;
-    out.push({
-      key,
-      source: base.source,
-      target: base.target,
-      width: fromW + (toW - fromW) * t,
-      value: fromW + (toW - fromW) * t,
-      lanes: (tt && tt.lanes) || (f && f.lanes) || 0,
-    });
-  }
-  return out;
-}
-
-/**
  * Collapse bottom carriers into "Other (N)" if more than MAX_SIDE_NODES on either side.
- * Used in legacy single-phase mode only — phase mode keeps the scaffold stable.
+ * Used in legacy single-phase mode only — consumed by ConsolidationCompare.
  */
 function collapseData(data) {
   if (!data || !data.links.length) return data;
-
-  // Compute total flow per source and target
   const sourceFlow = {};
   const targetFlow = {};
   for (const l of data.links) {
@@ -70,15 +40,8 @@ function collapseData(data) {
   const needCollapseRight = Object.keys(targetFlow).length > MAX_SIDE_NODES + 5;
   if (!needCollapseLeft && !needCollapseRight) return data;
 
-  // Determine top sources and targets
-  const topSources = Object.entries(sourceFlow)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, MAX_SIDE_NODES)
-    .map(e => e[0]);
-  const topTargets = Object.entries(targetFlow)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, MAX_SIDE_NODES)
-    .map(e => e[0]);
+  const topSources = Object.entries(sourceFlow).sort((a, b) => b[1] - a[1]).slice(0, MAX_SIDE_NODES).map(e => e[0]);
+  const topTargets = Object.entries(targetFlow).sort((a, b) => b[1] - a[1]).slice(0, MAX_SIDE_NODES).map(e => e[0]);
 
   const topSourceSet = new Set(needCollapseLeft ? topSources : Object.keys(sourceFlow));
   const topTargetSet = new Set(needCollapseRight ? topTargets : Object.keys(targetFlow));
@@ -88,7 +51,6 @@ function collapseData(data) {
   const otherSourceId = collapsedSourceCount > 0 ? `Other (${collapsedSourceCount})` : null;
   const otherTargetId = collapsedTargetCount > 0 ? `Other (${collapsedTargetCount})` : null;
 
-  // Rebuild links with collapsed IDs
   const newLinkMap = {};
   for (const l of data.links) {
     const src = topSourceSet.has(l.source) ? l.source : otherSourceId;
@@ -102,13 +64,11 @@ function collapseData(data) {
   const links = Object.values(newLinkMap).filter(l => l.value > 0);
   links.sort((a, b) => b.value - a.value);
 
-  // Build projected spend map from original nodes
   const projMap = {};
   for (const n of data.nodes) {
     if (n.projectedSpend) projMap[n.id] = n.projectedSpend;
   }
 
-  // Rebuild nodes
   const allSourceIds = new Set(links.map(l => l.source));
   const allTargetIds = new Set(links.map(l => l.target));
   const allIds = new Set([...allSourceIds, ...allTargetIds]);
@@ -116,7 +76,6 @@ function collapseData(data) {
   for (const id of allIds) {
     const isSource = allSourceIds.has(id);
     const isTarget = allTargetIds.has(id);
-    // Sum projected spend for collapsed "Other" nodes
     let ps = projMap[id] || 0;
     if (id === otherTargetId) {
       for (const [nid, spend] of Object.entries(projMap)) {
@@ -135,56 +94,34 @@ function collapseData(data) {
 }
 
 /**
- * Compute layout positions for Sankey nodes and links. When `flowOverride`
- * is provided (phase mode), node heights are positioned from those fixed
- * scaffold flows so absent carriers in the active phase still hold their slot.
+ * Legacy two-column layout — used by ConsolidationCompare via the `data` prop.
+ * Lays out left source nodes, right target nodes, and bezier links between them.
  */
-function computeLayout(data, width, height, flowOverride) {
+function computeLegacyLayout(data, width, height) {
   const padding = { top: 10, bottom: 10, left: 140, right: 140 };
   const usableHeight = height - padding.top - padding.bottom;
   const usableWidth = width - padding.left - padding.right;
 
-  // Compute total flow per source/target — either from override scaffold
-  // (phase mode, stable across phases) or from the active links (legacy).
   const sourceFlow = {};
   const targetFlow = {};
-  if (flowOverride) {
-    for (const [id, v] of Object.entries(flowOverride.sourceFlowMax || {})) sourceFlow[id] = v;
-    for (const [id, v] of Object.entries(flowOverride.targetFlowMax || {})) targetFlow[id] = v;
-  } else {
-    for (const l of data.links) {
-      sourceFlow[l.source] = (sourceFlow[l.source] || 0) + l.value;
-      targetFlow[l.target] = (targetFlow[l.target] || 0) + l.value;
-    }
+  for (const l of data.links) {
+    sourceFlow[l.source] = (sourceFlow[l.source] || 0) + l.value;
+    targetFlow[l.target] = (targetFlow[l.target] || 0) + l.value;
   }
 
-  // Sort source/target lists. For phase mode, honor the scaffold's nodeOrder
-  // so the first-listed (highest-volume) carrier always sits at the top slot.
-  const orderRank = new Map();
-  if (flowOverride && Array.isArray(flowOverride.nodeOrder)) {
-    flowOverride.nodeOrder.forEach((id, i) => orderRank.set(id, i));
-  }
-  const cmp = (a, b) => {
-    const ra = orderRank.has(a[0]) ? orderRank.get(a[0]) : Infinity;
-    const rb = orderRank.has(b[0]) ? orderRank.get(b[0]) : Infinity;
-    if (ra !== rb) return ra - rb;
-    return b[1] - a[1];
-  };
-  const leftIds = Object.entries(sourceFlow).sort(cmp).map(e => e[0]);
-  const rightIds = Object.entries(targetFlow).sort(cmp).map(e => e[0]);
+  const leftIds = Object.entries(sourceFlow).sort((a, b) => b[1] - a[1]).map(e => e[0]);
+  const rightIds = Object.entries(targetFlow).sort((a, b) => b[1] - a[1]).map(e => e[0]);
 
   if (leftIds.length === 0 || rightIds.length === 0) return { leftNodes: [], rightNodes: [], paths: [] };
 
   const totalSourceFlow = Object.values(sourceFlow).reduce((s, v) => s + v, 0);
   const totalTargetFlow = Object.values(targetFlow).reduce((s, v) => s + v, 0);
 
-  // Position nodes vertically — height proportional to flow
   function positionColumn(ids, flowMap, totalFlow, x) {
     const totalGap = Math.max(0, (ids.length - 1) * NODE_GAP);
     const availableHeight = usableHeight - totalGap;
     const nodes = [];
     let y = padding.top;
-
     for (const id of ids) {
       const flow = flowMap[id] || 0;
       const h = Math.max(MIN_NODE_HEIGHT, (flow / totalFlow) * availableHeight);
@@ -194,7 +131,6 @@ function computeLayout(data, width, height, flowOverride) {
     return nodes;
   }
 
-  // Build projected spend lookup from data nodes
   const projSpendMap = {};
   for (const n of data.nodes) {
     if (n.projectedSpend) projSpendMap[n.id] = n.projectedSpend;
@@ -204,7 +140,6 @@ function computeLayout(data, width, height, flowOverride) {
   const rightX = padding.left + usableWidth - NODE_WIDTH;
   const leftNodes = positionColumn(leftIds, sourceFlow, totalSourceFlow, leftX);
   const rightNodes = positionColumn(rightIds, targetFlow, totalTargetFlow, rightX);
-  // Attach projected spend to right nodes
   for (const n of rightNodes) {
     n.projectedSpend = projSpendMap[n.id] || 0;
   }
@@ -214,13 +149,11 @@ function computeLayout(data, width, height, flowOverride) {
   const rightMap = {};
   for (const n of rightNodes) rightMap[n.id] = n;
 
-  // Track current y offset within each node for stacking links
   const leftOffset = {};
   const rightOffset = {};
   for (const n of leftNodes) leftOffset[n.id] = 0;
   for (const n of rightNodes) rightOffset[n.id] = 0;
 
-  // Sort links by source flow then target flow for cleaner crossing
   const sortedLinks = [...data.links].sort((a, b) => {
     const sa = sourceFlow[a.source] || 0;
     const sb = sourceFlow[b.source] || 0;
@@ -263,15 +196,172 @@ function computeLayout(data, width, height, flowOverride) {
   return { leftNodes, rightNodes, paths };
 }
 
+/**
+ * N-column layout. Each column is a phase; carriers are nodes within a column;
+ * inter-column flows are bezier links between adjacent columns. Carriers absent
+ * in a column collapse to no slot for that column.
+ */
+function computeNColumnLayout(scaffold, columnData, flows, width, height) {
+  const padding = { top: 16, bottom: 16, left: 32, right: 32 };
+  const columnCount = scaffold.columnCount;
+  if (columnCount <= 0) return { columns: [], paths: [] };
+
+  const usableHeight = height - padding.top - padding.bottom;
+  const usableWidth = width - padding.left - padding.right;
+
+  // Center each column in its slot. With N columns, columnSlotWidth allots
+  // equal horizontal space per column; the node sits at the slot's left edge
+  // and label/spacing fits into the rest of the slot.
+  const columnSlotWidth = columnCount > 1
+    ? (usableWidth - NODE_WIDTH) / (columnCount - 1)
+    : 0;
+
+  const columns = columnData.map((col, idx) => {
+    const x = padding.left + (columnCount > 1 ? idx * columnSlotWidth : (usableWidth - NODE_WIDTH) / 2);
+    const totalFlow = col.totalFlow;
+    const visibleNodes = col.nodes.length;
+    const totalGap = Math.max(0, (visibleNodes - 1) * NODE_GAP);
+    const availableHeight = usableHeight - totalGap;
+
+    const nodes = [];
+    let y = padding.top;
+    for (const node of col.nodes) {
+      const ratio = totalFlow > 0 ? node.share / totalFlow : 0;
+      const h = Math.max(MIN_NODE_HEIGHT, ratio * availableHeight);
+      nodes.push({
+        carrierId: node.carrierId,
+        x,
+        y,
+        width: NODE_WIDTH,
+        height: h,
+        flow: node.share,
+      });
+      y += h + NODE_GAP;
+    }
+
+    return {
+      columnIndex: idx,
+      label: col.label,
+      type: col.type,
+      x,
+      nodes,
+      totalFlow,
+    };
+  });
+
+  // Build per-column carrierId -> node lookup
+  const nodeMap = columns.map(col => {
+    const m = {};
+    for (const n of col.nodes) m[n.carrierId] = n;
+    return m;
+  });
+
+  // Track stacking offsets per column-side. fromOffset[col][carrierId] is
+  // the running outbound y-offset within that column's right edge; toOffset
+  // tracks inbound stacking on the left edge of column+1.
+  const fromOffset = columns.map(col => {
+    const m = {};
+    for (const n of col.nodes) m[n.carrierId] = 0;
+    return m;
+  });
+  const toOffset = columns.map(col => {
+    const m = {};
+    for (const n of col.nodes) m[n.carrierId] = 0;
+    return m;
+  });
+
+  // Sort each flow's links so bands stack consistently top-to-bottom by the
+  // global carrier order on each side. We use the source-side y-position then
+  // target-side y-position as tiebreaker so crossings stay tidy.
+  const orderRank = new Map();
+  scaffold.carrierOrder.forEach((id, i) => orderRank.set(id, i));
+
+  const paths = [];
+  for (const flow of flows) {
+    const fromIdx = flow.fromColumn;
+    const toIdx = flow.toColumn;
+    const sortedLinks = [...flow.links].sort((a, b) => {
+      const ra = orderRank.has(a.sourceCarrier) ? orderRank.get(a.sourceCarrier) : Infinity;
+      const rb = orderRank.has(b.sourceCarrier) ? orderRank.get(b.sourceCarrier) : Infinity;
+      if (ra !== rb) return ra - rb;
+      const ta = orderRank.has(a.targetCarrier) ? orderRank.get(a.targetCarrier) : Infinity;
+      const tb = orderRank.has(b.targetCarrier) ? orderRank.get(b.targetCarrier) : Infinity;
+      return ta - tb;
+    });
+
+    for (const link of sortedLinks) {
+      const sNode = nodeMap[fromIdx][link.sourceCarrier];
+      const tNode = nodeMap[toIdx][link.targetCarrier];
+      if (!sNode || !tNode) continue;
+
+      const sRatio = sNode.flow > 0 ? link.weight / sNode.flow : 0;
+      const tRatio = tNode.flow > 0 ? link.weight / tNode.flow : 0;
+      const sHeight = Math.max(MIN_STROKE, sRatio * sNode.height);
+      const tHeight = Math.max(MIN_STROKE, tRatio * tNode.height);
+
+      const sy = sNode.y + fromOffset[fromIdx][link.sourceCarrier];
+      const ty = tNode.y + toOffset[toIdx][link.targetCarrier];
+      fromOffset[fromIdx][link.sourceCarrier] += sHeight;
+      toOffset[toIdx][link.targetCarrier] += tHeight;
+
+      const x0 = sNode.x + NODE_WIDTH;
+      const x1 = tNode.x;
+      const midX = (x0 + x1) / 2;
+
+      const isRetained = link.sourceCarrier === link.targetCarrier;
+
+      paths.push({
+        link,
+        fromColumn: fromIdx,
+        toColumn: toIdx,
+        d: `M${x0},${sy + sHeight / 2} C${midX},${sy + sHeight / 2} ${midX},${ty + tHeight / 2} ${x1},${ty + tHeight / 2}`,
+        strokeWidth: Math.max(MIN_STROKE, (sHeight + tHeight) / 2),
+        isRetained,
+      });
+    }
+  }
+
+  return { columns, paths };
+}
+
+/**
+ * Compute per-column opacity vector for the reveal animation.
+ *  - In snapshot mode (`phaseIndex` provided): columns 0..phaseIndex are 1, rest are 0.
+ *  - In animated mode: columns < revealedColumnCount are 1, the column at
+ *    revealedColumnCount fades in via transitionProgress, beyond is 0.
+ *
+ *  Returns an array length === columnCount.
+ */
+function computeColumnOpacities(columnCount, phaseIndex, revealedColumnCount, transitionProgress) {
+  const out = new Array(columnCount).fill(0);
+  if (typeof phaseIndex === 'number') {
+    const cap = Math.max(0, Math.min(phaseIndex, columnCount - 1));
+    for (let i = 0; i <= cap; i++) out[i] = 1;
+    return out;
+  }
+  // Animated mode. revealedColumnCount in [1..columnCount] -> first
+  // revealedColumnCount-1 are fully visible, the column at index
+  // revealedColumnCount-1 transitions only when it's the last one mid-fade.
+  // We treat revealedColumnCount as "how many columns are fully shown".
+  // The fading-in column is at index revealedColumnCount (one past the
+  // currently-visible count) with opacity = transitionProgress.
+  const fullyVisible = Math.max(0, Math.min(revealedColumnCount, columnCount));
+  for (let i = 0; i < fullyVisible; i++) out[i] = 1;
+  if (fullyVisible < columnCount) {
+    out[fullyVisible] = Math.max(0, Math.min(1, transitionProgress || 0));
+  }
+  return out;
+}
+
 const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
   const {
     // Legacy single-phase API (still used by ConsolidationCompare)
     data,
-    // Multi-phase animated API
+    // N-column animated API
     phaseSequence,
     awardContext,
-    currentPhaseIndex = 0,
-    animationProgress = 0,
+    revealedColumnCount = 1,
+    transitionProgress = 0,
     phaseIndex,
     width: propWidth,
     height: propHeight,
@@ -281,74 +371,51 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
   const [hoverNode, setHoverNode] = useState(null);
   const [tooltip, setTooltip] = useState(null);
 
-  const usePhaseMode = !!phaseSequence && !!awardContext;
+  const useNColumnMode = !!phaseSequence && !!awardContext;
 
-  // Build phase data once per (phaseSequence, awardContext) pair.
-  const sankeyPhases = useMemo(() => {
-    if (!usePhaseMode) return null;
+  const sankeyData = useMemo(() => {
+    if (!useNColumnMode) return null;
     return computeSankeyData(phaseSequence, awardContext);
-  }, [usePhaseMode, phaseSequence, awardContext]);
+  }, [useNColumnMode, phaseSequence, awardContext]);
 
-  // Resolve the data shape consumed by computeLayout.
-  const { effectiveData, scaffoldFlow, phaseColorMap } = useMemo(() => {
-    if (usePhaseMode && sankeyPhases) {
-      const { scaffold, phaseData } = sankeyPhases;
-      const lastIdx = phaseData.length - 1;
-      let activeLinks;
-      if (typeof phaseIndex === 'number') {
-        const idx = Math.max(0, Math.min(phaseIndex, lastIdx));
-        activeLinks = phaseData[idx]?.links || [];
-      } else {
-        const fromIdx = Math.max(0, Math.min(currentPhaseIndex, lastIdx));
-        const toIdx = Math.min(fromIdx + 1, lastIdx);
-        const fromLinks = phaseData[fromIdx]?.links || [];
-        const toLinks = phaseData[toIdx]?.links || [];
-        const t = Math.max(0, Math.min(1, animationProgress || 0));
-        activeLinks = (fromIdx === toIdx) ? fromLinks : interpolateLinks(fromLinks, toLinks, t);
-      }
-      const renderLinks = activeLinks.map(l => ({
-        source: l.source,
-        target: l.target,
-        value: l.width != null ? l.width : (l.value || 0),
-        lanes: l.lanes || 0,
-      }));
-      const renderData = {
-        nodes: scaffold.nodes,
-        links: renderLinks,
-        totalFlow: renderLinks.reduce((s, l) => s + l.value, 0),
-      };
-      return {
-        effectiveData: renderData,
-        scaffoldFlow: {
-          sourceFlowMax: scaffold.sourceFlowMax,
-          targetFlowMax: scaffold.targetFlowMax,
-          nodeOrder: scaffold.nodeOrder,
-        },
-        phaseColorMap: scaffold.colorMap,
-      };
+  // Empty-state guard for N-column mode.
+  const nColumnEmptyMessage = useMemo(() => {
+    if (!useNColumnMode || !sankeyData) return null;
+    const { scaffold } = sankeyData;
+    if (scaffold.columnCount === 0) return 'No columns configured.';
+    if (scaffold.columnCount === 1 && (sankeyData.columnData[0]?.nodes?.length ?? 0) === 0) {
+      return 'No carrier flow data available for this column.';
     }
-    return { effectiveData: data, scaffoldFlow: null, phaseColorMap: null };
-  }, [usePhaseMode, sankeyPhases, phaseIndex, currentPhaseIndex, animationProgress, data]);
+    return null;
+  }, [useNColumnMode, sankeyData]);
 
-  // Legacy collapse only when not in phase mode (phase mode keeps scaffold stable).
   const collapsed = useMemo(
-    () => usePhaseMode ? effectiveData : collapseData(effectiveData),
-    [usePhaseMode, effectiveData]
+    () => useNColumnMode ? null : collapseData(data),
+    [useNColumnMode, data]
   );
 
-  const nodeCount = collapsed ? collapsed.nodes.length : 0;
-  void nodeCount;
   const maxSide = collapsed ? Math.max(
     collapsed.nodes.filter(n => n.side === 'left' || n.side === 'both').length,
     collapsed.nodes.filter(n => n.side === 'right' || n.side === 'both').length
-  ) : 0;
-  const height = propHeight || Math.max(400, maxSide * 48);
-  const width = propWidth || 1100;
+  ) : (sankeyData ? Math.max(...sankeyData.columnData.map(c => c.nodes.length), 1) : 0);
 
-  // Build stable carrier → color map. In phase mode, use the scaffold's color
-  // map so SCAC colors don't shuffle as link widths animate.
+  const height = propHeight || Math.max(420, maxSide * 48);
+
+  // N-column mode needs more horizontal real estate as columns grow.
+  const computedWidth = useMemo(() => {
+    if (propWidth) return propWidth;
+    if (useNColumnMode && sankeyData) {
+      const cc = sankeyData.scaffold.columnCount;
+      // ~360px per inter-column slot + side label gutters.
+      return Math.max(900, 280 + cc * 320);
+    }
+    return 1100;
+  }, [propWidth, useNColumnMode, sankeyData]);
+  const width = computedWidth;
+
+  // Stable carrier color map.
   const carrierColorMap = useMemo(() => {
-    if (phaseColorMap) return phaseColorMap;
+    if (useNColumnMode && sankeyData) return sankeyData.scaffold.colorMap;
     if (!collapsed) return {};
     const map = {};
     const sourceFlow = {};
@@ -371,31 +438,213 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
       map[id] = CARRIER_PALETTE[(usedCount + i) % CARRIER_PALETTE.length];
     });
     return map;
-  }, [collapsed, phaseColorMap]);
+  }, [useNColumnMode, sankeyData, collapsed]);
 
-  const layout = useMemo(
-    () => collapsed ? computeLayout(collapsed, width, height, scaffoldFlow) : null,
-    [collapsed, width, height, scaffoldFlow]
+  const nLayout = useMemo(() => {
+    if (!useNColumnMode || !sankeyData) return null;
+    return computeNColumnLayout(sankeyData.scaffold, sankeyData.columnData, sankeyData.flows, width, height);
+  }, [useNColumnMode, sankeyData, width, height]);
+
+  const legacyLayout = useMemo(
+    () => collapsed ? computeLegacyLayout(collapsed, width, height) : null,
+    [collapsed, width, height]
   );
 
-  if (!collapsed || !collapsed.links.length || !layout) {
+  // Visibility opacities by column for N-column mode.
+  const opacities = useMemo(() => {
+    if (!useNColumnMode || !sankeyData) return null;
+    return computeColumnOpacities(
+      sankeyData.scaffold.columnCount,
+      phaseIndex,
+      revealedColumnCount,
+      transitionProgress
+    );
+  }, [useNColumnMode, sankeyData, phaseIndex, revealedColumnCount, transitionProgress]);
+
+  if (useNColumnMode) {
+    if (nColumnEmptyMessage) {
+      return (
+        <div ref={ref} className="text-center text-sm text-gray-400 py-8">
+          {nColumnEmptyMessage}
+        </div>
+      );
+    }
+    if (!sankeyData || !nLayout) {
+      return (
+        <div ref={ref} className="text-center text-sm text-gray-400 py-8">
+          No freight flow data available.
+        </div>
+      );
+    }
+  } else {
+    if (!collapsed || !collapsed.links.length || !legacyLayout) {
+      return (
+        <div ref={ref} className="text-center text-sm text-gray-400 py-8">
+          No freight flow data available (historic carrier data required)
+        </div>
+      );
+    }
+  }
+
+  const labelStyle = { fill: COLORS.navy, fontSize: 11, fontFamily: 'ui-monospace, monospace' };
+
+  // ------------------------------------------------------------------
+  // N-column render
+  // ------------------------------------------------------------------
+  if (useNColumnMode) {
+    const { columns, paths } = nLayout;
+
+    function colorFor(id) {
+      if (id === '_UNASSIGNED_') return COLORS.unassigned;
+      return carrierColorMap[id] || COLORS.navy;
+    }
+
+    function pathOpacity(p) {
+      const baseFlow = p.isRetained ? 0.5 : 0.35;
+      const visEdge = Math.min(opacities[p.fromColumn] ?? 0, opacities[p.toColumn] ?? 0);
+      let interactionMul = 1;
+      if (hoverLink && hoverLink === p.link.key) interactionMul = 0.75 / baseFlow;
+      else if (hoverNode) {
+        const connected = p.link.sourceCarrier === hoverNode || p.link.targetCarrier === hoverNode;
+        interactionMul = connected ? (0.75 / baseFlow) : (0.08 / baseFlow);
+      }
+      return baseFlow * interactionMul * visEdge;
+    }
+
+    function handleLinkEnter(e, p) {
+      setHoverLink(p.link.key);
+      setTooltip({
+        x: e.clientX,
+        y: e.clientY,
+        text: `${p.link.sourceCarrier} → ${p.link.targetCarrier}: ${fmtMoney(p.link.weight)} (${p.link.lanes} lane${p.link.lanes !== 1 ? 's' : ''})`,
+      });
+    }
+    function handleLinkLeave() { setHoverLink(null); setTooltip(null); }
+
     return (
-      <div className="text-center text-sm text-gray-400 py-8">
-        No freight flow data available (historic carrier data required)
+      <div ref={ref} className="relative" style={{ width: '100%' }}>
+        <svg
+          width="100%"
+          height={height}
+          viewBox={`0 0 ${width} ${height}`}
+          preserveAspectRatio="xMidYMid meet"
+        >
+          {/* Flows behind nodes */}
+          {paths.map((p, i) => (
+            <path
+              key={i}
+              d={p.d}
+              fill="none"
+              stroke={colorFor(p.link.sourceCarrier)}
+              strokeWidth={p.strokeWidth}
+              opacity={pathOpacity(p)}
+              style={{ transition: 'opacity 0.15s', cursor: 'pointer', pointerEvents: pathOpacity(p) > 0.05 ? 'auto' : 'none' }}
+              onMouseEnter={(e) => handleLinkEnter(e, p)}
+              onMouseLeave={handleLinkLeave}
+            />
+          ))}
+
+          {/* Column nodes + labels */}
+          {columns.map((col, ci) => {
+            const colOpacity = opacities[ci] ?? 0;
+            return (
+              <g key={`col-${ci}`} opacity={colOpacity} style={{ transition: 'opacity 0.05s linear' }}>
+                {col.nodes.map(n => (
+                  <g key={`n-${ci}-${n.carrierId}`}
+                    onMouseEnter={() => setHoverNode(n.carrierId)}
+                    onMouseLeave={() => setHoverNode(null)}
+                    style={{ cursor: 'pointer' }}
+                  >
+                    <rect
+                      x={n.x}
+                      y={n.y}
+                      width={n.width}
+                      height={n.height}
+                      fill={colorFor(n.carrierId)}
+                      rx={3}
+                    />
+                    {/* Outer column labels (first column anchor right of node, last column anchor left, middle columns anchor left) */}
+                    {ci === 0 ? (
+                      <text
+                        x={n.x - LABEL_GAP}
+                        y={n.y + n.height / 2}
+                        textAnchor="end"
+                        dominantBaseline="central"
+                        style={labelStyle}
+                      >
+                        {n.carrierId} ({fmtMoney(n.flow)})
+                      </text>
+                    ) : (
+                      <text
+                        x={n.x + n.width + LABEL_GAP}
+                        y={n.y + n.height / 2}
+                        textAnchor="start"
+                        dominantBaseline="central"
+                        style={labelStyle}
+                      >
+                        {n.carrierId} ({fmtMoney(n.flow)})
+                      </text>
+                    )}
+                  </g>
+                ))}
+              </g>
+            );
+          })}
+        </svg>
+
+        {/* Column header strip */}
+        <div className="flex mt-1 px-1 text-[11px] font-semibold text-[#002144] uppercase tracking-wide" style={{ maxWidth: width }}>
+          {columns.map((col, ci) => {
+            const widthPct = `${100 / columns.length}%`;
+            return (
+              <div
+                key={`hdr-${ci}`}
+                style={{
+                  width: widthPct,
+                  textAlign: 'center',
+                  opacity: opacities[ci] ?? 0,
+                  transition: 'opacity 0.15s linear',
+                }}
+                title={col.label}
+              >
+                <div className="truncate">{col.label}</div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Legend */}
+        <div className="flex items-center gap-5 mt-2 text-xs text-gray-600">
+          <span className="text-gray-400 font-medium">Flow color = source carrier on the left of each pair</span>
+          <span className="flex items-center gap-1">
+            <span className="inline-block w-3 h-3 rounded-sm" style={{ backgroundColor: COLORS.unassigned }} />
+            Unassigned
+          </span>
+        </div>
+
+        {tooltip && (
+          <div
+            className="fixed z-50 px-2 py-1 text-xs font-mono bg-gray-900 text-white rounded shadow-lg pointer-events-none"
+            style={{ left: tooltip.x + 12, top: tooltip.y - 8 }}
+          >
+            {tooltip.text}
+          </div>
+        )}
       </div>
     );
   }
 
-  const { leftNodes, rightNodes, paths } = layout;
+  // ------------------------------------------------------------------
+  // Legacy two-column render (ConsolidationCompare)
+  // ------------------------------------------------------------------
+  const { leftNodes, rightNodes, paths } = legacyLayout;
 
-  // Determine which links are connected to hovered node
   const connectedToNode = hoverNode
     ? new Set(collapsed.links.filter(l => l.source === hoverNode || l.target === hoverNode).map(l => `${l.source}|||${l.target}`))
     : null;
 
   function linkColor(path) {
     if (path.isUnassigned) return COLORS.unassigned;
-    // Use source carrier's color for the flow
     return carrierColorMap[path.link.source] || COLORS.migrating;
   }
 
@@ -416,28 +665,7 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
       text: `${path.link.source} → ${path.link.target}: ${fmtMoney(path.link.value)} (${path.link.lanes} lane${path.link.lanes !== 1 ? 's' : ''})`,
     });
   }
-
-  function handleLinkLeave() {
-    setHoverLink(null);
-    setTooltip(null);
-  }
-
-  function handleNodeEnter(id) {
-    setHoverNode(id);
-  }
-
-  function handleNodeLeave() {
-    setHoverNode(null);
-  }
-
-  const labelStyle = { fill: COLORS.navy, fontSize: 11, fontFamily: 'ui-monospace, monospace' };
-
-  // Active phase label for the corner badge.
-  const phaseLabel = usePhaseMode && sankeyPhases
-    ? (typeof phaseIndex === 'number'
-        ? sankeyPhases.phaseData[Math.max(0, Math.min(phaseIndex, sankeyPhases.phaseData.length - 1))]?.label
-        : sankeyPhases.phaseData[Math.max(0, Math.min(currentPhaseIndex, sankeyPhases.phaseData.length - 1))]?.label)
-    : null;
+  function handleLinkLeave() { setHoverLink(null); setTooltip(null); }
 
   return (
     <div ref={ref} className="relative" style={{ width: '100%' }}>
@@ -447,7 +675,6 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
         viewBox={`0 0 ${width} ${height}`}
         preserveAspectRatio="xMidYMid meet"
       >
-        {/* Links */}
         {paths.map((p, i) => (
           <path
             key={i}
@@ -462,11 +689,10 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
           />
         ))}
 
-        {/* Left nodes */}
         {leftNodes.map(n => (
           <g key={`l-${n.id}`}
-            onMouseEnter={() => handleNodeEnter(n.id)}
-            onMouseLeave={handleNodeLeave}
+            onMouseEnter={() => setHoverNode(n.id)}
+            onMouseLeave={() => setHoverNode(null)}
             style={{ cursor: 'pointer' }}
           >
             <rect
@@ -489,11 +715,10 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
           </g>
         ))}
 
-        {/* Right nodes */}
         {rightNodes.map(n => (
           <g key={`r-${n.id}`}
-            onMouseEnter={() => handleNodeEnter(n.id)}
-            onMouseLeave={handleNodeLeave}
+            onMouseEnter={() => setHoverNode(n.id)}
+            onMouseLeave={() => setHoverNode(null)}
             style={{ cursor: 'pointer' }}
           >
             <rect
@@ -517,23 +742,12 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
         ))}
       </svg>
 
-      {/* Phase badge — only in phase mode */}
-      {phaseLabel && (
-        <div
-          className="absolute top-1 right-2 text-[10px] font-bold tracking-wide uppercase px-2 py-0.5 rounded"
-          style={{ backgroundColor: '#002144', color: 'white' }}
-        >
-          {phaseLabel}
-        </div>
-      )}
-
-      {/* Column labels */}
+      {/* Legacy column headers */}
       <div className="flex justify-between px-2 mt-1 text-xs font-medium text-gray-400 uppercase tracking-wide" style={{ maxWidth: width }}>
         <span style={{ paddingLeft: 140 }}>Historic Carrier (was paying)</span>
         <span style={{ paddingRight: 140 }}>Award Carrier (will pay)</span>
       </div>
 
-      {/* Legend */}
       <div className="flex items-center gap-5 mt-2 text-xs text-gray-600">
         <span className="text-gray-400 font-medium">Flow colors match incumbent carrier</span>
         <span className="flex items-center gap-1">
@@ -550,7 +764,6 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
         </span>
       </div>
 
-      {/* Tooltip */}
       {tooltip && (
         <div
           className="fixed z-50 px-2 py-1 text-xs font-mono bg-gray-900 text-white rounded shadow-lg pointer-events-none"
@@ -564,3 +777,6 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
 });
 CarrierSankey.displayName = 'CarrierSankey';
 export default CarrierSankey;
+
+// Internal export for tests / debugging only.
+export { computeNColumnLayout, computeColumnOpacities };

@@ -1855,53 +1855,80 @@ export function computePreferredCarrierRanks(carriers, topN = 3) {
   return ranks;
 }
 
+// Stable carrier color palette — shared with CarrierSankey so phase scaffolds
+// can reuse the same SCAC → color mapping without round-tripping through React.
+export const SANKEY_CARRIER_PALETTE = [
+  '#0072B2', '#E69F00', '#009E73', '#D55E00', '#56B4E9', '#CC79A7',
+  '#F0E442', '#0A9396', '#EE6C4D', '#6A4C93', '#1B9AAA', '#E07A5F',
+  '#3D5A80', '#81B29A', '#F2CC8F', '#6D6875', '#118AB2', '#EF476F',
+];
+
+// Strip thousands separators before parseFloat. Lane figures arriving from
+// upstream consumers are sometimes pre-formatted strings ("1,196").
+function normalizeNumber(v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : 0;
+  if (typeof v === 'string') {
+    const n = parseFloat(v.replace(/,/g, '').trim());
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+}
+
+function buildLinkMapForLanes(lanes) {
+  const linkMap = {};
+  const sourceSet = new Set();
+  const targetSet = new Set();
+  const targetProjected = {};
+
+  for (const lane of lanes || []) {
+    const hc = lane.historicCarrier;
+    const ac = lane.carrierSCAC;
+    const value = normalizeNumber(lane.historicTotalAnnSpend || lane.annualHistoric || 0);
+
+    if (ac) {
+      targetProjected[ac] = (targetProjected[ac] || 0) + normalizeNumber(lane.annualSpend || 0);
+    }
+
+    if (hc && ac) {
+      const key = `${hc}::${ac}`;
+      if (!linkMap[key]) linkMap[key] = { key, source: hc, target: ac, value: 0, width: 0, lanes: 0 };
+      linkMap[key].value += value;
+      linkMap[key].width += value;
+      linkMap[key].lanes++;
+      sourceSet.add(hc);
+      targetSet.add(ac);
+    } else if (hc && !ac) {
+      const key = `${hc}::_UNASSIGNED_`;
+      if (!linkMap[key]) linkMap[key] = { key, source: hc, target: '_UNASSIGNED_', value: 0, width: 0, lanes: 0 };
+      linkMap[key].value += value;
+      linkMap[key].width += value;
+      linkMap[key].lanes++;
+      sourceSet.add(hc);
+      targetSet.add('_UNASSIGNED_');
+    }
+  }
+
+  return { linkMap, sourceSet, targetSet, targetProjected };
+}
+
 /**
- * Build node/link structure for a Sankey flow diagram showing carrier-to-carrier freight migration.
+ * Legacy single-phase Sankey shape — still used by ConsolidationCompare which
+ * compares pre/post-consolidation flows in two side-by-side diagrams that
+ * don't share a phase scaffold.
  *
  * @param {Array} lanes - lanes array from computeAnnualAward
  * @param {number} annualizationFactor - 52 / sampleWeeks (for reference, lanes are already annualized)
  * @returns {{ nodes: Array, links: Array, totalFlow: number }}
  */
-export function computeSankeyData(lanes, annualizationFactor) {
-  const linkMap = {};
-  const sourceSet = new Set();
-  const targetSet = new Set();
-  const targetProjected = {}; // projected award spend per target carrier
+export function computeSankeyDataLegacy(lanes, annualizationFactor) {
+  void annualizationFactor;
+  const { linkMap, sourceSet, targetSet, targetProjected } = buildLinkMapForLanes(lanes);
 
-  for (const lane of lanes) {
-    const hc = lane.historicCarrier;
-    const ac = lane.carrierSCAC;
-    const value = lane.historicTotalAnnSpend || lane.annualHistoric || 0;
-
-    // Track projected spend per awarded carrier
-    if (ac) {
-      targetProjected[ac] = (targetProjected[ac] || 0) + (lane.annualSpend || 0);
-    }
-
-    if (hc && ac) {
-      // Flow from historic to assigned
-      const key = `${hc}|||${ac}`;
-      if (!linkMap[key]) linkMap[key] = { source: hc, target: ac, value: 0, lanes: 0 };
-      linkMap[key].value += value;
-      linkMap[key].lanes++;
-      sourceSet.add(hc);
-      targetSet.add(ac);
-    } else if (hc && !ac) {
-      // Historic carrier but no assignment — unassigned
-      const key = `${hc}|||_UNASSIGNED_`;
-      if (!linkMap[key]) linkMap[key] = { source: hc, target: '_UNASSIGNED_', value: 0, lanes: 0 };
-      linkMap[key].value += value;
-      linkMap[key].lanes++;
-      sourceSet.add(hc);
-      targetSet.add('_UNASSIGNED_');
-    }
-    // Lanes with assignedSCAC but no historicCarrier — skip from Sankey (no source)
-  }
-
-  const links = Object.values(linkMap).filter(l => l.value > 0);
+  const links = Object.values(linkMap)
+    .filter(l => l.value > 0)
+    .map(l => ({ source: l.source, target: l.target, value: l.value, lanes: l.lanes }));
   links.sort((a, b) => b.value - a.value);
 
-  // Build nodes — a SCAC on both sides gets side: 'both'
   const allIds = new Set([...sourceSet, ...targetSet]);
   const nodes = [];
   for (const id of allIds) {
@@ -1912,8 +1939,106 @@ export function computeSankeyData(lanes, annualizationFactor) {
   }
 
   const totalFlow = links.reduce((s, l) => s + l.value, 0);
-
   return { nodes, links, totalFlow };
+}
+
+/**
+ * Two-pass Sankey builder for animated multi-phase comparison.
+ *
+ * Pass 1 walks every phase to assemble a stable scaffold: union of carriers,
+ * deterministic order by total volume across all phases, and a SCAC→color map
+ * that doesn't shuffle when the active phase changes. Pass 2 emits per-phase
+ * link arrays keyed by `${source}::${target}` so the morph engine in
+ * CarrierSankey can match links across phases and interpolate widths.
+ *
+ * @param {object} phaseSequence - { baseline: PhaseDescriptor, phases: PhaseDescriptor[] }
+ *   PhaseDescriptor: { type, label, scenarioId, scenarioName }
+ * @param {object} awardContext - { lanesByPhase: Lane[][] }
+ *   lanesByPhase[0] -> baseline lanes, lanesByPhase[1..N] -> phase lanes.
+ * @returns {{
+ *   scaffold: { nodes: Array, nodeOrder: string[], colorMap: Object },
+ *   phaseData: Array<{ phaseIndex: number, label: string, links: Array, totalFlow: number }>
+ * }}
+ */
+export function computeSankeyData(phaseSequence, awardContext) {
+  const baseline = phaseSequence?.baseline || { type: 'historic', label: 'Historic', scenarioId: null, scenarioName: '' };
+  const phases = Array.isArray(phaseSequence?.phases) ? phaseSequence.phases : [];
+  const phaseList = [baseline, ...phases];
+
+  const lanesByPhase = Array.isArray(awardContext?.lanesByPhase) ? awardContext.lanesByPhase : [];
+
+  // Pre-compute per-phase link aggregates
+  const perPhase = phaseList.map((_, idx) => buildLinkMapForLanes(lanesByPhase[idx] || []));
+
+  // Pass 1 — scaffold: union sources/targets, max source/target flow per carrier
+  // across all phases. Using max (not sum) keeps node heights from inflating
+  // when the same flow is double-counted across phases.
+  const sourceFlowMax = {};
+  const targetFlowMax = {};
+  const sourceUnion = new Set();
+  const targetUnion = new Set();
+  const targetProjectedTotal = {};
+
+  for (const p of perPhase) {
+    const phaseSourceFlow = {};
+    const phaseTargetFlow = {};
+    for (const link of Object.values(p.linkMap)) {
+      phaseSourceFlow[link.source] = (phaseSourceFlow[link.source] || 0) + link.value;
+      phaseTargetFlow[link.target] = (phaseTargetFlow[link.target] || 0) + link.value;
+    }
+    for (const [id, v] of Object.entries(phaseSourceFlow)) {
+      sourceFlowMax[id] = Math.max(sourceFlowMax[id] || 0, v);
+    }
+    for (const [id, v] of Object.entries(phaseTargetFlow)) {
+      targetFlowMax[id] = Math.max(targetFlowMax[id] || 0, v);
+    }
+    for (const s of p.sourceSet) sourceUnion.add(s);
+    for (const t of p.targetSet) targetUnion.add(t);
+    for (const [scac, v] of Object.entries(p.targetProjected)) {
+      targetProjectedTotal[scac] = (targetProjectedTotal[scac] || 0) + v;
+    }
+  }
+
+  const carrierTotalVolume = {};
+  for (const id of [...sourceUnion, ...targetUnion]) {
+    carrierTotalVolume[id] = (sourceFlowMax[id] || 0) + (targetFlowMax[id] || 0);
+  }
+
+  const allIds = [...new Set([...sourceUnion, ...targetUnion])];
+  const nodeOrder = allIds.sort((a, b) => {
+    if (a === '_UNASSIGNED_') return 1;
+    if (b === '_UNASSIGNED_') return -1;
+    return (carrierTotalVolume[b] || 0) - (carrierTotalVolume[a] || 0);
+  });
+
+  const nodes = nodeOrder.map(id => {
+    const isSource = sourceUnion.has(id);
+    const isTarget = targetUnion.has(id);
+    const side = isSource && isTarget ? 'both' : isSource ? 'left' : 'right';
+    return { id, label: id, side, projectedSpend: targetProjectedTotal[id] || 0 };
+  });
+
+  const colorMap = {};
+  nodeOrder.forEach((id, i) => {
+    if (id === '_UNASSIGNED_') return;
+    colorMap[id] = SANKEY_CARRIER_PALETTE[i % SANKEY_CARRIER_PALETTE.length];
+  });
+
+  // Pass 2 — per-phase links keyed by source::target
+  const phaseData = phaseList.map((phase, idx) => {
+    const linkMap = perPhase[idx]?.linkMap || {};
+    const links = Object.values(linkMap)
+      .filter(l => l.width > 0)
+      .map(l => ({ key: l.key, source: l.source, target: l.target, width: l.width, value: l.value, lanes: l.lanes }))
+      .sort((a, b) => b.width - a.width);
+    const totalFlow = links.reduce((s, l) => s + l.width, 0);
+    return { phaseIndex: idx, label: phase.label || (idx === 0 ? 'Historic' : `Phase ${idx}`), links, totalFlow };
+  });
+
+  return {
+    scaffold: { nodes, nodeOrder, colorMap, sourceFlowMax, targetFlowMax },
+    phaseData,
+  };
 }
 
 /**

@@ -1,8 +1,10 @@
-import React, { useState, useMemo, useRef, useCallback } from 'react';
-import { computeAnnualAward, computeCarrierSummary, computeSankeyData, computeCarrierMixByOrigin, computeScenario, computePreferredCarrierRanks, getLaneKey } from '../services/analyticsEngine.js';
+import React, { useState, useMemo, useRef, useCallback, useEffect } from 'react';
+import { computeAnnualAward, computeCarrierSummary, computeCarrierMixByOrigin, computeScenario, computePreferredCarrierRanks, getLaneKey } from '../services/analyticsEngine.js';
 import { generateAnnualAwardPdf, downloadBlob } from '../services/pdfExport.js';
 import { applyMargin } from '../services/ratingClient.js';
 import CarrierSankey from './CarrierSankey.jsx';
+import PhaseSelector from './PhaseSelector.jsx';
+import PhaseScrubber from './PhaseScrubber.jsx';
 import { openAwardSharePdf } from './AwardSharePdf.js';
 import { useScenario } from '../context/ScenarioContext.jsx';
 import CustomerLocationManager from './CustomerLocationManager.jsx';
@@ -66,6 +68,28 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
   const [customerName, setCustomerName] = useState('');
   const [showLocations, setShowLocations] = useState(false);
   const sankeyRef = useRef(null);
+
+  // Multi-phase Sankey state — Historic baseline locked at index 0.
+  // `phases` is appended by user via PhaseSelector. Phase mode is independent
+  // of the dashboard's selected scenario so users can compare phases without
+  // the rest of the screen following along.
+  const [phaseSequence, setPhaseSequence] = useState({
+    baseline: { type: 'historic', label: 'Historic', scenarioId: null, scenarioName: 'Incumbent (historic shipments)' },
+    phases: [],
+  });
+  const [currentPhaseIndex, setCurrentPhaseIndex] = useState(0);
+  const [animationProgress, setAnimationProgress] = useState(0);
+
+  // If a saved scenario is removed in Scenario Builder while it's used as a
+  // phase here, drop the dangling phase reference.
+  useEffect(() => {
+    const validIds = new Set((computedScenarios || []).map(s => s.id));
+    setPhaseSequence(prev => {
+      const filtered = prev.phases.filter(p => validIds.has(p.scenarioId));
+      if (filtered.length === prev.phases.length) return prev;
+      return { ...prev, phases: filtered.map((p, i) => ({ ...p, label: `Phase ${i + 1}` })) };
+    });
+  }, [computedScenarios]);
 
   // Keep the weeks-based legacy factor as the authoritative multiplier
   // (drives existing engine calls) and read the annualization hook for the
@@ -262,11 +286,6 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
   // footer aggregates; the carrier table/KPIs below always read csTotals.
   void rawCsTotals;
 
-  const sankeyData = useMemo(
-    () => computeSankeyData(lanes, annualizationFactor),
-    [lanes, annualizationFactor]
-  );
-
   const originMix = useMemo(
     () => computeCarrierMixByOrigin(lanes, filteredFlatRows),
     [lanes, filteredFlatRows]
@@ -298,10 +317,6 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
     () => custPriceLanes ? computeCarrierSummary(custPriceLanes) : { carriers: [], totals: {} },
     [custPriceLanes]
   );
-  const custSankeyData = useMemo(
-    () => custPriceLanes ? computeSankeyData(custPriceLanes, annualizationFactor) : null,
-    [custPriceLanes, annualizationFactor]
-  );
   const custOriginMix = useMemo(
     () => custPriceLanes ? computeCarrierMixByOrigin(custPriceLanes, filteredFlatRows) : null,
     [custPriceLanes, filteredFlatRows]
@@ -319,20 +334,108 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
   // Export data — fed to PDF/CSV/Share handlers
   const exportCarrierSummary = isExportCustomerPrice ? custCarrierSummary : carrierSummary;
   const exportCsTotals = isExportCustomerPrice ? custCsTotals : csTotals;
-  const exportSankeyData = isExportCustomerPrice ? custSankeyData : sankeyData;
   const exportOriginMix = isExportCustomerPrice ? custOriginMix : originMix;
   const exportOriginSummaries = isExportCustomerPrice ? custOriginSummaries : originSummaries;
   const exportLanes = isExportCustomerPrice ? custPriceLanes : lanes;
   const pricingMode = isExportCustomerPrice ? 'customerPrice' : 'carrierCost';
 
-  // Display data — for on-screen rendering (Sankey, lane view table, Share PDF)
-  const displaySankeyData = isDisplayCustomerPrice ? custSankeyData : sankeyData;
+  // Display data — for on-screen rendering (lane view table, Share PDF, etc.)
   const displayLanes = isDisplayCustomerPrice ? custPriceLanes : lanes;
   const displayCarrierSummary = isDisplayCustomerPrice ? custCarrierSummary : carrierSummary;
   const displayCsTotals = isDisplayCustomerPrice ? custCsTotals : csTotals;
   const displayOriginMix = isDisplayCustomerPrice ? custOriginMix : originMix;
   const displayOriginSummaries = isDisplayCustomerPrice ? custOriginSummaries : originSummaries;
   const displayPricingMode = isDisplayCustomerPrice ? 'customerPrice' : 'carrierCost';
+
+  // Historic baseline lanes — synthetic lanes that pin every shipment to its
+  // incumbent carrier (carrierSCAC = historicCarrier). Drives the locked
+  // "Historic" phase of the multi-phase Sankey: every link flows hc → hc with
+  // width equal to historic spend on that lane group.
+  const baselineLanes = useMemo(() => {
+    const factor = 52 / Math.max(1, sampleWeeks);
+    const map = {};
+    for (const r of filteredFlatRows) {
+      const hcRaw = r.historicCarrier;
+      if (!hcRaw || !String(hcRaw).trim()) continue;
+      const hc = String(hcRaw).toUpperCase().trim();
+      const laneKey = getLaneKey(r);
+      const hCostRaw = r.historicCost;
+      const hCost = hCostRaw != null
+        ? parseFloat(String(hCostRaw).replace(/,/g, '').trim()) || 0
+        : 0;
+      const groupKey = `${laneKey}|||${hc}`;
+      if (!map[groupKey]) {
+        map[groupKey] = {
+          laneKey,
+          origState: r.origState || '',
+          destState: r.destState || '',
+          historicCarrier: hc,
+          carrierSCAC: hc,
+          carrierName: hc,
+          shipments: 0,
+          historicCost: 0,
+        };
+      }
+      map[groupKey].shipments++;
+      map[groupKey].historicCost += hCost;
+    }
+    return Object.values(map).map(g => {
+      const annual = g.historicCost * factor;
+      return {
+        ...g,
+        annualShipments: Math.round(g.shipments * factor),
+        sampleSpend: g.historicCost,
+        annualSpend: annual,
+        historicSpend: g.historicCost,
+        annualHistoric: annual,
+        historicTotalAnnSpend: annual,
+        delta: 0,
+        deltaPct: 0,
+      };
+    });
+  }, [filteredFlatRows, sampleWeeks]);
+
+  // Per-phase lanes for the multi-phase Sankey. Phase 0 is the baseline,
+  // phases 1+ pull from saved scenarios via computeAnnualAward. Falls back
+  // gracefully when a phase points to a stale scenarioId.
+  const lanesByPhase = useMemo(() => {
+    const out = [baselineLanes];
+    for (const p of phaseSequence.phases) {
+      const sc = (computedScenarios || []).find(s => s.id === p.scenarioId);
+      const awards = sc?.result?.awards || null;
+      if (!awards || Object.keys(awards).length === 0) {
+        out.push([]);
+        continue;
+      }
+      const phaseLanes = computeAnnualAward(filteredFlatRows, awards, sampleWeeks).lanes;
+      out.push(phaseLanes);
+    }
+    return out;
+  }, [baselineLanes, phaseSequence.phases, computedScenarios, filteredFlatRows, sampleWeeks]);
+
+  const sankeyAwardContext = useMemo(() => ({ lanesByPhase }), [lanesByPhase]);
+
+  // Clamp current phase index when phases change (e.g. user removes one).
+  useEffect(() => {
+    const lastIdx = phaseSequence.phases.length; // baseline + N
+    if (currentPhaseIndex > lastIdx) {
+      setCurrentPhaseIndex(lastIdx);
+      setAnimationProgress(0);
+    }
+  }, [phaseSequence.phases.length, currentPhaseIndex]);
+
+  const handleScrubberChange = useCallback(({ currentPhaseIndex: idx, animationProgress: prog }) => {
+    setCurrentPhaseIndex(idx);
+    setAnimationProgress(prog);
+  }, []);
+
+  // Saved scenarios surfaced in the PhaseSelector dropdown. Drops scenarios
+  // with no awards — they would render an empty Sankey.
+  const phaseSelectorScenarios = useMemo(() => {
+    return (computedScenarios || [])
+      .filter(s => s.result && Object.keys(s.result.awards || {}).length > 0)
+      .map(s => ({ id: s.id, name: s.name }));
+  }, [computedScenarios]);
 
   // Preferred-carrier ranks (P1/P2/P3) — derived from whichever carrier summary
   // the user is currently viewing, ranked by total spend captured as winner.
@@ -423,32 +526,55 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
   const handleExportCsv = () => {
     const awardByLabel = isExportCustomerPrice ? 'Award By: Customer Price' : 'Award By: Carrier Cost';
 
-    // Lane detail headers
+    // Phase metadata header (always present, even for single-phase exports).
+    const phaseMetaHeader = [
+      '# BRAT Annual Award Export',
+      `# Generated: ${new Date().toISOString()}`,
+      '# Baseline: Historic (Incumbent shipments)',
+      ...phaseSequence.phases.map((p, i) => `# Phase ${i + 1}: ${p.scenarioName} (id: ${p.scenarioId})`),
+    ];
+
+    // Lane detail \u2014 emit one block per configured phase. With no scenarios
+    // added we still output the Historic baseline so the legacy export shape
+    // surfaces lane data.
     const headers = [
-      'Lane', 'Carrier SCAC', 'Carrier Name',
+      'Phase', 'Lane', 'Carrier SCAC', 'Carrier Name',
       'Hist. Carrier', 'Hist. Carrier %', 'Hist. Total Ann. Spend',
       'Sample Shipments', 'Annual Shipments (est)', 'Annual Tons (US)',
       'Sample Spend', 'Annual Spend (est)',
       'Annual Historic Spend (Attributed)', 'Annual Delta ($)', 'Annual Delta (%)',
     ];
-    const rows = exportLanes.map(l => [
-      l.laneKey, l.carrierSCAC, l.carrierName,
-      l.historicCarrier || '', l.historicCarrierPct || '',
-      l.historicTotalAnnSpend ? l.historicTotalAnnSpend.toFixed(2) : '0.00',
-      l.shipments, l.annualShipments,
-      (l.annualTons || 0).toFixed(1),
-      l.sampleSpend.toFixed(2), l.annualSpend.toFixed(2),
-      l.annualHistoric.toFixed(2), l.delta.toFixed(2), l.deltaPct.toFixed(1),
-    ].map(escCsv));
+    const allPhases = [phaseSequence.baseline, ...phaseSequence.phases];
+    const rows = [];
+    allPhases.forEach((phase, idx) => {
+      const lanesForPhase = (lanesByPhase[idx] || []);
+      for (const l of lanesForPhase) {
+        rows.push([
+          phase.label,
+          l.laneKey, l.carrierSCAC, l.carrierName,
+          l.historicCarrier || '', l.historicCarrierPct || '',
+          l.historicTotalAnnSpend ? l.historicTotalAnnSpend.toFixed(2) : '0.00',
+          l.shipments, l.annualShipments,
+          (l.annualTons || 0).toFixed(1),
+          (l.sampleSpend || 0).toFixed(2), (l.annualSpend || 0).toFixed(2),
+          (l.annualHistoric || 0).toFixed(2), (l.delta || 0).toFixed(2), (l.deltaPct || 0).toFixed(1),
+        ].map(escCsv));
+      }
+    });
 
-    // Carrier Summary section
+    // Carrier Summary section \u2014 single-phase view of the dashboard's currently
+    // selected scenario. Phase column reflects the active phase so consumers
+    // can correlate this block with the phased lane detail above.
+    const activePhaseLabel = (allPhases[currentPhaseIndex] || phaseSequence.baseline).label;
     const summaryHeaders = [
+      'Phase',
       'SCAC', 'Carrier', 'Awarded Lanes', 'Sample Shipments', 'Annual Shipments',
       'Annual Tons (US)',
       'Proj. Ann. Spend', 'Displaced Historic', '\u0394 ($)', '\u0394 (%)',
       'Incumbent Lanes', 'Net Lanes', 'Retained', 'Won', 'Lost',
     ];
     const summaryRows = exportCarrierSummary.map(c => [
+      activePhaseLabel,
       c.scac, c.carrierName, c.awardedLanes, c.sampleShipments, c.annualShipments,
       (c.annualTons || 0).toFixed(1),
       c.projectedAnnSpend.toFixed(2),
@@ -458,12 +584,15 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
       c.incumbentLanes, c.netLaneChange, c.retainedLanes, c.wonLanes, c.lostLanes,
     ].map(escCsv));
 
-    // Customer view section
+    // Customer view section — only meaningful for an active scenario.
+    // Phase column reflects the same active-phase label as the carrier summary.
     const custHeaders = [
+      'Phase',
       'Status', 'Lane', 'Origin Zips', 'Previous Carrier', 'New Carrier SCAC', 'New Carrier Name',
       'Annual Shipments', 'Customer Spend', 'Savings ($)', 'Savings (%)',
     ];
     const custRows = customerLanes.map(l => [
+      activePhaseLabel,
       l.isShift ? 'CHANGE' : l.isNew ? 'NEW' : 'RETAINED',
       l.laneKey,
       (l.origPostals || []).join('; '),
@@ -481,6 +610,7 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
       : 'Origin Filter: All';
 
     const csv = [
+      ...phaseMetaHeader,
       awardByLabel,
       filterNote,
       '',
@@ -889,8 +1019,25 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
               </svg>
             </button>
             {showSankey && (
-              <div className="border-t border-gray-200 p-4">
-                <CarrierSankey ref={sankeyRef} data={displaySankeyData} />
+              <div className="border-t border-gray-200 p-4 space-y-3">
+                <PhaseSelector
+                  phaseSequence={phaseSequence}
+                  availableScenarios={phaseSelectorScenarios}
+                  onChange={setPhaseSequence}
+                />
+                <PhaseScrubber
+                  phaseSequence={phaseSequence}
+                  currentPhaseIndex={currentPhaseIndex}
+                  animationProgress={animationProgress}
+                  onChange={handleScrubberChange}
+                />
+                <CarrierSankey
+                  ref={sankeyRef}
+                  phaseSequence={phaseSequence}
+                  awardContext={sankeyAwardContext}
+                  currentPhaseIndex={currentPhaseIndex}
+                  animationProgress={animationProgress}
+                />
               </div>
             )}
           </div>

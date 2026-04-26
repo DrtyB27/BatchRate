@@ -2,15 +2,63 @@ import React, { useState, useRef } from 'react';
 import { buildTestRequest } from '../services/xmlBuilder.js';
 import { postToG3 } from '../services/ratingClient.js';
 
+// Column headers MUST match xmlBuilder.js row[] reads exactly. Do not rename.
+// Verified against xmlBuilder.js buildRatingRequest() as of this commit.
 const TEMPLATE_HEADERS = [
-  'Reference','Historic Carrier','Historic Cost',
-  'Orig City','Org State','Org Postal Code','Orig Cntry',
-  'Dst City','Dst State','Dst Postal Code','Dst Cntry',
-  'Class','Net Wt Lb','Pcs','Ttl HUs','Pickup Date',
+  // Identity
+  'Reference', 'Historic Carrier', 'Historic Cost',
+  // Origin
+  'Orig Locnum', 'Orig City', 'Org State', 'Org Postal Code', 'Orig Cntry',
+  // Destination (note: 'DstCity' has no space — matches xmlBuilder)
+  'Dest Locnum', 'DstCity', 'Dst State', 'Dst Postal Code', 'Dst Cntry',
+  // Item 1 (primary commodity)
+  'Class', 'Net Wt Lb', 'Gross Wt Lb', 'Net Vol CuFt', 'Gross Vol CuFt',
+  'Pcs', 'Ttl HUs', 'Handlng Unit', 'Lgth Ft', 'Hght Ft', 'Dpth Ft',
+  // Dates
+  'Pickup Date', 'Del. Date',
+  // Hazmat
+  'Hazmat',
+  // Contract / TP scoping (per-row override of sidebar)
+  'Cont. Ref', 'Cont. Status', 'Client TP Num', 'Carrier TP Num', 'Skip Safety',
+  // ContractUse flags (per-row override of sidebar)
+  'Blanket Cost', 'Client Cost', 'Blanket Bill', 'Client Bill',
+  // Item 2
+  'Class.2', 'Net Wt Lb.2', 'Gross Wt Lb.2', 'Net Vol CuFt.2', 'Gross Vol CuFt.2',
+  'Pcs.2', 'Ttl HUs.2', 'HU Type.2', 'Lgth Ft.2', 'Hght Ft.2', 'Dpth Ft.2',
+  // Item 3
+  'Class.3', 'Net Wt Lb.3', 'Gross Wt Lb.3', 'Net Vol CuFt.3', 'Gross Vol CuFt.3',
+  'Pcs.3', 'Ttl HUs.3', 'HU Type.3', 'Lgth Ft.3', 'Hght Ft.3', 'Dpth Ft.3',
+  // Item 4
+  'Class.4', 'Net Wt Lb.4', 'Gross Wt Lb.4', 'Net Vol CuFt.4', 'Gross Vol CuFt.4',
+  'Pcs.4', 'Ttl HUs.4', 'HU Type.4', 'Lgth Ft.4', 'Hght Ft.4', 'Dpth Ft.4',
+  // Item 5
+  'Class.5', 'Net Wt Lb.5', 'Gross Wt Lb.5', 'Net Vol CuFt.5', 'Gross Vol CuFt.5',
+  'Pcs.5', 'Ttl HUs.5', 'HU Type.5', 'Lgth Ft.5', 'Hght Ft.5', 'Dpth Ft.5',
+  // Accessorials (no period in suffix — matches xmlBuilder)
+  'Acc. Code', 'Quantity', 'Required',
+  'Acc. Code2', 'Quantity2', 'Required2',
+  'Acc. Code3', 'Quantity3', 'Required3',
+  'Acc. Code4', 'Quantity4', 'Required4',
+  'Acc. Code5', 'Quantity5', 'Required5',
+  // Multi-stop (toggle + up to 5 stops; stop 5 uses 'Loc' not 'Locnum')
+  'Additional Stops',
+  'Stop 1 Locnum', 'Stop 1 City', 'Stop 1 State', 'Stop 1 Postal Code', 'Stop 1 Country',
+  'Stop 2 Locnum', 'Stop 2 City', 'Stop 2 State', 'Stop 2 Postal Code', 'Stop 2 Country',
+  'Stop 3 Locnum', 'Stop 3 City', 'Stop 3 State', 'Stop 3 Postal Code', 'Stop 3 Country',
+  'Stop 4 Locnum', 'Stop 4 City', 'Stop 4 State', 'Stop 4 Postal Code', 'Stop 4 Country',
+  'Stop 5 Loc', 'Stop 5 City', 'Stop 5 State', 'Stop 5 Postal Code', 'Stop 5 Country',
 ];
 
 function downloadTemplate() {
-  const csv = TEMPLATE_HEADERS.join(',') + '\n';
+  // Required columns get a 'Req' marker on row 2 — matches 3G convention.
+  // Keep this set in sync with CsvDropzone.REQUIRED_COLUMNS + xmlBuilder defaults.
+  const REQUIRED_SET = new Set([
+    'Reference', 'Org Postal Code', 'Dst Postal Code',
+    'Class', 'Net Wt Lb', 'Ttl HUs', 'Pickup Date',
+  ]);
+  const headerRow = TEMPLATE_HEADERS.join(',');
+  const reqRow = TEMPLATE_HEADERS.map(h => REQUIRED_SET.has(h) ? 'Req' : '').join(',');
+  const csv = headerRow + '\n' + reqRow + '\n';
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');

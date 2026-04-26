@@ -56,7 +56,7 @@ function PreferredRankBadge({ rank }) {
   );
 }
 
-export default function AnnualAwardBuilder({ flatRows, computedScenarios, activeMarkups, sampleWeeks, weeksOverride, onWeeksChange, detectedWeeks, annualization, historicBaseline, customerLocations, onCustomerLocationsChange }) {
+export default function AnnualAwardBuilder({ flatRows, computedScenarios, activeMarkups, sampleWeeks, weeksOverride, onWeeksChange, detectedWeeks, annualization, historicBaseline, customerLocations, onCustomerLocationsChange, preparedBy }) {
   const { carrierSelections, scenarioName: ctxScenarioName } = useScenario();
   const [selectedScenarioId, setSelectedScenarioId] = useState('');
   const [viewLevel, setViewLevel] = useState('carrier'); // 'carrier' | 'lane' | 'customer'
@@ -90,6 +90,14 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
       return { ...prev, phases: filtered.map((p, i) => ({ ...p, label: `Phase ${i + 1}` })) };
     });
   }, [computedScenarios]);
+
+  // Branded PDF export — view type drives confidentiality + counterparty.
+  // pendingExport non-null triggers hidden snapshot CarrierSankeys to mount;
+  // a useEffect captures their SVGs and invokes the print window.
+  const [exportViewType, setExportViewType] = useState('customer'); // 'customer' | 'carrier'
+  const [exportCarrierSCAC, setExportCarrierSCAC] = useState('');
+  const [pendingExport, setPendingExport] = useState(null);
+  const snapshotContainerRef = useRef(null);
 
   // Keep the weeks-based legacy factor as the authoritative multiplier
   // (drives existing engine calls) and read the annualization hook for the
@@ -664,22 +672,127 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
     handleExportCsv();
   };
 
+  // Carriers eligible for the carrier-view dropdown — union of source AND
+  // target SCACs across all phaseData links so every carrier touching the
+  // diagram is offered (incumbents and awarded carriers both qualify).
+  const exportCarrierOptions = useMemo(() => {
+    const seen = new Map(); // scac -> carrier display name
+    for (const lanes of (lanesByPhase || [])) {
+      for (const lane of (lanes || [])) {
+        if (lane.carrierSCAC && !seen.has(lane.carrierSCAC)) {
+          seen.set(lane.carrierSCAC, lane.carrierName || lane.carrierSCAC);
+        }
+        if (lane.historicCarrier && !seen.has(lane.historicCarrier)) {
+          seen.set(lane.historicCarrier, lane.historicCarrier);
+        }
+      }
+    }
+    return [...seen.entries()]
+      .map(([scac, name]) => ({ scac, name }))
+      .sort((a, b) => a.scac.localeCompare(b.scac));
+  }, [lanesByPhase]);
+
+  // Default carrier selection when switching to carrier view — pick the top
+  // awarded carrier from the active scenario so the dropdown isn't empty.
+  useEffect(() => {
+    if (exportViewType !== 'carrier') return;
+    if (exportCarrierSCAC && exportCarrierOptions.some(c => c.scac === exportCarrierSCAC)) return;
+    if (exportCarrierOptions.length > 0) {
+      setExportCarrierSCAC(exportCarrierOptions[0].scac);
+    }
+  }, [exportViewType, exportCarrierOptions, exportCarrierSCAC]);
+
   const handleSharePdf = useCallback(() => {
-    const sankeyHtml = sankeyRef.current?.innerHTML || '';
-    const distinctCarriers = new Set(displayCarrierSummary.filter(c => c.awardedLanes > 0).map(c => c.scac));
-    openAwardSharePdf({
-      sankeyHtml,
-      carrierSummary: { carriers: displayCarrierSummary, totals: displayCsTotals },
-      originMix: displayOriginMix,
-      sampleWeeks,
-      annualizationFactor,
-      totals: displayCsTotals,
-      customerName,
-      carrierCount: distinctCarriers.size,
-      originSummaries: displayOriginSummaries,
-      pricingMode: displayPricingMode,
+    if (exportViewType === 'carrier' && !exportCarrierSCAC) {
+      alert('Pick a carrier from the dropdown before exporting in Carrier view.');
+      return;
+    }
+    setPendingExport({
+      viewType: exportViewType,
+      carrierSCAC: exportViewType === 'carrier' ? exportCarrierSCAC : '',
     });
-  }, [displayCarrierSummary, displayCsTotals, displayOriginMix, sampleWeeks, annualizationFactor, customerName, displayOriginSummaries, displayPricingMode]);
+  }, [exportViewType, exportCarrierSCAC]);
+
+  // Snapshot capture: when pendingExport is set, the hidden container below
+  // mounts one CarrierSankey per phase with the snapshot-mode phaseIndex
+  // prop. We wait two RAF ticks (one for React commit, one for layout), then
+  // serialize each <svg> outerHTML and pass them into openAwardSharePdf.
+  useEffect(() => {
+    if (!pendingExport) return;
+    let cancelled = false;
+    let raf2 = 0;
+
+    const raf1 = requestAnimationFrame(() => {
+      if (cancelled) return;
+      raf2 = requestAnimationFrame(() => {
+        if (cancelled) return;
+        const root = snapshotContainerRef.current;
+        const cells = root ? root.querySelectorAll('[data-snapshot-phase]') : [];
+        const phaseSnapshots = [];
+        cells.forEach(cell => {
+          const phaseIndex = parseInt(cell.getAttribute('data-snapshot-phase'), 10);
+          const label = cell.getAttribute('data-snapshot-label') || '';
+          const svg = cell.querySelector('svg');
+          if (svg) {
+            phaseSnapshots.push({
+              phaseIndex,
+              label,
+              svgHtml: svg.outerHTML,
+              viewBox: svg.getAttribute('viewBox') || '',
+            });
+          }
+        });
+
+        // Sanity check: scaffold should produce identical viewBoxes across
+        // phases. Mismatches indicate a regression in the two-pass builder.
+        if (phaseSnapshots.length > 1) {
+          const first = phaseSnapshots[0].viewBox;
+          const drift = phaseSnapshots.find(s => s.viewBox && s.viewBox !== first);
+          if (drift) {
+            console.warn('[AnnualAwardBuilder] Phase Sankey viewBox drift detected — scaffold may not be stable.',
+              { expected: first, drift: drift.viewBox });
+          }
+        }
+
+        const carrierObj = pendingExport.carrierSCAC
+          ? exportCarrierOptions.find(c => c.scac === pendingExport.carrierSCAC)
+          : null;
+        const carrierDisplayName = carrierObj
+          ? `${carrierObj.scac} — ${carrierObj.name}`
+          : pendingExport.carrierSCAC || '';
+
+        const distinctCarriers = new Set(displayCarrierSummary.filter(c => c.awardedLanes > 0).map(c => c.scac));
+        const sankeyHtml = sankeyRef.current?.innerHTML || '';
+
+        openAwardSharePdf({
+          sankeyHtml,
+          phaseSnapshots,
+          phaseSequence,
+          viewType: pendingExport.viewType,
+          carrierName: carrierDisplayName,
+          preparedBy: preparedBy || '',
+          carrierSummary: { carriers: displayCarrierSummary, totals: displayCsTotals },
+          originMix: displayOriginMix,
+          sampleWeeks,
+          annualizationFactor,
+          totals: displayCsTotals,
+          customerName,
+          carrierCount: distinctCarriers.size,
+          originSummaries: displayOriginSummaries,
+          pricingMode: displayPricingMode,
+        });
+
+        // Unmount snapshots after the print window is opened.
+        setPendingExport(null);
+      });
+    });
+
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf1);
+      if (raf2) cancelAnimationFrame(raf2);
+    };
+  }, [pendingExport, exportCarrierOptions, displayCarrierSummary, displayCsTotals, displayOriginMix, sampleWeeks, annualizationFactor, customerName, displayOriginSummaries, displayPricingMode, preparedBy, phaseSequence]);
 
   const deltaColor = (v) => v < 0 ? 'text-green-700' : v > 0 ? 'text-red-600' : 'text-gray-700';
   const netLaneColor = (v) => v > 0 ? 'text-green-700' : v < 0 ? 'text-red-600' : 'text-gray-500';
@@ -718,9 +831,46 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
                 className="text-xs border border-gray-300 rounded px-2 py-1.5 w-40"
               />
             )}
+            {/* View-type toggle for the branded PDF export. Drives confidentiality
+                line and counterparty name on cover + every page footer. */}
+            <div className="flex items-center gap-2 text-xs border border-gray-200 rounded px-2 py-1">
+              <label className="flex items-center gap-1 cursor-pointer">
+                <input
+                  type="radio"
+                  name="brat-export-view"
+                  checked={exportViewType === 'customer'}
+                  onChange={() => setExportViewType('customer')}
+                  className="accent-[#002144]"
+                />
+                Customer view
+              </label>
+              <label className="flex items-center gap-1 cursor-pointer">
+                <input
+                  type="radio"
+                  name="brat-export-view"
+                  checked={exportViewType === 'carrier'}
+                  onChange={() => setExportViewType('carrier')}
+                  className="accent-[#002144]"
+                />
+                Carrier view
+              </label>
+              {exportViewType === 'carrier' && (
+                <select
+                  value={exportCarrierSCAC}
+                  onChange={(e) => setExportCarrierSCAC(e.target.value)}
+                  className="text-xs border border-gray-300 rounded px-1 py-0.5 max-w-[160px]"
+                  title="Pick the carrier this PDF is for"
+                >
+                  {exportCarrierOptions.length === 0 && <option value="">No carriers in phase set</option>}
+                  {exportCarrierOptions.map(c => (
+                    <option key={c.scac} value={c.scac}>{c.scac} — {c.name}</option>
+                  ))}
+                </select>
+              )}
+            </div>
             <button
               onClick={handleSharePdf}
-              disabled={csTotals.awardedLanes === 0}
+              disabled={csTotals.awardedLanes === 0 || (exportViewType === 'carrier' && !exportCarrierSCAC)}
               className="text-xs bg-[#002144] hover:bg-[#003366] disabled:bg-gray-300 text-white px-3 py-1.5 rounded font-medium"
               style={{ fontFamily: "'Montserrat', Arial, sans-serif" }}
             >
@@ -1302,6 +1452,45 @@ export default function AnnualAwardBuilder({ flatRows, computedScenarios, active
           }
         </p>
       </div>
+
+      {/* Hidden snapshot container — mounts one CarrierSankey per phase in
+          snapshot mode (phaseIndex prop) when an export is pending. The
+          useEffect above captures their <svg> outerHTML on the next two RAF
+          ticks, then unmounts by clearing pendingExport. Off-screen rather
+          than display:none so the SVG actually lays out and serializes. */}
+      {pendingExport && (
+        <div
+          ref={snapshotContainerRef}
+          aria-hidden="true"
+          style={{
+            position: 'fixed',
+            left: '-10000px',
+            top: 0,
+            width: 1100,
+            pointerEvents: 'none',
+            opacity: 0,
+          }}
+        >
+          {[
+            { phaseIndex: 0, label: phaseSequence.baseline.label || 'Historic' },
+            ...phaseSequence.phases.map((p, i) => ({ phaseIndex: i + 1, label: p.label || `Phase ${i + 1}` })),
+          ].map(({ phaseIndex, label }) => (
+            <div
+              key={phaseIndex}
+              data-snapshot-phase={phaseIndex}
+              data-snapshot-label={label}
+              style={{ width: 1100 }}
+            >
+              <CarrierSankey
+                phaseSequence={phaseSequence}
+                awardContext={sankeyAwardContext}
+                phaseIndex={phaseIndex}
+                width={1100}
+              />
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

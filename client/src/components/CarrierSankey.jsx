@@ -321,12 +321,13 @@ function computeNColumnLayout(scaffold, columnData, flows, width, height) {
       const targetSCAC = link.targetCarrier;
       const isRetained = sourceSCAC === targetSCAC;
 
-      // Same carrier across adjacent phases → flat straight band (no Bezier),
-      // restoring single-phase Historic→Award visual when shares match.
-      // Cross-carrier links keep the smooth bezier curve.
-      const d = isRetained
-        ? `M${x0},${sy + sHeight / 2} L${x1},${ty + tHeight / 2}`
-        : `M${x0},${sy + sHeight / 2} C${midX},${sy + sHeight / 2} ${midX},${ty + tHeight / 2} ${x1},${ty + tHeight / 2}`;
+      // Always render bezier. With matching endpoint y's the curve degenerates
+      // to a horizontal flat band (visually identical to a straight line), so
+      // we don't lose the "retained = flat" look. With mismatched y's (the
+      // common case when a carrier's share differs between columns), the
+      // bezier curves smoothly instead of producing a broken-looking diagonal
+      // — which is what the previous `L`-line shortcut produced.
+      const d = `M${x0},${sy + sHeight / 2} C${midX},${sy + sHeight / 2} ${midX},${ty + tHeight / 2} ${x1},${ty + tHeight / 2}`;
 
       paths.push({
         link,

@@ -4,6 +4,8 @@
  * NEVER serializes credentials (username, password) or full XML bodies.
  */
 
+import { isRowRetryable } from '../utils/retryClassification.js';
+
 const CURRENT_VERSION = '1.0';
 const APP_VERSION = '3.0.0';
 
@@ -91,14 +93,21 @@ export function serializeRun(results, batchParams, batchMeta, yieldConfig, optio
     run.customerLocations = extras.customerLocations;
   }
 
-  // Include unrated CSV rows for resume capability
+  // Include rows that are still RETRYABLE (no result yet, or transient failure
+  // like timeout/throttle/network) in pendingRows. Excludes:
+  //   - successes (already done)
+  //   - terminal failures (NO_RATES, weight errors, invalid input, unknown) —
+  //     retry produces identical response, so persisting them as pending
+  //     causes an infinite Resume Stalled loop.
   if (options.csvRows && !run.batchStatus.isComplete) {
-    const succeededRefs = new Set(
-      results.filter(r => r.success).map(r => r.reference)
-    );
-    const unratedRows = options.csvRows.filter(row =>
-      !succeededRefs.has(row['Reference'] || '')
-    );
+    const resultByRef = new Map();
+    for (const r of results) {
+      if (r && r.reference) resultByRef.set(r.reference, r);
+    }
+    const unratedRows = options.csvRows.filter(row => {
+      const ref = row['Reference'] || '';
+      return isRowRetryable(resultByRef.get(ref));
+    });
     if (unratedRows.length > 0) {
       run.pendingRows = unratedRows;
       run.pendingRowCount = unratedRows.length;

@@ -17,13 +17,12 @@ export default function App() {
   const [retryData, setRetryData] = useState(null); // { retryRows, existingResults, batchMeta }
   const [retryProgress, setRetryProgress] = useState(null);
   const [loadingFile, setLoadingFile] = useState(false);
-  const [pendingAutoResume, setPendingAutoResume] = useState(false);
   const [customerLocations, setCustomerLocations] = useState([]);
 
   // Lifted refs so ResultsScreen can access execution controls
   const orchestratorRef = useRef(null);
   const executorRef = useRef(null);
-  const autoResumeTriggered = useRef(false);
+  const autoKickTriggered = useRef(false);
 
 
   const handleConnected = useCallback((creds) => {
@@ -53,7 +52,7 @@ export default function App() {
     setLoadedFromFile(false);
     setCsvRows(null);
     setRetryData(null);
-    setPendingAutoResume(false);
+    autoKickTriggered.current = false;
   }, []);
 
   const handleBatchStart = useCallback((params, rowCount, meta, rows) => {
@@ -63,6 +62,10 @@ export default function App() {
     setTotalRows(rowCount);
     setLoadedFromFile(false);
     if (rows) setCsvRows(rows);
+    // InputScreen owns this flow and starts the orchestrator itself; mark the
+    // auto-kick latch as already-triggered so the App-level effect doesn't
+    // race and spawn a duplicate executor before the orchestratorRef is set.
+    autoKickTriggered.current = true;
     setScreen('results');
   }, []);
 
@@ -81,9 +84,9 @@ export default function App() {
     setLoadedFromFile(false);
     setCsvRows(null);
     setRetryData(null);
-    setPendingAutoResume(false);
     orchestratorRef.current = null;
     executorRef.current = null;
+    autoKickTriggered.current = false;
     setScreen('input');
   }, []);
 
@@ -99,16 +102,17 @@ export default function App() {
       setBatchMeta({ batchId: run.batchId, ...run.metadata });
       setBatchParams(run.metadata);
       setLoadedFromFile(true);
-      autoResumeTriggered.current = false;
+      // Re-arm the auto-kick latch — the unified predicate decides whether to fire
+      autoKickTriggered.current = false;
       if (run.customerLocations) setCustomerLocations(run.customerLocations);
 
-      // Handle resumable files with pending rows
-      if (run.pendingRows && run.pendingRows.length > 0) {
+      // Compute totalRows from the saved targetRows when available so a partial
+      // file reload doesn't masquerade as complete (results.length === totalRows).
+      const pendingCount = run.pendingRows?.length || 0;
+      const computedTotal = run.targetRows || (run.results.length + pendingCount);
+      setTotalRows(computedTotal);
+      if (pendingCount > 0) {
         setCsvRows(run.pendingRows);
-        setTotalRows(run.targetRows || (run.results.length + run.pendingRows.length));
-        setPendingAutoResume(true);
-      } else {
-        setTotalRows(run.results.length);
       }
       setScreen('results');
     } catch (err) {
@@ -248,26 +252,32 @@ export default function App() {
     }
   }, []);
 
-  // Auto-resume: when a file with pending rows is loaded and credentials
-  // are available, automatically start processing without user interaction.
+  // Unified auto-kick: whenever rows are loaded, the batch is not running,
+  // not complete, and there is still work to do, start processing. Same
+  // predicate covers fresh upload, mid-batch reload, and post-pause reload.
   useEffect(() => {
-    if (!pendingAutoResume || !credentials || screen !== 'results') return;
-    if (!csvRows || csvRows.length === 0 || !batchParams) return;
+    if (!credentials || screen !== 'results' || !batchParams) return;
+    if (!csvRows || csvRows.length === 0) return;
+    // isRunning guard — refs are set synchronously by InputScreen and by
+    // this effect itself, preventing double-fire.
     if (executorRef.current || orchestratorRef.current) return;
-    if (autoResumeTriggered.current) return;
+    if (autoKickTriggered.current) return;
 
-    autoResumeTriggered.current = true;
-    setPendingAutoResume(false);
+    const effectiveTotal = totalRows || csvRows.length;
+    const isComplete = results.length >= effectiveTotal;
+    const shouldAutoKick = csvRows.length > 0 && !isComplete && results.length < effectiveTotal;
+    if (!shouldAutoKick) return;
 
-    // Snapshot current results to derive pending rows
-    const currentResults = results;
+    // Snapshot current results to derive the work list
     const succeededRefs = new Set(
-      currentResults.filter(r => r.success).map(r => r.reference)
+      results.filter(r => r.success).map(r => r.reference)
     );
     const retryRows = csvRows.filter(row =>
       !succeededRefs.has(row['Reference'] || '')
     );
     if (retryRows.length === 0) return;
+
+    autoKickTriggered.current = true;
 
     import('./services/batchExecutor.js').then(({ createBatchExecutor }) => {
       const executor = createBatchExecutor({
@@ -297,7 +307,8 @@ export default function App() {
         onComplete: () => {
           setRetryProgress(null);
           executorRef.current = null;
-          autoResumeTriggered.current = false;
+          // Leave autoKickTriggered=true so the effect doesn't immediately
+          // restart on stragglers; handleNewBatch / handleLoadRun reset it.
         },
       });
 
@@ -305,7 +316,7 @@ export default function App() {
       setRetryProgress({ completed: 0, total: retryRows.length, succeeded: 0, failed: 0, state: 'RUNNING' });
       executor.start(retryRows, batchParams, credentials);
     });
-  }, [pendingAutoResume, credentials, screen, csvRows, batchParams, results]);
+  }, [csvRows, credentials, screen, batchParams, results.length, totalRows]);
 
   // beforeunload: warn when batch is running or partial results unsaved
   useEffect(() => {

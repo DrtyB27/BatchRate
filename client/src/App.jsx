@@ -4,6 +4,7 @@ import InputScreen from './screens/InputScreen.jsx';
 import ResultsScreen from './screens/ResultsScreen.jsx';
 import RateLoadValidator from './rateload/RateLoadValidator.jsx';
 import { deserializeRun, readJsonFile, validateRunFile } from './services/runPersistence.js';
+import { isRowRetryable } from './utils/retryClassification.js';
 
 export default function App() {
   const [screen, setScreen] = useState('credentials');
@@ -181,16 +182,21 @@ export default function App() {
       return;
     }
 
-    // Find rows that need retrying
-    const succeededRefs = new Set(
-      results.filter(r => r.success).map(r => r.reference)
-    );
-    const retryRows = csvRows.filter(row =>
-      !succeededRefs.has(row['Reference'] || '')
-    );
+    // Find rows that need retrying — only pending (no result) or transient-
+    // failure (TIMEOUT_EXHAUSTED / API_ERROR / THROTTLE_RESPONSE) rows.
+    // Terminal failures (NO_RATES, weight errors, invalid input) are skipped:
+    // 3G TMS already gave us a definitive answer for those lanes.
+    const resultByRef = new Map();
+    for (const r of results) {
+      if (r && r.reference) resultByRef.set(r.reference, r);
+    }
+    const retryRows = csvRows.filter(row => {
+      const ref = row['Reference'] || '';
+      return isRowRetryable(resultByRef.get(ref));
+    });
 
     if (retryRows.length === 0) {
-      alert('All rows already succeeded. Nothing to retry.');
+      alert('Nothing to retry. All rows either succeeded or got a definitive answer (e.g. NO_RATES — no contracts cover that lane). For NO_RATES rows, retrying produces the same response.');
       return;
     }
 
@@ -279,13 +285,19 @@ export default function App() {
     const shouldAutoKick = csvRows.length > 0 && !isComplete && results.length < effectiveTotal;
     if (!shouldAutoKick) return;
 
-    // Snapshot current results to derive the work list
-    const succeededRefs = new Set(
-      results.filter(r => r.success).map(r => r.reference)
-    );
-    const retryRows = csvRows.filter(row =>
-      !succeededRefs.has(row['Reference'] || '')
-    );
+    // Snapshot current results to derive the work list. Only include rows
+    // that are pending (no result) or retryable (transient failure). NO_RATES
+    // and other terminal failures are excluded — retry will produce the same
+    // response and would cause the executor to AUTO_PAUSE at 100% error
+    // rate, surfacing the "Resume Stalled" loop the user sees today.
+    const resultByRef = new Map();
+    for (const r of results) {
+      if (r && r.reference) resultByRef.set(r.reference, r);
+    }
+    const retryRows = csvRows.filter(row => {
+      const ref = row['Reference'] || '';
+      return isRowRetryable(resultByRef.get(ref));
+    });
     if (retryRows.length === 0) return;
 
     autoKickTriggered.current = true;

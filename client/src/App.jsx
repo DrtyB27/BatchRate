@@ -244,6 +244,17 @@ export default function App() {
     }
   }, []);
 
+  // Slow-resume: only available on the simple executor (auto-kicked resume
+  // path). Multi-agent orchestrator does not expose resumeSlow; for that
+  // path we fall back to plain resume().
+  const handleResumeSlow = useCallback(() => {
+    if (executorRef.current && typeof executorRef.current.resumeSlow === 'function') {
+      executorRef.current.resumeSlow();
+    } else if (orchestratorRef.current) {
+      orchestratorRef.current.resume();
+    }
+  }, []);
+
   const handleCancelExecution = useCallback(() => {
     if (orchestratorRef.current) {
       orchestratorRef.current.cancel();
@@ -281,10 +292,17 @@ export default function App() {
 
     import('./services/batchExecutor.js').then(({ createBatchExecutor }) => {
       const executor = createBatchExecutor({
-        concurrency: 4, // capped for resume to avoid server overload
+        // Lower default for resume — original batches typically AUTO_PAUSE
+        // because of SMC3 CarrierConnect saturation; restarting at the
+        // same concurrency that failed just re-saturates immediately.
+        // autoTune lets the spike-aware tuner ramp up if the server
+        // is healthy.
+        concurrency: 2,
         delayMs: 200,
         retryAttempts: 2,
         adaptiveBackoff: true,
+        autoTune: true,
+        autoTuneTarget: 10559,
         timeoutMs: 60000,
         saveXml: false,
         onResult: (result) => {
@@ -431,6 +449,7 @@ export default function App() {
             onRetryInPlace={handleRetryInPlace}
             retryProgress={retryProgress}
             onResumeExecution={handleResumeExecution}
+            onResumeSlow={handleResumeSlow}
             onCancelExecution={handleCancelExecution}
             orchestratorRef={orchestratorRef}
             executorRef={executorRef}

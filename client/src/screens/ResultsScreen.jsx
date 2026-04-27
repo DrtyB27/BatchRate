@@ -263,7 +263,7 @@ function buildCustomRateCsv(flatRows) {
 // ============================================================
 export default function ResultsScreen({
   results, totalRows, batchParams, batchMeta, credentials, onNewBatch, onLoadRun, onReplaceResults,
-  loadedFromFile, initialYieldConfig, csvRows, onRetryFailed, onResumeExecution,
+  loadedFromFile, initialYieldConfig, csvRows, onRetryFailed, onResumeExecution, onResumeSlow,
   onCancelExecution, orchestratorRef, executorRef, onRetryInPlace, retryProgress,
   customerLocations, onCustomerLocationsChange,
 }) {
@@ -505,6 +505,26 @@ export default function ResultsScreen({
     onReplaceResults(combinedResults, combinedMeta);
   };
 
+  // Aggregate the most common failureReason / ratingMessage among the most
+  // recent failed results. Surfaced in the AUTO_PAUSED banner so users can
+  // tell whether the stall is throttle, auth, validation, network, etc.
+  // without having to open DevTools or inspect the results table.
+  const recentFailureSummary = useMemo(() => {
+    const lastN = 20;
+    const failed = results.filter(r => !r.success).slice(-lastN);
+    if (failed.length === 0) return null;
+    const counts = {};
+    for (const r of failed) {
+      const reason = r.failureReason || r.ratingMessage || r.ratingNote || 'UNKNOWN';
+      const key = String(reason).slice(0, 80);
+      counts[key] = (counts[key] || 0) + 1;
+    }
+    const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+    const topReason = sorted[0][0];
+    const topCount = sorted[0][1];
+    return { topReason, topCount, totalRecent: failed.length, distinctReasons: sorted.length };
+  }, [results]);
+
   const viewBtnCls = (mode) =>
     `px-3 py-1.5 text-xs font-medium rounded transition-colors ${
       viewMode === mode
@@ -541,19 +561,47 @@ export default function ResultsScreen({
             )}
             <div className="flex-1" />
 
-            {/* Resume only when orchestrator/executor is actually paused */}
+            {/* Resume controls — visible only when an orchestrator/executor
+                is actually paused. AUTO_PAUSED almost always means the
+                adaptive backoff tripped at >=60% error rate; surface the
+                most common recent failure reason so the user (or next
+                iteration of debugging) can see WHAT is failing, and offer
+                a "Resume Slow" path that drops to concurrency=1+delay=500. */}
             {!isComplete && onResumeExecution && (() => {
               const orchState = orchestratorRef?.current?.getStatus?.()?.state;
               const execState = executorRef?.current?.getStatus?.()?.state;
               return orchState === 'PAUSED' || orchState === 'AUTO_PAUSED' ||
                      execState === 'PAUSED' || execState === 'AUTO_PAUSED';
             })() && (
-              <button
-                onClick={onResumeExecution}
-                className="text-xs bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded font-medium transition-colors"
-              >
-                Resume Stalled
-              </button>
+              <>
+                {recentFailureSummary && (
+                  <span
+                    className="text-xs text-red-700 font-medium ml-2 max-w-[420px] truncate"
+                    title={`${recentFailureSummary.topCount} of last ${recentFailureSummary.totalRecent} failures: ${recentFailureSummary.topReason}`}
+                  >
+                    Reason: {recentFailureSummary.topReason}
+                    {recentFailureSummary.distinctReasons > 1
+                      ? ` (+${recentFailureSummary.distinctReasons - 1} other)`
+                      : ''}
+                  </span>
+                )}
+                <button
+                  onClick={onResumeExecution}
+                  className="text-xs bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded font-medium transition-colors"
+                  title="Resume at current concurrency. If the same errors repeat, try Resume Slow."
+                >
+                  Resume Stalled
+                </button>
+                {onResumeSlow && executorRef?.current && (
+                  <button
+                    onClick={onResumeSlow}
+                    className="text-xs bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 rounded font-medium transition-colors"
+                    title="Resume at concurrency=1 with 500ms delay — use when normal Resume keeps re-pausing."
+                  >
+                    Resume Slow
+                  </button>
+                )}
+              </>
             )}
 
             {/* RETRY BUTTON — visible when there are retryable rows */}

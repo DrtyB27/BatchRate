@@ -17,6 +17,7 @@ import { applyMargin } from '../services/ratingClient.js';
 import { ScenarioProvider } from '../context/ScenarioContext.jsx';
 import useAnnualization from '../hooks/useAnnualization.js';
 import useHistoricBaseline from '../hooks/useHistoricBaseline.js';
+import { classifyRow, RETRYABLE_FAILURE_REASONS } from '../utils/retryClassification.js';
 
 function downloadBlob(filename, blob) {
   const url = URL.createObjectURL(blob);
@@ -385,18 +386,29 @@ export default function ResultsScreen({
     });
   }, [scenarios, flatRows, allSCACs]);
 
-  // Summary stats
-  const successCount = results.filter(r => r.success).length;
+  // Summary stats — partitioned via the central classifyRow helper so the
+  // banner, retry button, and persistence layer agree on what "retryable"
+  // means. NO_RATES (rateCount=0, no failureReason) and other terminal
+  // failures (weight errors, invalid input, unknown) are NOT retryable —
+  // retrying them produces the same response and causes the AUTO_PAUSE +
+  // Resume Stalled loop.
+  const successCount = results.filter(r => classifyRow(r) === 'success').length;
+  const retryableFailedCount = results.filter(r => classifyRow(r) === 'retryable').length;
+  const terminalFailedCount = results.filter(r => classifyRow(r) === 'terminal').length;
   const invalidInputCount = results.filter(r => r.ratingStatus === 'INVALID_INPUT').length;
-  const failedResults = results.filter(r => !r.success && r.ratingStatus !== 'INVALID_INPUT');
-  const noRateCount = failedResults.filter(r => !r.ratingMessage?.includes('failed') && !r.ratingMessage?.includes('timed out')).length;
-  const failedCount = failedResults.filter(r => r.ratingMessage?.includes('failed') || r.ratingMessage?.includes('timed out')).length;
   const totalElapsed = results.reduce((sum, r) => sum + (r.elapsedMs || 0), 0);
   const avgTime = results.length > 0 ? Math.round(totalElapsed / results.length) : 0;
 
-  // Retry counts
-  const missingCount = totalRows - results.length;
-  const retryableFailedCount = failedResults.length;
+  // Legacy aliases retained so downstream JSX that references failedResults /
+  // failedCount / noRateCount continues to compile. failedCount now reflects
+  // ONLY retryable failures (transient); terminalFailedCount tracks the rest.
+  const failedResults = results.filter(r => !r.success && r.ratingStatus !== 'INVALID_INPUT');
+  const failedCount = retryableFailedCount;
+  const noRateCount = terminalFailedCount;
+
+  // Retry counts — only pending + retryable (not terminal). missingCount is
+  // rows that have no result at all (never dispatched).
+  const missingCount = Math.max(0, totalRows - results.length);
   const retryCount = missingCount + retryableFailedCount;
   const hasCsvRows = csvRows && csvRows.length > 0;
 
@@ -505,24 +517,27 @@ export default function ResultsScreen({
     onReplaceResults(combinedResults, combinedMeta);
   };
 
-  // Aggregate the most common failureReason / ratingMessage among the most
-  // recent failed results. Surfaced in the AUTO_PAUSED banner so users can
-  // tell whether the stall is throttle, auth, validation, network, etc.
-  // without having to open DevTools or inspect the results table.
+  // Top failure reason among recent retryable failures — surfaced in the
+  // AUTO_PAUSED banner so the user (or next debug pass) can see what's
+  // failing without opening DevTools. Terminal failures (NO_RATES, weight
+  // errors, invalid input) are excluded since the user already sees those
+  // counts directly.
   const recentFailureSummary = useMemo(() => {
     const lastN = 20;
-    const failed = results.filter(r => !r.success).slice(-lastN);
-    if (failed.length === 0) return null;
+    const recent = results.filter(r => classifyRow(r) === 'retryable').slice(-lastN);
+    if (recent.length === 0) return null;
     const counts = {};
-    for (const r of failed) {
-      const reason = r.failureReason || r.ratingMessage || r.ratingNote || 'UNKNOWN';
-      const key = String(reason).slice(0, 80);
-      counts[key] = (counts[key] || 0) + 1;
+    for (const r of recent) {
+      const reason = r.failureReason || 'UNKNOWN';
+      counts[reason] = (counts[reason] || 0) + 1;
     }
     const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
-    const topReason = sorted[0][0];
-    const topCount = sorted[0][1];
-    return { topReason, topCount, totalRecent: failed.length, distinctReasons: sorted.length };
+    return {
+      topReason: sorted[0][0],
+      topCount: sorted[0][1],
+      totalRecent: recent.length,
+      distinctReasons: sorted.length,
+    };
   }, [results]);
 
   const viewBtnCls = (mode) =>
@@ -536,37 +551,45 @@ export default function ResultsScreen({
     <ScenarioProvider>
     <div className="flex-1 flex flex-col overflow-hidden">
       {/* Batch action banner — shows during execution OR after completion with failures */}
-      {results.length > 0 && (!isComplete || retryCount > 0) && (
+      {results.length > 0 && (!isComplete || retryCount > 0 || terminalFailedCount > 0) && (
         <div className={`${isComplete ? 'bg-red-50 border-b border-red-200' : 'bg-amber-50 border-b border-amber-200'} px-6 py-3 shrink-0`}>
           <div className="flex items-center gap-3 flex-wrap">
             <span className={`${isComplete ? 'text-red-800' : 'text-amber-800'} text-sm font-semibold`}>
               {isComplete
-                ? `Batch complete — ${retryCount} rows need attention`
+                ? (retryCount > 0
+                    ? `Batch complete — ${retryCount} rows need retry`
+                    : `Batch complete — ${terminalFailedCount} rows have no available rates`)
                 : `Batch incomplete: ${results.length}/${totalRows}`
               }
             </span>
             <span className={`${isComplete ? 'text-red-700' : 'text-amber-700'} text-xs`}>
-              {isComplete
-                ? `${failedCount} failed, ${successCount} succeeded`
-                : `${totalRows - results.length} rows remaining${failedCount > 0 ? ` (${failedCount} failed)` : ''}`
-              }
+              {`${successCount} rated · ${retryableFailedCount} retryable · ${terminalFailedCount} no rates available${missingCount > 0 ? ` · ${missingCount} pending` : ''}`}
             </span>
-            {loadedFromFile && hasCsvRows && !isComplete && (
+            {loadedFromFile && hasCsvRows && !isComplete && retryCount > 0 && (
               <span className={`${retryProgress ? 'text-green-700' : 'text-blue-700'} font-medium text-xs ml-2`}>
                 {retryProgress
-                  ? `Auto-resuming — processing ${retryProgress.total} pending rows...`
-                  : `(Resumable — ${csvRows.length} pending rows ready to rate)`
+                  ? `Auto-resuming — processing ${retryProgress.total} retryable rows...`
+                  : `(Resumable — ${retryCount} retryable rows ready)`
                 }
+              </span>
+            )}
+            {recentFailureSummary && retryableFailedCount > 0 && (
+              <span
+                className="text-xs text-red-700 font-medium ml-2 max-w-[420px] truncate"
+                title={`${recentFailureSummary.topCount} of last ${recentFailureSummary.totalRecent} retryable failures: ${recentFailureSummary.topReason}`}
+              >
+                Reason: {recentFailureSummary.topReason}
+                {recentFailureSummary.distinctReasons > 1
+                  ? ` (+${recentFailureSummary.distinctReasons - 1} other)`
+                  : ''}
               </span>
             )}
             <div className="flex-1" />
 
             {/* Resume controls — visible only when an orchestrator/executor
-                is actually paused. AUTO_PAUSED almost always means the
-                adaptive backoff tripped at >=60% error rate; surface the
-                most common recent failure reason so the user (or next
-                iteration of debugging) can see WHAT is failing, and offer
-                a "Resume Slow" path that drops to concurrency=1+delay=500. */}
+                is actually paused. The "Reason:" hint is now rendered above
+                next to the breakdown line so it's also visible when no
+                pause is active. */}
             {!isComplete && onResumeExecution && (() => {
               const orchState = orchestratorRef?.current?.getStatus?.()?.state;
               const execState = executorRef?.current?.getStatus?.()?.state;
@@ -574,17 +597,6 @@ export default function ResultsScreen({
                      execState === 'PAUSED' || execState === 'AUTO_PAUSED';
             })() && (
               <>
-                {recentFailureSummary && (
-                  <span
-                    className="text-xs text-red-700 font-medium ml-2 max-w-[420px] truncate"
-                    title={`${recentFailureSummary.topCount} of last ${recentFailureSummary.totalRecent} failures: ${recentFailureSummary.topReason}`}
-                  >
-                    Reason: {recentFailureSummary.topReason}
-                    {recentFailureSummary.distinctReasons > 1
-                      ? ` (+${recentFailureSummary.distinctReasons - 1} other)`
-                      : ''}
-                  </span>
-                )}
                 <button
                   onClick={onResumeExecution}
                   className="text-xs bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded font-medium transition-colors"
@@ -604,13 +616,16 @@ export default function ResultsScreen({
               </>
             )}
 
-            {/* RETRY BUTTON — visible when there are retryable rows */}
+            {/* RETRY BUTTON — only show when there are RETRYABLE rows.
+                Terminal failures (NO_RATES, weight errors) are excluded —
+                3G already gave us a definitive answer for those. */}
             {onRetryInPlace && !retryProgress && retryCount > 0 && (
               <button
                 onClick={onRetryInPlace}
                 className="bg-[#39b6e6] hover:bg-[#2d9bc4] text-white px-5 py-2 rounded-lg font-bold text-sm shadow-md transition-colors"
+                title={terminalFailedCount > 0 ? `${terminalFailedCount} terminal failures (no contracts cover those lanes) are excluded from retry.` : undefined}
               >
-                {isComplete ? `Retry ${retryCount} Failed Rows` : `Retry ${totalRows - results.filter(r => r.success).length} Remaining Rows`}
+                Retry {retryCount} {missingCount > 0 && retryableFailedCount > 0 ? 'Pending + Failed' : (retryableFailedCount > 0 ? 'Failed' : 'Pending')} Rows
               </button>
             )}
 

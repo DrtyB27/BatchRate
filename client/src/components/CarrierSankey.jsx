@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { computeSankeyData, SANKEY_CARRIER_PALETTE } from '../services/analyticsEngine.js';
 
@@ -25,6 +25,73 @@ const NODE_GAP = 4;
 const PHASE_MIN_WIDTH = 320;
 const CARRIER_ROW_HEIGHT = 32;
 const PANEL_HEIGHT = 600;
+
+// Measure a wrapper's content-box dimensions via ResizeObserver. Only
+// observes while `active` is true so the fullscreen observer doesn't
+// keep a closed modal's ref alive. Returns [ref, { width, height }];
+// width/height are 0 until the first observation lands.
+function useMeasuredSize(active) {
+  const ref = useRef(null);
+  const [size, setSize] = useState({ width: 0, height: 0 });
+  useEffect(() => {
+    if (!active) return undefined;
+    const el = ref.current;
+    if (!el || typeof ResizeObserver === 'undefined') return undefined;
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const cr = entry.contentRect;
+        setSize({ width: cr.width, height: cr.height });
+      }
+    });
+    ro.observe(el);
+    // Seed with current size so the first paint after activation already
+    // has the measurement; avoids a one-frame layout pass at the floor.
+    const rect = el.getBoundingClientRect();
+    setSize({ width: rect.width, height: rect.height });
+    return () => ro.disconnect();
+  }, [active]);
+  return [ref, size];
+}
+
+// Filter sankeyData by a min-flow percentage threshold. A link survives if
+// its weight >= maxColumnTotal * pct/100. A node survives if its share is
+// above the same threshold OR if it has any surviving link. Per-column
+// totalFlow is recomputed from surviving nodes so visible bars stretch to
+// fill the column.
+function applyFlowThreshold(rawData, pct) {
+  if (!rawData) return rawData;
+  if (!pct || pct <= 0) return rawData;
+
+  const maxColumnTotal = Math.max(0, ...rawData.columnData.map(c => c.totalFlow || 0));
+  if (maxColumnTotal <= 0) return rawData;
+  const cutoff = maxColumnTotal * (pct / 100);
+
+  const filteredFlows = rawData.flows.map(flow => ({
+    ...flow,
+    links: flow.links.filter(l => l.weight >= cutoff),
+  }));
+
+  // Carriers kept = (any node share >= cutoff) ∪ (endpoints of any surviving link).
+  const keptCarriers = new Set();
+  for (const flow of filteredFlows) {
+    for (const link of flow.links) {
+      keptCarriers.add(link.sourceCarrier);
+      keptCarriers.add(link.targetCarrier);
+    }
+  }
+
+  const filteredColumnData = rawData.columnData.map(col => {
+    const nodes = col.nodes.filter(n => n.share >= cutoff || keptCarriers.has(n.carrierId));
+    const totalFlow = nodes.reduce((s, n) => s + (n.share || 0), 0);
+    return { ...col, nodes, totalFlow };
+  });
+
+  return {
+    ...rawData,
+    columnData: filteredColumnData,
+    flows: filteredFlows,
+  };
+}
 
 function fmtMoney(v) {
   if (v >= 1e6) return '$' + (v / 1e6).toFixed(2) + 'M';
@@ -390,6 +457,17 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
   const [hoverNode, setHoverNode] = useState(null);
   const [tooltip, setTooltip] = useState(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [minFlowPct, setMinFlowPct] = useState(0);
+
+  // Snapshot mode (deterministic PDF export) bypasses measurement and the
+  // threshold slider; consumers pass propWidth verbatim and expect the full
+  // carrier list at the requested pixel size.
+  const isSnapshot = !!propWidth;
+
+  // Measure the panel scroll wrapper continuously; measure the fullscreen
+  // wrapper only while the modal is open. Skip both in snapshot mode.
+  const [panelRef, panelSize] = useMeasuredSize(!isSnapshot);
+  const [fullscreenRef, fullscreenSize] = useMeasuredSize(!isSnapshot && isFullscreen);
 
   // ESC closes fullscreen.
   useEffect(() => {
@@ -410,10 +488,33 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
 
   const useNColumnMode = !!phaseSequence && !!awardContext;
 
-  const sankeyData = useMemo(() => {
+  const rawSankeyData = useMemo(() => {
     if (!useNColumnMode) return null;
     return computeSankeyData(phaseSequence, awardContext);
   }, [useNColumnMode, phaseSequence, awardContext]);
+
+  // Snapshot mode never thresholds — PDF exports must show the full list.
+  const effectiveMinFlowPct = isSnapshot ? 0 : minFlowPct;
+  const sankeyData = useMemo(
+    () => applyFlowThreshold(rawSankeyData, effectiveMinFlowPct),
+    [rawSankeyData, effectiveMinFlowPct]
+  );
+
+  // Live "hiding N of M" counter — counts unique carriers across columns
+  // before vs after threshold filtering.
+  const hiddenCarrierCounts = useMemo(() => {
+    if (!useNColumnMode || !rawSankeyData || !sankeyData) return null;
+    const collect = (data) => {
+      const set = new Set();
+      for (const col of data.columnData) {
+        for (const n of col.nodes) set.add(n.carrierId);
+      }
+      return set;
+    };
+    const total = collect(rawSankeyData).size;
+    const visible = collect(sankeyData).size;
+    return { total, visible, hidden: Math.max(0, total - visible) };
+  }, [useNColumnMode, rawSankeyData, sankeyData]);
 
   // Empty-state guard for N-column mode.
   const nColumnEmptyMessage = useMemo(() => {
@@ -436,28 +537,47 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
     collapsed.nodes.filter(n => n.side === 'right' || n.side === 'both').length
   ) : (sankeyData ? Math.max(...sankeyData.columnData.map(c => c.nodes.length), 1) : 0);
 
-  // Height: legacy mode keeps 48px/row; N-column uses CARRIER_ROW_HEIGHT plus
-  // a fixed buffer so tall stacks reliably exceed PANEL_HEIGHT and trigger
-  // vertical scroll inside the bounded wrapper.
-  const height = propHeight || (
-    useNColumnMode
-      ? Math.max(420, maxSide * CARRIER_ROW_HEIGHT + 100)
-      : Math.max(420, maxSide * 48)
-  );
-
-  // N-column mode renders one column per phase at a fixed pixel width; this
-  // makes the SVG wider than the panel on any reasonable screen, which is
-  // what triggers horizontal scroll. Don't use a max-with-floor formula: a
-  // floor masks the overflow on wide panels.
+  // Preference order for both axes:
+  //   1. propWidth/propHeight (snapshot mode — deterministic for PDF export)
+  //   2. measured fullscreen wrapper (when fullscreen open)
+  //   3. measured panel wrapper
+  //   4. data-driven floor
+  // Floors keep the chart legible: a 5-phase award still needs cc * PHASE_MIN_WIDTH
+  // horizontally even on a narrow panel, and a tall stack of carriers still
+  // needs vertical room so it triggers scroll instead of compressing.
   const computedWidth = useMemo(() => {
     if (propWidth) return propWidth;
     if (useNColumnMode && sankeyData) {
       const cc = sankeyData.scaffold.columnCount;
-      return cc * PHASE_MIN_WIDTH;
+      const floor = cc * PHASE_MIN_WIDTH;
+      const measured = isFullscreen
+        ? (fullscreenSize.width || panelSize.width || 0)
+        : (panelSize.width || 0);
+      return Math.max(floor, measured);
     }
     return 1100;
-  }, [propWidth, useNColumnMode, sankeyData]);
+  }, [propWidth, useNColumnMode, sankeyData, isFullscreen, fullscreenSize.width, panelSize.width]);
   const width = computedWidth;
+
+  // Height: legacy mode keeps 48px/row; N-column prefers measured wrapper
+  // height so the chart actually fills the frame, falling back to the
+  // data-driven floor (maxSide * CARRIER_ROW_HEIGHT + 80) so a tall stack
+  // still triggers vertical scroll inside the bounded wrapper. Reserve
+  // ~28px below the SVG for the column header strip so total content
+  // matches the measured wrapper without forcing a redundant vertical
+  // scrollbar when data is sparse.
+  const height = useMemo(() => {
+    if (propHeight) return propHeight;
+    if (useNColumnMode) {
+      const floor = Math.max(420, maxSide * CARRIER_ROW_HEIGHT + 80);
+      const measured = isFullscreen
+        ? (fullscreenSize.height || 0)
+        : (panelSize.height || 0);
+      const target = measured ? Math.max(measured - 28, 0) : 0;
+      return Math.max(floor, target);
+    }
+    return Math.max(420, maxSide * 48);
+  }, [propHeight, useNColumnMode, maxSide, isFullscreen, fullscreenSize.height, panelSize.height]);
 
   // Stable carrier color map.
   const carrierColorMap = useMemo(() => {
@@ -567,98 +687,99 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
     }
     function handleLinkLeave() { setHoverLink(null); setTooltip(null); }
 
-    // Bi-directional scroll bounds. The SVG renders at fixed pixel dimensions
-    // (NOT 100% width) in panel mode so it actually overflows the wrapper;
-    // preserveAspectRatio="none" + flexShrink:0 prevents the layout from
-    // shrinking it back to fit. The wrapper uses a fixed height (not maxHeight)
-    // to enforce vertical clipping even when SVG height < 600.
+    // The SVG renders at fixed pixel dimensions in both modes (panel and
+    // fullscreen) — preserveAspectRatio="none" forces no scale-to-fit, so
+    // when SVG width > wrapper width the scroll wrapper engages naturally.
+    // Width/height come from the measure-aware computedWidth/height memos.
     const minSvgWidth = width;
     const minSvgHeight = height;
 
-    const renderSankeyBody = ({ fullscreen }) => (
+    const renderSankeyBody = ({ fullscreen, containerRef }) => (
       <>
         <div
+          ref={containerRef}
           className="border border-gray-200 rounded bg-white"
           style={{
             width: '100%',
-            height: fullscreen ? 'auto' : `${PANEL_HEIGHT}px`,
-            overflow: fullscreen ? 'visible' : 'auto',
+            height: fullscreen ? '100%' : `${PANEL_HEIGHT}px`,
+            overflow: 'auto',
           }}
         >
           <svg
-            width={fullscreen ? '100%' : minSvgWidth}
-            height={fullscreen ? '100%' : minSvgHeight}
+            width={minSvgWidth}
+            height={minSvgHeight}
             viewBox={`0 0 ${minSvgWidth} ${minSvgHeight}`}
-            preserveAspectRatio={fullscreen ? 'xMidYMid meet' : 'none'}
+            preserveAspectRatio="none"
             style={{ display: 'block', flexShrink: 0 }}
           >
-              {/* Flows behind nodes */}
-              {paths.map((p, i) => (
-                <path
-                  key={i}
-                  d={p.d}
-                  fill="none"
-                  stroke={colorFor(p.link.sourceCarrier)}
-                  strokeWidth={p.strokeWidth}
-                  opacity={pathOpacity(p)}
-                  style={{ transition: 'opacity 0.15s', cursor: 'pointer', pointerEvents: pathOpacity(p) > 0.05 ? 'auto' : 'none' }}
-                  onMouseEnter={(e) => handleLinkEnter(e, p)}
-                  onMouseLeave={handleLinkLeave}
-                />
-              ))}
+            {/* Flows behind nodes */}
+            {paths.map((p, i) => (
+              <path
+                key={i}
+                d={p.d}
+                fill="none"
+                stroke={colorFor(p.link.sourceCarrier)}
+                strokeWidth={p.strokeWidth}
+                opacity={pathOpacity(p)}
+                style={{ transition: 'opacity 0.15s', cursor: 'pointer', pointerEvents: pathOpacity(p) > 0.05 ? 'auto' : 'none' }}
+                onMouseEnter={(e) => handleLinkEnter(e, p)}
+                onMouseLeave={handleLinkLeave}
+              />
+            ))}
 
-              {/* Column nodes + labels */}
-              {columns.map((col, ci) => {
-                const colOpacity = opacities[ci] ?? 0;
-                return (
-                  <g key={`col-${ci}`} opacity={colOpacity} style={{ transition: 'opacity 0.05s linear' }}>
-                    {col.nodes.map(n => (
-                      <g key={`n-${ci}-${n.carrierId}`}
-                        onMouseEnter={() => setHoverNode(n.carrierId)}
-                        onMouseLeave={() => setHoverNode(null)}
-                        style={{ cursor: 'pointer' }}
-                      >
-                        <rect
-                          x={n.x}
-                          y={n.y}
-                          width={n.width}
-                          height={n.height}
-                          fill={colorFor(n.carrierId)}
-                          rx={3}
-                        />
-                        {ci === 0 ? (
-                          <text
-                            x={n.x - LABEL_GAP}
-                            y={n.y + n.height / 2}
-                            textAnchor="end"
-                            dominantBaseline="central"
-                            style={labelStyle}
-                          >
-                            {n.carrierId} ({fmtMoney(n.flow)})
-                          </text>
-                        ) : (
-                          <text
-                            x={n.x + n.width + LABEL_GAP}
-                            y={n.y + n.height / 2}
-                            textAnchor="start"
-                            dominantBaseline="central"
-                            style={labelStyle}
-                          >
-                            {n.carrierId} ({fmtMoney(n.flow)})
-                          </text>
-                        )}
-                      </g>
-                    ))}
-                  </g>
-                );
-              })}
-            </svg>
+            {/* Column nodes + labels */}
+            {columns.map((col, ci) => {
+              const colOpacity = opacities[ci] ?? 0;
+              return (
+                <g key={`col-${ci}`} opacity={colOpacity} style={{ transition: 'opacity 0.05s linear' }}>
+                  {col.nodes.map(n => (
+                    <g key={`n-${ci}-${n.carrierId}`}
+                      onMouseEnter={() => setHoverNode(n.carrierId)}
+                      onMouseLeave={() => setHoverNode(null)}
+                      style={{ cursor: 'pointer' }}
+                    >
+                      <rect
+                        x={n.x}
+                        y={n.y}
+                        width={n.width}
+                        height={n.height}
+                        fill={colorFor(n.carrierId)}
+                        rx={3}
+                      />
+                      {ci === 0 ? (
+                        <text
+                          x={n.x - LABEL_GAP}
+                          y={n.y + n.height / 2}
+                          textAnchor="end"
+                          dominantBaseline="central"
+                          style={labelStyle}
+                        >
+                          {n.carrierId} ({fmtMoney(n.flow)})
+                        </text>
+                      ) : (
+                        <text
+                          x={n.x + n.width + LABEL_GAP}
+                          y={n.y + n.height / 2}
+                          textAnchor="start"
+                          dominantBaseline="central"
+                          style={labelStyle}
+                        >
+                          {n.carrierId} ({fmtMoney(n.flow)})
+                        </text>
+                      )}
+                    </g>
+                  ))}
+                </g>
+              );
+            })}
+          </svg>
 
           {/* Column header strip lives inside the scroll container so it
-              tracks the SVG's horizontal scroll. */}
+              tracks the SVG's horizontal scroll. Always pixel-width matching
+              the SVG (never 100%) so the columns line up with their nodes. */}
           <div
             className="flex px-1 py-1 text-[11px] font-semibold text-[#002144] uppercase tracking-wide"
-            style={{ width: fullscreen ? '100%' : `${minSvgWidth}px`, flexShrink: 0 }}
+            style={{ width: `${minSvgWidth}px`, flexShrink: 0 }}
           >
             {columns.map((col, ci) => {
               const widthPct = `${100 / columns.length}%`;
@@ -691,26 +812,55 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
       </>
     );
 
+    // Threshold slider — suppressed in snapshot mode (PDF export).
+    const renderThresholdSlider = () => {
+      if (isSnapshot) return null;
+      const total = hiddenCarrierCounts?.total ?? 0;
+      const hidden = hiddenCarrierCounts?.hidden ?? 0;
+      return (
+        <div className="flex items-center gap-2 text-xs text-[#002144]">
+          <label className="font-semibold">Min flow</label>
+          <input
+            type="range"
+            min={0}
+            max={20}
+            step={0.5}
+            value={minFlowPct}
+            onChange={(e) => setMinFlowPct(Number(e.target.value))}
+            className="w-32 accent-[#39b6e6]"
+            aria-label="Minimum flow threshold (percent of largest column)"
+          />
+          <span className="font-mono tabular-nums w-10 text-right">{minFlowPct.toFixed(1)}%</span>
+          <span className="text-gray-500">
+            {hidden > 0 ? `hiding ${hidden} of ${total} carriers` : `${total} carriers`}
+          </span>
+        </div>
+      );
+    };
+
     return (
       <>
         <div ref={ref} className="relative" style={{ width: '100%' }}>
-          <div className="flex items-center justify-end mb-2">
-            <button
-              onClick={() => setIsFullscreen(true)}
-              className="text-sm text-[#002144] hover:text-[#39b6e6] flex items-center gap-1 px-2 py-1 rounded border border-gray-200 hover:border-[#39b6e6]"
-              aria-label="Expand Sankey to fullscreen"
-              title="Expand to fullscreen"
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="15 3 21 3 21 9" />
-                <polyline points="9 21 3 21 3 15" />
-                <line x1="21" y1="3" x2="14" y2="10" />
-                <line x1="3" y1="21" x2="10" y2="14" />
-              </svg>
-              Expand
-            </button>
+          <div className="flex items-center justify-between mb-2 gap-3 flex-wrap">
+            {renderThresholdSlider()}
+            {!isSnapshot && (
+              <button
+                onClick={() => setIsFullscreen(true)}
+                className="text-sm text-[#002144] hover:text-[#39b6e6] flex items-center gap-1 px-2 py-1 rounded border border-gray-200 hover:border-[#39b6e6]"
+                aria-label="Expand Sankey to fullscreen"
+                title="Expand to fullscreen"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="15 3 21 3 21 9" />
+                  <polyline points="9 21 3 21 3 15" />
+                  <line x1="21" y1="3" x2="14" y2="10" />
+                  <line x1="3" y1="21" x2="10" y2="14" />
+                </svg>
+                Expand
+              </button>
+            )}
           </div>
-          {renderSankeyBody({ fullscreen: false })}
+          {renderSankeyBody({ fullscreen: false, containerRef: panelRef })}
           {tooltip && !isFullscreen && (
             <div
               className="fixed z-[100] px-2 py-1 text-xs font-mono bg-gray-900 text-white rounded shadow-lg pointer-events-none"
@@ -723,22 +873,25 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
 
         {isFullscreen && createPortal(
           <div className="fixed inset-0 z-50 bg-white flex flex-col">
-            <div className="flex justify-between items-center px-6 py-3 bg-white border-b sticky top-0 z-10">
+            <div className="flex justify-between items-center px-6 py-3 bg-white border-b sticky top-0 z-10 gap-4 flex-wrap">
               <h2 className="text-lg font-semibold text-[#002144]">Freight Flow — Historic → Award</h2>
-              <button
-                onClick={() => setIsFullscreen(false)}
-                className="text-[#002144] hover:text-[#39b6e6] flex items-center gap-1 px-2 py-1 rounded border border-gray-200 hover:border-[#39b6e6]"
-                aria-label="Close fullscreen"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="18" y1="6" x2="6" y2="18" />
-                  <line x1="6" y1="6" x2="18" y2="18" />
-                </svg>
-                Close (ESC)
-              </button>
+              <div className="flex items-center gap-4">
+                {renderThresholdSlider()}
+                <button
+                  onClick={() => setIsFullscreen(false)}
+                  className="text-[#002144] hover:text-[#39b6e6] flex items-center gap-1 px-2 py-1 rounded border border-gray-200 hover:border-[#39b6e6]"
+                  aria-label="Close fullscreen"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                    <line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                  Close (ESC)
+                </button>
+              </div>
             </div>
-            <div className="flex-1 overflow-auto p-6">
-              {renderSankeyBody({ fullscreen: true })}
+            <div className="flex-1 p-6 min-h-0">
+              {renderSankeyBody({ fullscreen: true, containerRef: fullscreenRef })}
             </div>
             {tooltip && (
               <div

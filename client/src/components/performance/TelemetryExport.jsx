@@ -7,8 +7,9 @@ import {
   formatInternalSummary,
 } from '../../services/performanceEngine.js';
 import { buildTuningProfile, downloadProfile, refineProfile, readProfileFile } from '../../services/tuningProfile.js';
+import { downloadDiagnostic } from '../../utils/diagnosticExport.js';
 
-export default function TelemetryExport({ results, batchMeta, tunerState }) {
+export default function TelemetryExport({ results, batchMeta, tunerState, totalRows, csvRows }) {
   const [exporting, setExporting] = useState(false);
   const [profileStatus, setProfileStatus] = useState(null);
 
@@ -78,6 +79,37 @@ export default function TelemetryExport({ results, batchMeta, tunerState }) {
       setExporting(false);
     }
   }, [results, batchMeta, downloadBlob]);
+
+  const handleExportDiagnostic = useCallback(() => {
+    setExporting(true);
+    try {
+      downloadDiagnostic({
+        settings: {
+          strategy: batchMeta?.strategy ?? null,
+          concurrency: batchMeta?.concurrency ?? null,
+          delayMs: batchMeta?.requestDelay ?? null,
+          perRowTimeoutMs: batchMeta?.perRowTimeoutMs ?? null,
+          adaptiveBackoff: batchMeta?.adaptiveBackoff ?? null,
+          autoTune: batchMeta?.autoTune ?? null,
+          autoTuneTarget: batchMeta?.autoTuneTarget ?? null,
+          preShuffleEnabled: batchMeta?.preShuffleApplied ?? null,
+          chunkSize: batchMeta?.chunkSize ?? null,
+          maxAgents: batchMeta?.maxAgents ?? null,
+          concurrencyPerAgent: batchMeta?.concurrencyPerAgent ?? null,
+          totalMaxConcurrency: batchMeta?.concurrency ?? null,
+          dedup: batchMeta?.dedup?.precision ?? null,
+        },
+        results,
+        csvRows,
+        throughputSamples: [],
+        batchMeta,
+        totalRows,
+        version: typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '',
+      });
+    } finally {
+      setExporting(false);
+    }
+  }, [results, batchMeta, totalRows, csvRows]);
 
   const handleExportInternalSummary = useCallback(() => {
     setExporting(true);
@@ -173,6 +205,14 @@ export default function TelemetryExport({ results, batchMeta, tunerState }) {
             className="text-xs bg-[#002144] hover:bg-[#003366] disabled:opacity-50 text-white font-medium px-3 py-1.5 rounded transition-colors"
           >
             Export Report JSON
+          </button>
+          <button
+            onClick={handleExportDiagnostic}
+            disabled={exporting || results.length === 0}
+            className="text-xs bg-[#002144] hover:bg-[#003366] disabled:opacity-50 text-white font-medium px-3 py-1.5 rounded transition-colors"
+            title="Single-file diagnostic snapshot: settings, run stats, per-agent breakdown, error breakdown, and reconciliation summary. Stripped of XML and credentials."
+          >
+            Export Diagnostic JSON
           </button>
         </div>
       </div>

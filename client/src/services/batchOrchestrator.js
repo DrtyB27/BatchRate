@@ -1150,6 +1150,28 @@ export function createBatchOrchestrator(config) {
       return activeGovernorMode;
     },
 
+    // Live per-agent concurrency override — used by the Adaptive
+    // Concurrency Throttle (host-side P95 hysteresis loop). Looks up
+    // the named agent and forwards to its executor's setConcurrency.
+    // Returns the value that was actually set (clamped) or null if
+    // the agent isn't found / has no running executor.
+    setAgentConcurrency(agentId, n) {
+      const agent = agents.find(a => a.agentId === agentId);
+      if (!agent || !agent.executor || typeof agent.executor.setConcurrency !== 'function') return null;
+      return agent.executor.setConcurrency(n);
+    },
+
+    // Snapshot of current per-agent concurrency, used by the
+    // throttle panel UI to reflect live state.
+    getAgentConcurrencies() {
+      const out = {};
+      for (const a of agents) {
+        if (!a.executor || typeof a.executor.getConcurrency !== 'function') continue;
+        out[a.agentId] = a.executor.getConcurrency();
+      }
+      return out;
+    },
+
     getFailedRows() {
       if (!csvRowsRef) return [];
       const successIndices = new Set(allResults.filter(r => r.success).map(r => r.rowIndex));

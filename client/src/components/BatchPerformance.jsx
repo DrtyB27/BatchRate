@@ -14,7 +14,7 @@ import {
   generateRecommendations, detectInflectionPoint,
 } from '../services/performanceEngine.js';
 
-export default function BatchPerformance({ results, batchMeta, totalRows, onRetryInPlace, retryProgress, csvRows }) {
+export default function BatchPerformance({ results, batchMeta, totalRows, onRetryInPlace, retryProgress, csvRows, topSlot }) {
   const isCombined = batchMeta?.isCombined || false;
   const isMultiAgent = batchMeta?.executionMode === 'multi' || results.some(r => r.agentId !== undefined);
 
@@ -123,6 +123,7 @@ export default function BatchPerformance({ results, batchMeta, totalRows, onRetr
 
   return (
     <div className="flex-1 overflow-auto p-4 space-y-4">
+      {topSlot}
       {isCombined && (
         <div className="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2 text-xs text-blue-700 flex items-center gap-2">
           <span className="font-semibold">Combined Run</span>

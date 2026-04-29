@@ -1285,5 +1285,44 @@ export function createBatchExecutor(config) {
     getGovernorMode() {
       return activeGovernorMode;
     },
+
+    // Live concurrency override — used by the Adaptive Concurrency
+    // Throttle (host-side P95 hysteresis loop). Clamps to
+    // [1, original maxConcurrency], updates the runtime concurrency,
+    // syncs the tuner so its next adjust starts from this baseline,
+    // and spawns additional workers if the new value is higher.
+    // Records an EXTERNAL_OVERRIDE event for diagnostic export.
+    setConcurrency(n) {
+      const target = Math.max(1, Math.min(concurrency, n | 0));
+      if (target === currentConcurrency) return target;
+      const prev = currentConcurrency;
+      currentConcurrency = target;
+      if (tuner) {
+        const before = { conc: tuner.current, delay: tuner.currentDelay };
+        tuner.current = target;
+        // Reset cooldowns so the tuner doesn't immediately fight us.
+        tuner.callsSinceLastThrottle = 0;
+        tuner.consecutiveLowSpike = 0;
+        tuner.sustainedStreak = 0;
+        tuner._recordEvent(
+          'EXTERNAL_OVERRIDE',
+          before,
+          { conc: tuner.current, delay: tuner.currentDelay },
+          `host throttle set concurrency ${prev} -> ${target}`,
+        );
+      }
+      // Spawn additional workers if we just raised the ceiling.
+      if (target > prev && state === 'RUNNING' && queue.length > 0) {
+        for (let w = activeCount; w < target && queue.length > 0; w++) {
+          workerPromises.push(workerLoop(w));
+        }
+      }
+      if (onProgress) onProgress(buildProgress());
+      return target;
+    },
+
+    getConcurrency() {
+      return currentConcurrency;
+    },
   };
 }

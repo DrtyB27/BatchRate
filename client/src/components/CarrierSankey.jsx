@@ -94,9 +94,21 @@ function applyFlowThreshold(rawData, pct) {
 }
 
 function fmtMoney(v) {
-  if (v >= 1e6) return '$' + (v / 1e6).toFixed(2) + 'M';
-  if (v >= 1e3) return '$' + (v / 1e3).toFixed(1) + 'K';
-  return '$' + v.toFixed(0);
+  const n = Number.isFinite(v) ? v : 0;
+  if (n >= 1e6) return '$' + (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return '$' + (n / 1e3).toFixed(1) + 'K';
+  return '$' + n.toFixed(0);
+}
+
+// Display label for an N-column header. Maps known column types to the
+// fixed semantic labels; falls back to the column's own label otherwise.
+// "Award" overrides the last column when it's a scenario, so the typical
+// 3-column case reads Historic — Incumbent / Same Carrier — New Rate / Award.
+function columnHeaderLabel(col, idx, total) {
+  if (col.type === 'historic') return 'Historic — Incumbent';
+  if (col.type === 'rateAdjustedHistoric') return 'Same Carrier — New Rate';
+  if (col.type === 'scenario' && idx === total - 1) return 'Award';
+  return col.label || `Phase ${idx}`;
 }
 
 /**
@@ -278,7 +290,11 @@ function computeLegacyLayout(data, width, height) {
  * in a column collapse to no slot for that column.
  */
 function computeNColumnLayout(scaffold, columnData, flows, width, height) {
-  const padding = { top: 16, bottom: 16, left: 32, right: 32 };
+  // left/right pad fit a SCAC + ($value) label outside the node rect on
+  // column 0 (anchored "end") and a SCAC label on the last column
+  // (anchored "start"); top pad reserves room for the in-SVG column
+  // header strip rendered just above the chart area.
+  const padding = { top: 36, bottom: 16, left: 150, right: 90 };
   const columnCount = scaffold.columnCount;
   if (columnCount <= 0) return { columns: [], paths: [] };
 
@@ -573,10 +589,9 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
   // Height: legacy mode keeps 48px/row; N-column prefers measured wrapper
   // height so the chart actually fills the frame, falling back to the
   // data-driven floor (maxSide * CARRIER_ROW_HEIGHT + 80) so a tall stack
-  // still triggers vertical scroll inside the bounded wrapper. Reserve
-  // ~28px below the SVG for the column header strip so total content
-  // matches the measured wrapper without forcing a redundant vertical
-  // scrollbar when data is sparse.
+  // still triggers vertical scroll inside the bounded wrapper. Headers
+  // now live inside the SVG (top padding) so no external strip
+  // reservation is needed.
   const height = useMemo(() => {
     if (propHeight) return propHeight;
     if (useNColumnMode) {
@@ -584,8 +599,7 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
       const measured = isFullscreen
         ? (fullscreenSize.height || 0)
         : (panelSize.height || 0);
-      const target = measured ? Math.max(measured - 28, 0) : 0;
-      return Math.max(floor, target);
+      return Math.max(floor, measured || 0);
     }
     return Math.max(420, maxSide * 48);
   }, [propHeight, useNColumnMode, maxSide, isFullscreen, fullscreenSize.height, panelSize.height]);
@@ -738,9 +752,46 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
               />
             ))}
 
+            {/* Column header strip — rendered above the chart area inside
+                the SVG so it scrolls horizontally with the columns and
+                aligns to each column's actual x position. */}
+            {columns.map((col, ci) => {
+              const headerY = 18;
+              const isFirst = ci === 0;
+              const isLast = ci === columns.length - 1;
+              const headerX = isFirst
+                ? col.x - LABEL_GAP
+                : isLast
+                  ? col.x + NODE_WIDTH + LABEL_GAP
+                  : col.x + NODE_WIDTH / 2;
+              const anchor = isFirst ? 'end' : isLast ? 'start' : 'middle';
+              return (
+                <text
+                  key={`hdr-${ci}`}
+                  x={headerX}
+                  y={headerY}
+                  textAnchor={anchor}
+                  dominantBaseline="central"
+                  opacity={opacities[ci] ?? 0}
+                  style={{
+                    fill: COLORS.navy,
+                    fontSize: 11,
+                    fontWeight: 600,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.04em',
+                    fontFamily: 'system-ui, sans-serif',
+                    transition: 'opacity 0.15s linear',
+                  }}
+                >
+                  {columnHeaderLabel(col, ci, columns.length)}
+                </text>
+              );
+            })}
+
             {/* Column nodes + labels */}
             {columns.map((col, ci) => {
               const colOpacity = opacities[ci] ?? 0;
+              const isLastCol = ci === columns.length - 1;
               return (
                 <g key={`col-${ci}`} opacity={colOpacity} style={{ transition: 'opacity 0.05s linear' }}>
                   {col.nodes.map(n => (
@@ -775,7 +826,7 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
                           dominantBaseline="central"
                           style={labelStyle}
                         >
-                          {n.carrierId} ({fmtMoney(n.flow)})
+                          {isLastCol ? n.carrierId : `${n.carrierId} (${fmtMoney(n.flow)})`}
                         </text>
                       )}
                     </g>
@@ -784,32 +835,6 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
               );
             })}
           </svg>
-
-          {/* Column header strip lives inside the scroll container so it
-              tracks the SVG's horizontal scroll. Always pixel-width matching
-              the SVG (never 100%) so the columns line up with their nodes. */}
-          <div
-            className="flex px-1 py-1 text-[11px] font-semibold text-[#002144] uppercase tracking-wide"
-            style={{ width: `${minSvgWidth}px`, flexShrink: 0 }}
-          >
-            {columns.map((col, ci) => {
-              const widthPct = `${100 / columns.length}%`;
-              return (
-                <div
-                  key={`hdr-${ci}`}
-                  style={{
-                    width: widthPct,
-                    textAlign: 'center',
-                    opacity: opacities[ci] ?? 0,
-                    transition: 'opacity 0.15s linear',
-                  }}
-                  title={col.label}
-                >
-                  <div className="truncate">{col.label}</div>
-                </div>
-              );
-            })}
-          </div>
         </div>
 
         {/* Legend */}

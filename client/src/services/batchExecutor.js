@@ -47,6 +47,18 @@ function resolveExpectedStatuses(row, sidebarParams) {
 // Detects bimodal SMC3 queue saturation pattern and adjusts both
 // concurrency AND delay. Uses spike rate as primary signal instead
 // of averages, which are misleading for bimodal distributions.
+//
+// Modes (Governor v2):
+//   'adaptive'  — existing reactive throttle/recovery loop. Default.
+//                 Adds a backlog-scaled adaptive floor so concurrency
+//                 cannot oscillate to 1 with a large pending queue.
+//   'endurance' — slow-tail/recovery profile. Concurrency clamped to
+//                 [max(2, ceil(pending/200)), min(4, maxConcurrency)],
+//                 delay fixed at 500ms, throttle/recovery disabled.
+//                 Spike events still LOGGED (telemetry) but never
+//                 mutate concurrency/delay.
+//   'manual'    — governor disabled. Hold whatever the host configured.
+//                 Spike events still logged.
 class ResponseTimeAutoTuner {
   constructor(config) {
     this.maxConcurrency = config.maxConcurrency || 8;
@@ -58,6 +70,20 @@ class ResponseTimeAutoTuner {
     this.resultCount = 0;
     this.lastAdjustAt = 0;
     this.history = [];
+
+    // Governor mode — see class comment for semantics.
+    this.mode = config.mode || 'adaptive';
+
+    // Backlog awareness — drives the adaptive floor and the endurance
+    // ceiling. Updated by the executor via setPending() each time the
+    // queue changes. 0 until the executor reports — treated as
+    // "unknown, fall back to non-floor behavior".
+    this.pendingRows = config.pendingRows || 0;
+
+    // Endurance-mode ceiling. Caps the constructor-time maxConcurrency
+    // when the user has set a high manual ceiling but selected endurance
+    // anyway — protects against accidental ceiling=8 on a slow-tail run.
+    this.enduranceCeiling = 4;
 
     // Spike detection
     this.median = 0;
@@ -161,16 +187,58 @@ class ResponseTimeAutoTuner {
     return this.getP95();
   }
 
-  _recordEvent(type, before, after) {
+  _recordEvent(type, before, after, reason = '') {
     const evt = {
       t: Date.now(),
       type,
+      mode: this.mode,
+      reason,
       before,
       after,
       windowSize: this.window?.length || 0,
+      p95Ms: Math.round(this.getP95()),
+      pendingRows: this.pendingRows,
     };
     this.events.push(evt);
     if (this.events.length > this.maxEvents) this.events.shift();
+  }
+
+  // Live mode change (called by the orchestrator when the user
+  // switches modes from the UI banner). Records a tagged event
+  // so the diagnostic export shows when the mode flipped.
+  setMode(mode) {
+    if (mode !== 'adaptive' && mode !== 'endurance' && mode !== 'manual') return;
+    if (mode === this.mode) return;
+    const before = { conc: this.current, delay: this.currentDelay, mode: this.mode };
+    this.mode = mode;
+    this._recordEvent('MODE_CHANGE', before,
+      { conc: this.current, delay: this.currentDelay, mode },
+      `switched to ${mode}`);
+  }
+
+  // Backlog hint from the executor. Used by the adaptive floor and
+  // the endurance floor.
+  setPending(n) {
+    this.pendingRows = Math.max(0, n | 0);
+  }
+
+  // Adaptive floor (Feature D) — even in adaptive mode, never drop
+  // below max(2, ceil(pending/500)). Returns 1 when pending is unknown
+  // or the per-agent ceiling is already 1, so existing single-agent
+  // tuning paths aren't disturbed.
+  _adaptiveFloor() {
+    if (this.maxConcurrency <= 1 || this.pendingRows <= 0) return 1;
+    return Math.max(2, Math.ceil(this.pendingRows / 500));
+  }
+
+  // Endurance bounds. Floor scales with backlog (max(2, ceil(pending/200))),
+  // ceiling is min(4, maxConcurrency).
+  _enduranceFloor() {
+    if (this.pendingRows <= 0) return Math.min(2, this.maxConcurrency);
+    return Math.max(2, Math.ceil(this.pendingRows / 200));
+  }
+  _enduranceCeiling() {
+    return Math.min(this.enduranceCeiling, this.maxConcurrency || this.enduranceCeiling);
   }
 
   getEventTail(n = 10) {
@@ -187,14 +255,18 @@ class ResponseTimeAutoTuner {
   // Sustained-latency branch: catches the uniformly-slow case that the
   // spike-rate trigger misses. Runs on every result (not gated by the
   // spike-rate adjust interval) so the streak builds up in real time.
+  // In endurance/manual modes this is observation-only; the streak still
+  // increments (visible in telemetry) but never mutates concurrency.
   _checkSustainedLatency() {
     if (!this.probeComplete) return; // wait for baseline
     const p95 = this._computeRollingP95();
     if (p95 > this.sustainedP95ThresholdMs) {
       this.sustainedStreak++;
-      if (this.sustainedStreak >= this.sustainedCooldownResults && this.current > 1) {
+      if (this.mode !== 'adaptive') return; // observation only
+      const floor = this._adaptiveFloor();
+      if (this.sustainedStreak >= this.sustainedCooldownResults && this.current > floor) {
         const before = { conc: this.current, delay: this.currentDelay, p95 };
-        this.current      = Math.max(1, this.current - 1);
+        this.current      = Math.max(floor, this.current - 1);
         this.currentDelay = Math.min(this.currentDelay + this.delayStep, this.maxDelay);
         this.sustainedStreak = 0;
         this.sustainedTriggeredCount++;
@@ -203,7 +275,7 @@ class ResponseTimeAutoTuner {
         this._recordEvent('SUSTAINED_LATENCY_THROTTLE', before, {
           conc: this.current,
           delay: this.currentDelay,
-        });
+        }, `p95=${Math.round(p95)}ms over ${this.sustainedCooldownResults} consecutive results, floor=${floor}`);
       }
     } else {
       this.sustainedStreak = 0;
@@ -220,8 +292,36 @@ class ResponseTimeAutoTuner {
   getOptimalSettings() {
     // Sustained-latency check runs on every call (not gated by shouldAdjust)
     // so the streak counter builds in real time regardless of adjust cadence.
+    // Internal logic gates on mode.
     this._checkSustainedLatency();
 
+    // ── Manual mode: governor disabled, hold whatever was set ──
+    if (this.mode === 'manual') {
+      return { concurrency: this.current, delayMs: this.currentDelay };
+    }
+
+    // ── Endurance mode: clamp + fixed delay, no reactive adjustments ──
+    if (this.mode === 'endurance') {
+      const floor = this._enduranceFloor();
+      const ceiling = this._enduranceCeiling();
+      const target = Math.min(ceiling, Math.max(floor, this.current));
+      const targetDelay = 500;
+      const prevConc = this.current;
+      const prevDelay = this.currentDelay;
+      if (target !== prevConc || targetDelay !== prevDelay) {
+        this.current = target;
+        this.currentDelay = targetDelay;
+        this._recordEvent('ENDURANCE_CLAMP',
+          { conc: prevConc, delay: prevDelay },
+          { conc: this.current, delay: this.currentDelay },
+          `endurance: pending=${this.pendingRows}, floor=${floor}, ceiling=${ceiling}`);
+      }
+      // Spike events still observed/logged via getSpikeRate elsewhere; they
+      // do not mutate concurrency or delay here.
+      return { concurrency: this.current, delayMs: this.currentDelay };
+    }
+
+    // ── Adaptive mode (existing behavior + adaptive floor) ──
     if (!this.shouldAdjust()) {
       return { concurrency: this.current, delayMs: this.currentDelay };
     }
@@ -230,29 +330,33 @@ class ResponseTimeAutoTuner {
     const spikeRate = this.getSpikeRate();
     const prevConc = this.current;
     const prevDelay = this.currentDelay;
+    const adaptiveFloor = this._adaptiveFloor();
     let action = 'HOLD';
 
     if (spikeRate >= this.spikeRateCritical) {
-      // CRITICAL: >20% spikes — aggressive throttle
-      this.current = 1;
+      // CRITICAL: >20% spikes — aggressive throttle, but never below the
+      // backlog-scaled adaptive floor.
+      this.current = Math.max(adaptiveFloor, 1);
       this.currentDelay = Math.min(this.maxDelay, this.currentDelay + this.delayStep * 3);
       this.callsSinceLastThrottle = 0;
       this.consecutiveLowSpike = 0;
       action = 'CRITICAL_THROTTLE';
       this._recordEvent('SPIKE_CRITICAL_THROTTLE',
         { conc: prevConc, delay: prevDelay, spikeRate: Math.round(spikeRate * 100) },
-        { conc: this.current, delay: this.currentDelay });
+        { conc: this.current, delay: this.currentDelay },
+        `spikeRate=${Math.round(spikeRate * 100)}%, floor=${adaptiveFloor}`);
 
     } else if (spikeRate >= this.spikeRateWarning) {
-      // WARNING: >10% spikes — moderate throttle
-      this.current = Math.max(1, this.current - 1);
+      // WARNING: >10% spikes — moderate throttle, respect adaptive floor.
+      this.current = Math.max(adaptiveFloor, this.current - 1);
       this.currentDelay = Math.min(this.maxDelay, this.currentDelay + this.delayStep);
       this.callsSinceLastThrottle = 0;
       this.consecutiveLowSpike = 0;
       action = 'THROTTLE_DOWN';
       this._recordEvent('SPIKE_THROTTLE',
         { conc: prevConc, delay: prevDelay, spikeRate: Math.round(spikeRate * 100) },
-        { conc: this.current, delay: this.currentDelay });
+        { conc: this.current, delay: this.currentDelay },
+        `spikeRate=${Math.round(spikeRate * 100)}%, floor=${adaptiveFloor}`);
 
     } else if (spikeRate <= this.spikeRateTarget) {
       // GOOD: <5% spikes — consider scaling up
@@ -266,7 +370,8 @@ class ResponseTimeAutoTuner {
           action = 'REDUCE_DELAY';
           this._recordEvent('RECOVERY_SCALE_UP',
             { conc: prevConc, delay: prevDelay },
-            { conc: this.current, delay: this.currentDelay });
+            { conc: this.current, delay: this.currentDelay },
+            'delay reduction');
         } else if (this.current < this.maxConcurrency) {
           // Delay is already 0 — try adding a worker
           this.current = Math.min(this.maxConcurrency, this.current + 1);
@@ -274,7 +379,8 @@ class ResponseTimeAutoTuner {
           action = 'SCALE_UP';
           this._recordEvent('COOLDOWN_SCALE_UP',
             { conc: prevConc, delay: prevDelay },
-            { conc: this.current, delay: this.currentDelay });
+            { conc: this.current, delay: this.currentDelay },
+            'cooldown elapsed');
         }
       } else {
         action = 'HOLD_GOOD';
@@ -283,6 +389,17 @@ class ResponseTimeAutoTuner {
       // MARGINAL: 5-10% — hold steady, don't oscillate
       this.consecutiveLowSpike = 0;
       action = 'HOLD_MARGINAL';
+    }
+
+    // Final-pass adaptive floor — even if the branches above settled at a
+    // value below the floor, lift back up so a large backlog never grinds
+    // at conc=1.
+    if (this.current < adaptiveFloor) {
+      const before = { conc: this.current, delay: this.currentDelay };
+      this.current = adaptiveFloor;
+      this._recordEvent('ADAPTIVE_FLOOR_LIFT', before,
+        { conc: this.current, delay: this.currentDelay },
+        `pending=${this.pendingRows}, floor=${adaptiveFloor}`);
     }
 
     // Record adjustment
@@ -317,6 +434,8 @@ class ResponseTimeAutoTuner {
   getState() {
     return {
       type: 'spike-aware',
+      mode: this.mode,
+      pendingRows: this.pendingRows,
       current: this.current,
       currentDelay: this.currentDelay,
       max: this.maxConcurrency,
@@ -352,10 +471,12 @@ export function createBatchExecutor(config) {
     criticalThresholdMs = 49065,
     tuningProfile = null,
     timeoutMs = CALL_TIMEOUT_MS,
+    governorMode = 'adaptive',
     onResult,
     onProgress,
     onComplete,
   } = config;
+  let activeGovernorMode = governorMode;
 
   // ── State ──
   let state = 'IDLE'; // IDLE | RUNNING | PAUSED | COMPLETE | CANCELLED | AUTO_PAUSED
@@ -427,14 +548,19 @@ export function createBatchExecutor(config) {
   }
 
   // ── Response-time-aware auto-tuner ──
-  const tuner = autoTune ? new ResponseTimeAutoTuner({
-    maxConcurrency: concurrency,
-    targetResponseMs: autoTuneTarget,
-    warningThresholdMs,
-    criticalThresholdMs,
-    initialConcurrency: tuningProfile?.learned?.optimalConcurrency || Math.min(2, concurrency),
-    profile: tuningProfile?.learned || null,
-  }) : null;
+  // Always created (so 'manual' and 'endurance' modes still surface
+  // governor telemetry events), but its decisions are gated by mode.
+  const tuner = (autoTune || governorMode !== 'adaptive')
+    ? new ResponseTimeAutoTuner({
+        maxConcurrency: concurrency,
+        targetResponseMs: autoTuneTarget,
+        warningThresholdMs,
+        criticalThresholdMs,
+        initialConcurrency: tuningProfile?.learned?.optimalConcurrency || Math.min(2, concurrency),
+        profile: tuningProfile?.learned || null,
+        mode: governorMode,
+      })
+    : null;
 
   // Retry tracking
   const retryMap = new Map();
@@ -888,6 +1014,9 @@ export function createBatchExecutor(config) {
       cumulativeResponseTime += iterElapsed;
 
       if (tuner) {
+        // Hint the tuner with current backlog so endurance/adaptive
+        // floors scale with what's actually pending.
+        tuner.setPending(queue.length + pendingRowState.size);
         tuner.recordResult(iterElapsed);
         const settings = tuner.getOptimalSettings();
         if (settings.concurrency !== currentConcurrency) {
@@ -1130,6 +1259,70 @@ export function createBatchExecutor(config) {
 
     getStatus() {
       return buildProgress();
+    },
+
+    // Governor mode live setter — flips the per-call tuner's mode and
+    // surfaces an event in telemetry. Called by the orchestrator when
+    // the user switches from the UI banner.
+    setGovernorMode(mode) {
+      if (mode !== 'adaptive' && mode !== 'endurance' && mode !== 'manual') return;
+      activeGovernorMode = mode;
+      if (tuner) {
+        tuner.setMode(mode);
+        // For endurance, force the tuner to apply the clamp on the
+        // next getOptimalSettings() call by hinting the current
+        // backlog now.
+        tuner.setPending(queue.length + pendingRowState.size);
+      }
+      if (mode === 'manual' || mode === 'endurance') {
+        // In endurance mode, push delay to 500 immediately so we don't
+        // wait for the next adjust window to take effect.
+        if (mode === 'endurance') currentDelay = 500;
+      }
+      if (onProgress) onProgress(buildProgress());
+    },
+
+    getGovernorMode() {
+      return activeGovernorMode;
+    },
+
+    // Live concurrency override — used by the Adaptive Concurrency
+    // Throttle (host-side P95 hysteresis loop). Clamps to
+    // [1, original maxConcurrency], updates the runtime concurrency,
+    // syncs the tuner so its next adjust starts from this baseline,
+    // and spawns additional workers if the new value is higher.
+    // Records an EXTERNAL_OVERRIDE event for diagnostic export.
+    setConcurrency(n) {
+      const target = Math.max(1, Math.min(concurrency, n | 0));
+      if (target === currentConcurrency) return target;
+      const prev = currentConcurrency;
+      currentConcurrency = target;
+      if (tuner) {
+        const before = { conc: tuner.current, delay: tuner.currentDelay };
+        tuner.current = target;
+        // Reset cooldowns so the tuner doesn't immediately fight us.
+        tuner.callsSinceLastThrottle = 0;
+        tuner.consecutiveLowSpike = 0;
+        tuner.sustainedStreak = 0;
+        tuner._recordEvent(
+          'EXTERNAL_OVERRIDE',
+          before,
+          { conc: tuner.current, delay: tuner.currentDelay },
+          `host throttle set concurrency ${prev} -> ${target}`,
+        );
+      }
+      // Spawn additional workers if we just raised the ceiling.
+      if (target > prev && state === 'RUNNING' && queue.length > 0) {
+        for (let w = activeCount; w < target && queue.length > 0; w++) {
+          workerPromises.push(workerLoop(w));
+        }
+      }
+      if (onProgress) onProgress(buildProgress());
+      return target;
+    },
+
+    getConcurrency() {
+      return currentConcurrency;
     },
   };
 }

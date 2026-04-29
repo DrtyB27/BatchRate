@@ -64,6 +64,43 @@ function computeErrorBreakdown(results) {
 }
 
 /**
+ * Pull governor events out of any tunerState/governor snapshots
+ * passed in by the caller, plus any per-result executionSummary
+ * leak (live runs don't have one yet, but post-run summaries do).
+ * Returns the most recent N events tagged with mode/reason.
+ */
+function computeGovernorEventLog(state, maxEvents = 200) {
+  const events = [];
+  // 1. Live snapshot from the orchestrator/executor (if surfaced by the host)
+  if (Array.isArray(state?.governorEventLog)) {
+    events.push(...state.governorEventLog);
+  }
+  // 2. Last-known tuner state event tail
+  if (Array.isArray(state?.governorState?.events)) {
+    events.push(...state.governorState.events);
+  }
+  // 3. Per-agent post-run summaries baked into batchMeta
+  const agentSummaries = state?.batchMeta?.executionSummary?.agentSummaries;
+  if (Array.isArray(agentSummaries)) {
+    for (const a of agentSummaries) {
+      const evs = a?.governor?.eventHistory;
+      if (Array.isArray(evs)) {
+        for (const e of evs) {
+          events.push({ ...e, agentId: a.agentId });
+        }
+      }
+    }
+  }
+  // 4. Single-agent / executor-level governor event history
+  const flatEvents = state?.batchMeta?.executionSummary?.governor?.eventHistory;
+  if (Array.isArray(flatEvents)) events.push(...flatEvents);
+
+  // Sort by timestamp and trim
+  events.sort((a, b) => (a?.t || 0) - (b?.t || 0));
+  return events.slice(-maxEvents);
+}
+
+/**
  * Build the snapshot. Inputs are best-effort — anything missing renders
  * as null/empty rather than throwing.
  *
@@ -124,6 +161,7 @@ export function buildDiagnosticSnapshot(state) {
       concurrencyPerAgent: settings?.concurrencyPerAgent ?? null,
       totalMaxConcurrency: settings?.totalMaxConcurrency ?? null,
       dedup: settings?.dedup ?? null,
+      governorMode: settings?.governorMode ?? null,
     },
     runStats: {
       totalRows: totalRows ?? null,
@@ -137,6 +175,7 @@ export function buildDiagnosticSnapshot(state) {
     },
     perAgent: computePerAgent(safeResults),
     errorBreakdown: computeErrorBreakdown(safeResults),
+    governorEventLog: computeGovernorEventLog(state, 200),
     throughputSamples: Array.isArray(throughputSamples) ? throughputSamples : [],
     reconcilable: {
       ...reconSummary,

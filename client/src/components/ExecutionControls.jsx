@@ -353,6 +353,45 @@ export default function ExecutionControls({ settings, onChange, onRun, onPause, 
                     Pre-shuffle by origin state
                   </label>
                 </div>
+
+                {/* Governor mode — three-state radio */}
+                <div className="space-y-1">
+                  <span className="text-[11px] text-gray-600 font-medium">Governor Mode:</span>
+                  <div className="flex flex-wrap gap-3">
+                    {[
+                      { key: 'adaptive', label: 'Adaptive', desc: 'Reactive throttle + recovery (default)' },
+                      { key: 'endurance', label: 'Endurance', desc: 'Steady pacing for retry/slow-tail runs' },
+                      { key: 'manual', label: 'Manual', desc: 'Governor disabled' },
+                    ].map(opt => (
+                      <label
+                        key={opt.key}
+                        className="flex items-center gap-1.5 text-[11px] text-gray-700 cursor-pointer"
+                        title={opt.desc}
+                      >
+                        <input
+                          type="radio"
+                          name="governorMode"
+                          checked={(settings.governorMode || 'adaptive') === opt.key}
+                          onChange={() => update('governorMode', opt.key)}
+                          className="border-gray-300"
+                        />
+                        <span className={(settings.governorMode || 'adaptive') === opt.key ? 'font-semibold text-[#002144]' : ''}>
+                          {opt.label}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                  {(settings.governorMode || 'adaptive') === 'endurance' && (
+                    <p className="text-[10px] text-gray-500 bg-blue-50 border border-blue-200 rounded px-2 py-1">
+                      Endurance: concurrency clamped to [2, 4], delay 500ms, throttle/recovery disabled. Use for retry/reconciliation runs.
+                    </p>
+                  )}
+                  {(settings.governorMode || 'adaptive') === 'manual' && (
+                    <p className="text-[10px] text-gray-500 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                      Manual: governor disabled. Concurrency and delay stay exactly where you set them. No backoff on errors.
+                    </p>
+                  )}
+                </div>
               </div>
             </div>
           )}

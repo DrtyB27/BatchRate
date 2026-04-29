@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import ResultsTable, { flattenResults, computeLowCostFlags } from '../components/ResultsTable.jsx';
 import ExportWarningModal from '../components/ExportWarningModal.jsx';
 import AnalyticsDashboard from '../components/AnalyticsDashboard.jsx';
@@ -18,6 +18,8 @@ import { ScenarioProvider } from '../context/ScenarioContext.jsx';
 import useAnnualization from '../hooks/useAnnualization.js';
 import useHistoricBaseline from '../hooks/useHistoricBaseline.js';
 import { useStallDetector } from '../hooks/useStallDetector.js';
+import { useAdaptiveConcurrency } from '../hooks/useAdaptiveConcurrency.js';
+import AdaptiveThrottlePanel from '../components/AdaptiveThrottlePanel.jsx';
 import { classifyRow, RETRYABLE_FAILURE_REASONS } from '../utils/retryClassification.js';
 import {
   findReconcilableRows,
@@ -430,6 +432,126 @@ export default function ResultsScreen({
     active: isActiveRun,
   });
 
+  // ── Adaptive Concurrency Throttle ──
+  // Outer-loop P95 hysteresis throttle. Default OFF; existing batches
+  // behave identically. When enabled, watches per-agent rolling P95
+  // of completed responses and adjusts concurrency via the orchestrator
+  // setAgentConcurrency setter (added in this commit alongside the
+  // setGovernorMode setter from v2.11.0).
+  const [throttleConfig, setThrottleConfig] = useState({
+    enabled: false,
+    windowSize: 50,
+    warmupSamples: 30,
+    upperP95Ms: 12000,
+    lowerP95Ms: 7000,
+    cooldownMs: 30000,
+    minConcurrency: 2,
+  });
+  const [throttleLog, setThrottleLog] = useState([]);
+  const handleThrottleAdjust = useCallback((entry) => {
+    setThrottleLog(prev => [entry, ...prev].slice(0, 50));
+  }, []);
+
+  // Build completions array from results for the hook (one entry per
+  // result with agentId + responseMs). Falls back to a synthetic
+  // 'executor' agentId for the single-agent retry/auto-kick path.
+  const throttleCompletions = useMemo(() => {
+    const out = [];
+    for (const r of results) {
+      const ms = r.elapsedMs || r.telemetry?.elapsedMs || 0;
+      if (ms <= 0) continue;
+      out.push({
+        agentId: r.agentId || 'executor',
+        responseMs: ms,
+        completedAt: r.completedAt ? Date.parse(r.completedAt) : Date.now(),
+      });
+    }
+    return out;
+  }, [results]);
+
+  // Live per-agent concurrency snapshot — re-read on each render so
+  // UI reflects throttle adjustments immediately.
+  const perAgentConcurrency = useMemo(() => {
+    if (orchestratorRef?.current?.getAgentConcurrencies) {
+      return orchestratorRef.current.getAgentConcurrencies();
+    }
+    if (executorRef?.current?.getConcurrency) {
+      return { executor: executorRef.current.getConcurrency() };
+    }
+    return {};
+    // results.length forces re-evaluation as new completions arrive
+  }, [results.length]);
+
+  const throttleMaxConcurrency = batchParams?._throttleMax
+    || batchMeta?.concurrency
+    || 8;
+
+  const setAgentConcurrency = useCallback((agentId, next) => {
+    if (orchestratorRef?.current?.setAgentConcurrency) {
+      orchestratorRef.current.setAgentConcurrency(agentId, next);
+    } else if (executorRef?.current?.setConcurrency) {
+      executorRef.current.setConcurrency(next);
+    }
+  }, [orchestratorRef, executorRef]);
+
+  useAdaptiveConcurrency({
+    completions: throttleCompletions,
+    perAgentConcurrency,
+    setAgentConcurrency,
+    maxConcurrency: throttleMaxConcurrency,
+    config: throttleConfig,
+    onAdjust: handleThrottleAdjust,
+  });
+
+  // ── Auto-detect retry/slow-tail runs and propose Endurance Mode ──
+  // Three triggers (any one trips the suggestion):
+  //   1. batchMeta.isRetry — the run was launched from Save+Retry / Reconciliation
+  //   2. retryProgress active — the auto-resume executor is running
+  //   3. After 30 results, min(elapsedMs over last 30) > 10s AND p95 > 30s
+  const currentGovernorMode =
+    orchestratorRef?.current?.getGovernorMode?.() ??
+    executorRef?.current?.getGovernorMode?.() ??
+    batchMeta?.governorMode ?? 'adaptive';
+  const [enduranceDismissed, setEnduranceDismissed] = useState(false);
+  useEffect(() => {
+    // Reset dismissal whenever a new batch starts (batchId changes)
+    setEnduranceDismissed(false);
+  }, [batchMeta?.batchId]);
+
+  const slowTailDetected = useMemo(() => {
+    if (results.length < 30) return false;
+    const last30 = results.slice(-30);
+    const elapsed = last30
+      .map(r => r.elapsedMs || 0)
+      .filter(ms => ms > 0);
+    if (elapsed.length < 30) return false;
+    const minMs = Math.min(...elapsed);
+    const sorted = [...elapsed].sort((a, b) => a - b);
+    const p95 = sorted[Math.floor(sorted.length * 0.95)] || 0;
+    return minMs > 10000 && p95 > 30000;
+  }, [results]);
+
+  const enduranceTrigger =
+    (batchMeta?.isRetry === true) ||
+    (!!retryProgress) ||
+    slowTailDetected;
+
+  const showEnduranceBanner =
+    isActiveRun &&
+    !enduranceDismissed &&
+    enduranceTrigger &&
+    currentGovernorMode !== 'endurance';
+
+  const handleSwitchToEndurance = () => {
+    if (orchestratorRef?.current?.setGovernorMode) {
+      orchestratorRef.current.setGovernorMode('endurance');
+    }
+    if (executorRef?.current?.setGovernorMode) {
+      executorRef.current.setGovernorMode('endurance');
+    }
+    setEnduranceDismissed(true);
+  };
+
   // ── End-of-batch reconciliation ──
   // Runs after the orchestrator has stopped (complete or paused). Surfaces
   // unattempted + transient-failure rows that the orchestrator's normal
@@ -588,6 +710,33 @@ export default function ResultsScreen({
   return (
     <ScenarioProvider>
     <div className="flex-1 flex flex-col overflow-hidden">
+      {/* Endurance Mode suggestion banner — appears when the run looks
+          like a slow-tail recovery run and Endurance Mode isn't already
+          active. Click switches mode live (no pause needed). */}
+      {showEnduranceBanner && (
+        <div className="bg-[#39B6E6] text-[#002144] px-6 py-3 shrink-0 flex items-center gap-3">
+          <svg className="w-5 h-5 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+            <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
+          </svg>
+          <div className="flex-1 text-sm">
+            <span className="font-bold">This looks like a slow-tail recovery run.</span>{' '}
+            Endurance Mode pacing is recommended: concurrency clamped to [2, 4], 500ms delay, no throttle oscillation.
+          </div>
+          <button
+            onClick={handleSwitchToEndurance}
+            className="text-xs bg-[#002144] hover:bg-[#003366] text-white px-4 py-2 rounded font-semibold transition-colors shrink-0"
+          >
+            Switch to Endurance Mode
+          </button>
+          <button
+            onClick={() => setEnduranceDismissed(true)}
+            className="text-xs text-[#002144] hover:text-[#003366] underline shrink-0"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* Stall detector banner — appears when rolling throughput collapses
           during an active run. Purely informational; hooks the existing
           Pause & Save for Later button. */}
@@ -952,7 +1101,23 @@ export default function ResultsScreen({
       ) : viewMode === 'optimize' ? (
         <OptimizationDashboard flatRows={flatRows} sampleWeeks={sampleWeeks} credentials={credentials} batchParams={batchParams} />
       ) : viewMode === 'performance' ? (
-        <BatchPerformance results={results} batchMeta={batchMeta} totalRows={totalRows} onRetryInPlace={onRetryInPlace} retryProgress={retryProgress} csvRows={csvRows} />
+        <BatchPerformance
+          results={results}
+          batchMeta={batchMeta}
+          totalRows={totalRows}
+          onRetryInPlace={onRetryInPlace}
+          retryProgress={retryProgress}
+          csvRows={csvRows}
+          topSlot={
+            <AdaptiveThrottlePanel
+              config={throttleConfig}
+              onConfigChange={setThrottleConfig}
+              perAgentConcurrency={perAgentConcurrency}
+              log={throttleLog}
+              active={isActiveRun}
+            />
+          }
+        />
       ) : viewMode === 'feedback' ? (
         <CarrierFeedback flatRows={flatRows} computedScenarios={computedScenarios} sampleWeeks={sampleWeeks} annualization={annualization} historicBaseline={historicBaseline} />
       ) : viewMode === 'annual' ? (

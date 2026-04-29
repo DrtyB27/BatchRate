@@ -7,6 +7,7 @@ import { createBatchOrchestrator, detectResumeOpportunity } from '../services/ba
 import { CALL_TIMEOUT_MS } from '../services/ratingClient.js';
 import { DEFAULT_INITIAL_DELAY_MS } from '../services/batchExecutor.js';
 import { deduplicateRows, expandDedupedResults } from '../services/rateDeduplicator.js';
+import { balanceByOriginState, summarizeStates } from '../utils/rowShuffler.js';
 
 export default function InputScreen({
   credentials, onBatchStart, onResultRow, onBatchEnd, onLoadRun,
@@ -46,6 +47,16 @@ export default function InputScreen({
     concurrencyPerAgent: 3,
     totalMaxConcurrency: 8,
     staggerStartMs: 500,
+    // ── Resilience toggles (post-v2.8.4 batch-recovery work) ──
+    // Origin-state-balanced row pre-shuffle. Default ON: it's a pure
+    // reorder, so it's safe and addresses geo-clustered CSVs without any
+    // protocol change. Disable here if needed for debugging.
+    preShuffleEnabled: true,
+    // Per-row request timeout (ms). Default 60s — the existing fetch
+    // wrapper supports this directly via postToG3(..., timeoutMs). 60s
+    // is well above the observed P99 (73s saw long tails, but 60s
+    // suffices for healthy responses; pathological hangs are aborted).
+    perRowTimeoutMs: 60000,
   });
 
   const [csvRows, setCsvRows] = useState(null);
@@ -241,13 +252,27 @@ export default function InputScreen({
       return;
     }
 
+    // ── Origin-state-balanced pre-shuffle ──
+    // Apply BEFORE dedup so the dedup grouping and downstream agent chunks
+    // both see the interleaved order. Round-robin by origin state breaks
+    // geographic clustering that would otherwise concentrate slow-state
+    // rows on a subset of agents.
+    let preShuffleSummary = null;
+    let rowsForRating = validRows;
+    if (execSettings.preShuffleEnabled !== false) {
+      preShuffleSummary = summarizeStates(validRows);
+      if (preShuffleSummary.stateCount > 1) {
+        rowsForRating = balanceByOriginState(validRows);
+      }
+    }
+
     // ── Deduplication ──
     const dedupPrecision = execSettings.dedup || 'off';
-    const { uniqueRows, groups, stats: dedupStats } = deduplicateRows(validRows, dedupPrecision);
-    const useDedup = dedupPrecision !== 'off' && uniqueRows.length < validRows.length;
-    const rowsToRate = useDedup ? uniqueRows : validRows;
+    const { uniqueRows, groups, stats: dedupStats } = deduplicateRows(rowsForRating, dedupPrecision);
+    const useDedup = dedupPrecision !== 'off' && uniqueRows.length < rowsForRating.length;
+    const rowsToRate = useDedup ? uniqueRows : rowsForRating;
     dedupGroupsRef.current = useDedup ? groups : null;
-    originalCsvRef.current = validRows;
+    originalCsvRef.current = rowsForRating;
     setDedupInfo(useDedup ? dedupStats : null);
 
     const batchId = crypto.randomUUID();
@@ -269,6 +294,9 @@ export default function InputScreen({
       isRetry,
       invalidInputCount: invalid.length,
       rateAsOfDate: params.rateAsOfDate || '',
+      preShuffleApplied: !!preShuffleSummary && preShuffleSummary.stateCount > 1,
+      preShuffleSummary: preShuffleSummary,
+      perRowTimeoutMs: execSettings.perRowTimeoutMs || CALL_TIMEOUT_MS,
     };
 
     if (isRetry) {
@@ -325,7 +353,7 @@ export default function InputScreen({
       adaptiveBackoff: execSettings.adaptiveBackoff,
       autoTune: execSettings.autoTune !== false,
       autoTuneTarget: execSettings.autoTuneTarget || 10559,
-      timeoutMs: CALL_TIMEOUT_MS,
+      timeoutMs: execSettings.perRowTimeoutMs || CALL_TIMEOUT_MS,
       staggerStartMs: execSettings.staggerStartMs || 500,
       autoSavePerAgent: true,
       onResult: handleResult,

@@ -13,6 +13,7 @@ const PER_AGENT_CONC_OPTIONS = [1, 2, 3, 4];
 const TOTAL_CONC_OPTIONS = [4, 6, 8, 10, 12];
 const STAGGER_OPTIONS = [250, 500, 1000, 1500, 2000];
 const TARGET_RESPONSE_OPTIONS = [1000, 1500, 2000, 3000, 5000, 10559];
+const PER_ROW_TIMEOUT_OPTIONS_S = [15, 30, 45, 60, 90, 120, 180, 240, 300];
 
 // Strategy presets
 const STRATEGIES = {
@@ -329,6 +330,30 @@ export default function ExecutionControls({ settings, onChange, onRun, onPause, 
                   )}
                 </div>
               )}
+
+              {/* Resilience controls */}
+              <div className="space-y-2 pt-2 border-t border-gray-100">
+                <p className="text-[10px] text-gray-500 font-medium uppercase tracking-wider">Resilience</p>
+                <div className="flex flex-wrap gap-x-6 gap-y-2 items-center">
+                  <StepperControl
+                    label="Per-row timeout"
+                    value={Math.round((settings.perRowTimeoutMs ?? 60000) / 1000)}
+                    options={PER_ROW_TIMEOUT_OPTIONS_S}
+                    onChange={v => update('perRowTimeoutMs', v * 1000)}
+                    tooltip="Hard timeout for a single rating request. Aborts pathological hangs so the agent can move on. Aborted rows are captured by the end-of-batch reconciler."
+                    suffix="s"
+                  />
+                  <label className="flex items-center gap-1.5 text-[11px] text-gray-600 font-medium cursor-pointer" title="Round-robin shuffle by origin state. Geographically clustered CSVs put slow-state rows on a subset of agents; interleaving balances per-agent latency.">
+                    <input
+                      type="checkbox"
+                      checked={settings.preShuffleEnabled !== false}
+                      onChange={e => update('preShuffleEnabled', e.target.checked)}
+                      className="rounded border-gray-300"
+                    />
+                    Pre-shuffle by origin state
+                  </label>
+                </div>
+              </div>
             </div>
           )}
 

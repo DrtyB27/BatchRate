@@ -14,7 +14,7 @@ import {
   generateRecommendations, detectInflectionPoint,
 } from '../services/performanceEngine.js';
 
-export default function BatchPerformance({ results, batchMeta, totalRows, onRetryInPlace, retryProgress }) {
+export default function BatchPerformance({ results, batchMeta, totalRows, onRetryInPlace, retryProgress, csvRows }) {
   const isCombined = batchMeta?.isCombined || false;
   const isMultiAgent = batchMeta?.executionMode === 'multi' || results.some(r => r.agentId !== undefined);
 
@@ -304,7 +304,13 @@ export default function BatchPerformance({ results, batchMeta, totalRows, onRetr
       <CorrelationCharts correlations={correlations} />
 
       {/* Section 5: Telemetry Export & Tuning Profiles */}
-      <TelemetryExport results={results} batchMeta={batchMeta} tunerState={tunerState} />
+      <TelemetryExport
+        results={results}
+        batchMeta={batchMeta}
+        tunerState={tunerState}
+        totalRows={totalRows}
+        csvRows={csvRows}
+      />
     </div>
   );
 }

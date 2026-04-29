@@ -17,7 +17,13 @@ import { applyMargin } from '../services/ratingClient.js';
 import { ScenarioProvider } from '../context/ScenarioContext.jsx';
 import useAnnualization from '../hooks/useAnnualization.js';
 import useHistoricBaseline from '../hooks/useHistoricBaseline.js';
+import { useStallDetector } from '../hooks/useStallDetector.js';
 import { classifyRow, RETRYABLE_FAILURE_REASONS } from '../utils/retryClassification.js';
+import {
+  findReconcilableRows,
+  summarizeReconcilable,
+  buildReconcileCsv,
+} from '../utils/batchReconciler.js';
 
 function downloadBlob(filename, blob) {
   const url = URL.createObjectURL(blob);
@@ -412,6 +418,38 @@ export default function ResultsScreen({
   const retryCount = missingCount + retryableFailedCount;
   const hasCsvRows = csvRows && csvRows.length > 0;
 
+  // ── Stall detection (observation only) ──
+  // Active while either an orchestrator or executor is RUNNING. Hooks
+  // emit a banner suggesting Pause & Save when the rolling rate
+  // collapses; they never pause the run on their own.
+  const orchState = orchestratorRef?.current?.getStatus?.()?.state;
+  const execState = executorRef?.current?.getStatus?.()?.state;
+  const isActiveRun = orchState === 'RUNNING' || execState === 'RUNNING';
+  const stall = useStallDetector({
+    completedCount: results.length,
+    active: isActiveRun,
+  });
+
+  // ── End-of-batch reconciliation ──
+  // Runs after the orchestrator has stopped (complete or paused). Surfaces
+  // unattempted + transient-failure rows that the orchestrator's normal
+  // flow didn't recover. Excludes terminal data-side failures.
+  const reconcilable = useMemo(
+    () => (hasCsvRows ? findReconcilableRows(csvRows, results) : []),
+    [csvRows, results]
+  );
+  const reconSummary = useMemo(() => summarizeReconcilable(reconcilable), [reconcilable]);
+  const showReconciliation =
+    !isActiveRun && reconcilable.length > 0 && (isComplete || results.length > 0);
+
+  const handleSaveReconcileCsv = () => {
+    const csv = buildReconcileCsv(reconcilable, csvRows);
+    if (!csv) return;
+    const ts = timestamp();
+    const batchSlice = (batchMeta?.batchId || 'unknown').slice(0, 8);
+    downloadCsv(`BRAT_Reconcile_${batchSlice}_${reconcilable.length}rows_${ts}.csv`, csv);
+  };
+
   const partialSuffix = isComplete ? '' : `_${results.length}of${totalRows}`;
 
   const handleExport = (type) => {
@@ -550,6 +588,64 @@ export default function ResultsScreen({
   return (
     <ScenarioProvider>
     <div className="flex-1 flex flex-col overflow-hidden">
+      {/* Stall detector banner — appears when rolling throughput collapses
+          during an active run. Purely informational; hooks the existing
+          Pause & Save for Later button. */}
+      {isActiveRun && stall.stalled && stall.alert && (
+        <div className="bg-[#39b6e6] text-[#002144] px-6 py-3 shrink-0 flex items-center gap-3">
+          <svg className="w-5 h-5 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+            <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+          </svg>
+          <div className="flex-1 text-sm">
+            <span className="font-bold">Throughput stalled.</span>{' '}
+            <span>{stall.alert}</span>
+          </div>
+          <button
+            onClick={handlePauseAndSave}
+            className="text-xs bg-[#002144] hover:bg-[#003366] text-white px-4 py-2 rounded font-semibold transition-colors shrink-0"
+          >
+            Pause &amp; Save for Later
+          </button>
+        </div>
+      )}
+
+      {/* Reconciliation panel — surfaces unattempted + transient-failure
+          rows after the orchestrator stops. NO_RATES is excluded. */}
+      {showReconciliation && (
+        <div className="bg-blue-50 border-b border-blue-200 px-6 py-3 shrink-0">
+          <div className="flex items-center gap-3 flex-wrap">
+            <svg className="w-4 h-4 text-blue-600 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
+            </svg>
+            <span className="text-sm font-semibold text-blue-800">
+              Reconciliation: {reconSummary.total} rows need recovery
+            </span>
+            <span className="text-xs text-blue-700">
+              {reconSummary.unattempted} unattempted &middot;{' '}
+              {reconSummary.timeout} timed out &middot;{' '}
+              {reconSummary.transient} transient (NO_RATES excluded — data-side)
+            </span>
+            <div className="flex-1" />
+            <button
+              onClick={handleSaveReconcileCsv}
+              className="text-xs bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded font-semibold transition-colors"
+              title="Download a CSV of just the reconcilable rows. Re-load it as a fresh batch (recommended at concurrency 2)."
+            >
+              Save Reconciliation CSV
+            </button>
+            {onRetryInPlace && !retryProgress && (
+              <button
+                onClick={onRetryInPlace}
+                className="text-xs bg-blue-700 hover:bg-blue-800 text-white px-3 py-1.5 rounded font-semibold transition-colors"
+                title="Re-queue these rows through the existing in-place retry pipeline."
+              >
+                Re-queue Through Retry
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Batch action banner — shows during execution OR after completion with failures */}
       {results.length > 0 && (!isComplete || retryCount > 0 || terminalFailedCount > 0) && (
         <div className={`${isComplete ? 'bg-red-50 border-b border-red-200' : 'bg-amber-50 border-b border-amber-200'} px-6 py-3 shrink-0`}>
@@ -856,7 +952,7 @@ export default function ResultsScreen({
       ) : viewMode === 'optimize' ? (
         <OptimizationDashboard flatRows={flatRows} sampleWeeks={sampleWeeks} credentials={credentials} batchParams={batchParams} />
       ) : viewMode === 'performance' ? (
-        <BatchPerformance results={results} batchMeta={batchMeta} totalRows={totalRows} onRetryInPlace={onRetryInPlace} retryProgress={retryProgress} />
+        <BatchPerformance results={results} batchMeta={batchMeta} totalRows={totalRows} onRetryInPlace={onRetryInPlace} retryProgress={retryProgress} csvRows={csvRows} />
       ) : viewMode === 'feedback' ? (
         <CarrierFeedback flatRows={flatRows} computedScenarios={computedScenarios} sampleWeeks={sampleWeeks} annualization={annualization} historicBaseline={historicBaseline} />
       ) : viewMode === 'annual' ? (

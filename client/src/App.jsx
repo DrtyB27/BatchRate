@@ -203,12 +203,16 @@ export default function App() {
     // Import executor dynamically to avoid circular deps
     import('./services/batchExecutor.js').then(({ createBatchExecutor }) => {
       const executor = createBatchExecutor({
+        // Endurance Mode for in-place retry — see App auto-kick effect
+        // for the same rationale. Retry rows are slow-tail by definition.
         concurrency: 4,
-        delayMs: 200,
+        delayMs: 500,
         retryAttempts: 2,
-        adaptiveBackoff: true,
+        adaptiveBackoff: false,
+        autoTune: false,
         timeoutMs: 60000,
         saveXml: false,
+        governorMode: 'endurance',
         onResult: (result) => {
           // Merge each result into the main results array as it arrives
           setResults(prev => {
@@ -304,19 +308,20 @@ export default function App() {
 
     import('./services/batchExecutor.js').then(({ createBatchExecutor }) => {
       const executor = createBatchExecutor({
-        // Lower default for resume — original batches typically AUTO_PAUSE
-        // because of SMC3 CarrierConnect saturation; restarting at the
-        // same concurrency that failed just re-saturates immediately.
-        // autoTune lets the spike-aware tuner ramp up if the server
-        // is healthy.
-        concurrency: 2,
-        delayMs: 200,
+        // Endurance Mode for auto-resume — these runs are by definition
+        // slow-tail (they only contain rows that didn't succeed in the
+        // first pass), so the reactive Adaptive Governor would oscillate
+        // around conc=1 here. Endurance pins concurrency to [2, 4],
+        // delay=500ms, and disables throttle/recovery.
+        concurrency: 4,
+        delayMs: 500,
         retryAttempts: 2,
-        adaptiveBackoff: true,
-        autoTune: true,
+        adaptiveBackoff: false,
+        autoTune: false,
         autoTuneTarget: 10559,
         timeoutMs: 60000,
         saveXml: false,
+        governorMode: 'endurance',
         onResult: (result) => {
           setResults(prev => {
             const withoutOldFail = prev.filter(r =>

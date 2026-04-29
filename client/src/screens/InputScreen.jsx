@@ -57,6 +57,12 @@ export default function InputScreen({
     // is well above the observed P99 (73s saw long tails, but 60s
     // suffices for healthy responses; pathological hangs are aborted).
     perRowTimeoutMs: 60000,
+    // Governor mode: 'adaptive' | 'endurance' | 'manual'. Adaptive is
+    // the v2.x default reactive tuner. Endurance pins concurrency to
+    // [2, 4] with 500ms delay and disables throttle/recovery — used
+    // for retry/reconciliation runs that contain only structurally
+    // slow rows. Manual disables the governor entirely.
+    governorMode: 'adaptive',
   });
 
   const [csvRows, setCsvRows] = useState(null);
@@ -297,6 +303,7 @@ export default function InputScreen({
       preShuffleApplied: !!preShuffleSummary && preShuffleSummary.stateCount > 1,
       preShuffleSummary: preShuffleSummary,
       perRowTimeoutMs: execSettings.perRowTimeoutMs || CALL_TIMEOUT_MS,
+      governorMode: resolvedGovernorMode,
     };
 
     if (isRetry) {
@@ -342,6 +349,14 @@ export default function InputScreen({
       }
     };
 
+    // ── Governor mode resolution ──
+    // For retry runs (Reconciliation CSV / Save+Retry) default to
+    // endurance unless the user explicitly picked something else.
+    const resolvedGovernorMode =
+      isRetry && (execSettings.governorMode === 'adaptive' || !execSettings.governorMode)
+        ? 'endurance'
+        : (execSettings.governorMode || 'adaptive');
+
     // Always use multi-agent orchestrator (auto-sizes chunks for small batches)
     const orchestrator = createBatchOrchestrator({
       chunkSize: execSettings.chunkSize || 88,
@@ -350,11 +365,12 @@ export default function InputScreen({
       totalMaxConcurrency: execSettings.totalMaxConcurrency || 8,
       delayMs: execSettings.delayMs,
       retryAttempts: execSettings.retryAttempts,
-      adaptiveBackoff: execSettings.adaptiveBackoff,
-      autoTune: execSettings.autoTune !== false,
+      adaptiveBackoff: resolvedGovernorMode === 'adaptive' && execSettings.adaptiveBackoff,
+      autoTune: resolvedGovernorMode === 'adaptive' && execSettings.autoTune !== false,
       autoTuneTarget: execSettings.autoTuneTarget || 10559,
       timeoutMs: execSettings.perRowTimeoutMs || CALL_TIMEOUT_MS,
       staggerStartMs: execSettings.staggerStartMs || 500,
+      governorMode: resolvedGovernorMode,
       autoSavePerAgent: true,
       onResult: handleResult,
       onAgentProgress: (agentId, snap) => {

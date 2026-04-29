@@ -98,6 +98,7 @@ export default function TelemetryExport({ results, batchMeta, tunerState, totalR
           concurrencyPerAgent: batchMeta?.concurrencyPerAgent ?? null,
           totalMaxConcurrency: batchMeta?.concurrency ?? null,
           dedup: batchMeta?.dedup?.precision ?? null,
+          governorMode: batchMeta?.governorMode ?? null,
         },
         results,
         csvRows,

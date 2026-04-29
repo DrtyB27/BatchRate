@@ -517,12 +517,23 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
   }, [useNColumnMode, rawSankeyData, sankeyData]);
 
   // Empty-state guard for N-column mode.
+  //
+  // Bug history: with only the baseline column populated (columnCount === 1
+  // and node count > 0), the layout would still run and produce a single
+  // column of source carriers stacked along the left edge with no flow
+  // ribbons — looked like a render bug to users. A flow needs at least
+  // two adjacent columns to exist, so columnCount < 2 is now an unconditional
+  // empty state that steers the user to the PhaseSelector chips above
+  // the chart.
   const nColumnEmptyMessage = useMemo(() => {
     if (!useNColumnMode || !sankeyData) return null;
     const { scaffold } = sankeyData;
     if (scaffold.columnCount === 0) return 'No columns configured.';
-    if (scaffold.columnCount === 1 && (sankeyData.columnData[0]?.nodes?.length ?? 0) === 0) {
-      return 'No carrier flow data available for this column.';
+    if (scaffold.columnCount < 2) {
+      const baselineHasNodes = (sankeyData.columnData[0]?.nodes?.length ?? 0) > 0;
+      return baselineHasNodes
+        ? 'Add a phase to compare against the historic baseline. Use "+ Add Rate-Adjusted Historic" or "+ Add Phase" above the chart.'
+        : 'No carrier flow data available for this column.';
     }
     return null;
   }, [useNColumnMode, sankeyData]);

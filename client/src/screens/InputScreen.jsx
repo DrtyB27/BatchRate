@@ -281,6 +281,14 @@ export default function InputScreen({
     originalCsvRef.current = rowsForRating;
     setDedupInfo(useDedup ? dedupStats : null);
 
+    // ── Governor mode resolution ──
+    // For retry runs (Reconciliation CSV / Save+Retry) default to
+    // endurance unless the user explicitly picked something else.
+    const resolvedGovernorMode =
+      isRetry && (execSettings.governorMode === 'adaptive' || !execSettings.governorMode)
+        ? 'endurance'
+        : (execSettings.governorMode || 'adaptive');
+
     const batchId = crypto.randomUUID();
     const batchStartTime = new Date().toISOString();
     const batchMeta = {
@@ -348,14 +356,6 @@ export default function InputScreen({
         }
       }
     };
-
-    // ── Governor mode resolution ──
-    // For retry runs (Reconciliation CSV / Save+Retry) default to
-    // endurance unless the user explicitly picked something else.
-    const resolvedGovernorMode =
-      isRetry && (execSettings.governorMode === 'adaptive' || !execSettings.governorMode)
-        ? 'endurance'
-        : (execSettings.governorMode || 'adaptive');
 
     // Always use multi-agent orchestrator (auto-sizes chunks for small batches)
     const orchestrator = createBatchOrchestrator({

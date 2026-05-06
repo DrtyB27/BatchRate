@@ -439,7 +439,8 @@ export default function ResultsScreen({
   // setAgentConcurrency setter (added in this commit alongside the
   // setGovernorMode setter from v2.11.0).
   const [throttleConfig, setThrottleConfig] = useState({
-    enabled: false,
+    mode: 'off',           // 'off' | 'suggest' | 'active'
+    autoCalibrate: true,
     windowSize: 50,
     warmupSamples: 30,
     upperP95Ms: 12000,
@@ -448,18 +449,81 @@ export default function ResultsScreen({
     minConcurrency: 2,
   });
   const [throttleLog, setThrottleLog] = useState([]);
+  const [calibrationState, setCalibrationState] = useState({
+    phase: 'idle',          // 'idle' | 'calibrating' | 'done' | 'manual'
+    samples: 0,
+    baselineP95: null,
+  });
   const handleThrottleAdjust = useCallback((entry) => {
     setThrottleLog(prev => [entry, ...prev].slice(0, 50));
   }, []);
 
+  // Reset calibration when the mode flips back to 'off' or when a new
+  // batch starts. The hook also resets its internal buffer.
+  useEffect(() => {
+    if (throttleConfig.mode === 'off') {
+      setCalibrationState({ phase: 'idle', samples: 0, baselineP95: null });
+      return;
+    }
+    if (!throttleConfig.autoCalibrate) {
+      setCalibrationState(s => s.phase === 'manual' ? s : { phase: 'manual', samples: 0, baselineP95: null });
+      return;
+    }
+    setCalibrationState(s => (s.phase === 'idle' || s.phase === 'manual')
+      ? { phase: 'calibrating', samples: 0, baselineP95: null }
+      : s);
+  }, [throttleConfig.mode, throttleConfig.autoCalibrate]);
+
+  useEffect(() => {
+    // Reset calibration on new batch — fresh samples are needed.
+    if (throttleConfig.mode === 'off') return;
+    setCalibrationState({
+      phase: throttleConfig.autoCalibrate ? 'calibrating' : 'manual',
+      samples: 0,
+      baselineP95: null,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [batchMeta?.batchId]);
+
+  const handleCalibrationProgress = useCallback((samples, _target) => {
+    setCalibrationState(s => s.phase === 'calibrating' || s.phase === 'idle'
+      ? { ...s, phase: 'calibrating', samples }
+      : s);
+  }, []);
+
+  const handleCalibrationComplete = useCallback((baseline, upper, lower) => {
+    setThrottleConfig(prev => ({ ...prev, upperP95Ms: upper, lowerP95Ms: lower }));
+    setCalibrationState({ phase: 'done', samples: 0, baselineP95: baseline });
+  }, []);
+
+  const handleManualThresholdEdit = useCallback(() => {
+    setCalibrationState(s => s.phase === 'calibrating' || s.phase === 'idle'
+      ? { phase: 'manual', samples: 0, baselineP95: null }
+      : s);
+  }, []);
+
+  const calibrationDone =
+    throttleConfig.mode === 'off' ||
+    !throttleConfig.autoCalibrate ||
+    calibrationState.phase === 'done' ||
+    calibrationState.phase === 'manual';
+
   // Build completions array from results for the hook (one entry per
   // result with agentId + responseMs). Falls back to a synthetic
   // 'executor' agentId for the single-agent retry/auto-kick path.
+  // Filters NO_RATES (data-side, NO_COVERAGE in this codebase) and
+  // non-success rows that aren't TIMEOUT_EXHAUSTED — those don't reflect
+  // server-load and would dilute the P95 throttle signal.
   const throttleCompletions = useMemo(() => {
     const out = [];
     for (const r of results) {
       const ms = r.elapsedMs || r.telemetry?.elapsedMs || 0;
       if (ms <= 0) continue;
+      // NO_COVERAGE = "no contracted rates" — data-side, not server load.
+      if (r.failureReason === 'NO_COVERAGE') continue;
+      // Skip non-success failures other than timeouts (timeouts are a
+      // genuine server-load signal; weight/parse/unknown errors are not).
+      if (!r.success && r.failureReason !== 'TIMEOUT_EXHAUSTED') continue;
       out.push({
         agentId: r.agentId || 'executor',
         responseMs: ms,
@@ -468,6 +532,8 @@ export default function ResultsScreen({
     }
     return out;
   }, [results]);
+
+  const throttlePendingRows = Math.max(0, (totalRows || results.length) - results.length);
 
   // Live per-agent concurrency snapshot — re-read on each render so
   // UI reflects throttle adjustments immediately.
@@ -499,7 +565,11 @@ export default function ResultsScreen({
     perAgentConcurrency,
     setAgentConcurrency,
     maxConcurrency: throttleMaxConcurrency,
+    pendingRows: throttlePendingRows,
+    calibrationDone,
     config: throttleConfig,
+    onCalibrationProgress: handleCalibrationProgress,
+    onCalibrationComplete: handleCalibrationComplete,
     onAdjust: handleThrottleAdjust,
   });
 
@@ -1115,6 +1185,9 @@ export default function ResultsScreen({
               perAgentConcurrency={perAgentConcurrency}
               log={throttleLog}
               active={isActiveRun}
+              pendingRows={throttlePendingRows}
+              calibrationState={calibrationState}
+              onManualThresholdChange={handleManualThresholdEdit}
             />
           }
         />

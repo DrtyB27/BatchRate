@@ -10,6 +10,18 @@
 
 export const releases = [
   {
+    version: '2.19.0',
+    date: '2026-05-06',
+    summary: 'Exception lanes: include vs exclude modes.',
+    items: [
+      'Each exception lane now has an Include or Exclude mode.',
+      'Include (existing behavior) force-awards the listed SCAC on matched lanes; flagged for follow-up if the carrier didn\'t quote.',
+      'Exclude (new) blocks the listed SCAC from matched lanes — the next-best eligible carrier wins. Multiple Exclude rules on the same lane stack.',
+      'Any matching Include rule short-circuits and beats Exclude rules on the same lane.',
+      'Existing exception lanes (no mode field) default to Include — backwards compatible.',
+    ],
+  },
+  {
     version: '2.18.0',
     date: '2026-05-06',
     summary: 'In-app Wiki/Help screen — features, release notes, known bugs, limitations, tips.',
@@ -160,8 +172,8 @@ export const featureAreas = [
         id: 'scenarios',
         title: 'Scenario Builder',
         location: 'Results → Scenarios tab',
-        summary: 'Up to 5 scenarios. Pick eligible SCACs globally; optionally override per location; pin specific lanes via exception entries.',
-        body: 'Built-in scenarios: Current State (from input historic data), Historic Carrier — New Rate, and Low Cost Award. User scenarios add to those (max 5 user). Lane Detail Comparison shows side-by-side awards.',
+        summary: 'Up to 5 scenarios. Pick eligible SCACs globally; optionally override per location; pin or block specific lanes via exception entries.',
+        body: 'Built-in scenarios: Current State (from input historic data), Historic Carrier — New Rate, and Low Cost Award. User scenarios add to those (max 5 user). Lane Detail Comparison shows side-by-side awards. Exception lanes have two modes: Include (force-award the listed carrier on matched lanes) and Exclude (block the listed carrier; next-best wins). Any Include match beats Excludes on the same lane.',
       },
       {
         id: 'carrier-feedback',

@@ -388,11 +388,15 @@ export default function ResultsScreen({
         result = computeHistoricCarrierMatch(flatRows);
       } else {
         const scacs = s.eligibleSCACs.length > 0 ? s.eligibleSCACs : allSCACs;
-        result = computeScenario(flatRows, scacs);
+        result = computeScenario(flatRows, scacs, {
+          locationEligibility: s.locationEligibility || null,
+          exceptionLanes: s.exceptionLanes || null,
+          customerLocations,
+        });
       }
       return { ...s, result };
     });
-  }, [scenarios, flatRows, allSCACs]);
+  }, [scenarios, flatRows, allSCACs, customerLocations]);
 
   // Summary stats — partitioned via the central classifyRow helper so the
   // banner, retry button, and persistence layer agree on what "retryable"
@@ -1167,6 +1171,7 @@ export default function ResultsScreen({
           computedScenarios={computedScenarios}
           allSCACs={allSCACs}
           hasHistoric={hasHistoric}
+          customerLocations={customerLocations}
         />
       ) : viewMode === 'optimize' ? (
         <OptimizationDashboard flatRows={flatRows} sampleWeeks={sampleWeeks} credentials={credentials} batchParams={batchParams} />

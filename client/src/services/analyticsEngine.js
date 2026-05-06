@@ -597,27 +597,146 @@ export function buildAnalyticsXlsx(flatRows, heatmapData) {
 /**
  * Compute scenario awards given a set of eligible carrier SCACs.
  * For each reference, award to lowest-cost eligible carrier.
+ *
+ * options:
+ *   locationEligibility: { [locationName]: string[] } -- per-location SCAC override.
+ *     If a row's resolved origin location has an entry, that list replaces
+ *     `eligibleSCACs` for that row.
+ *   exceptionLanes: [{ id, origState?, destState?, origPostal3?, destPostal3?,
+ *     scac, reason? }] -- manual lane awards. If a row matches an exception,
+ *     force-award the listed SCAC. If that SCAC returned no rate for the row,
+ *     award is recorded with totalCharge=null and noRate=true so downstream
+ *     UI can flag it for follow-up.
+ *   customerLocations: location list for resolving origPostal → locationName.
  */
-export function computeScenario(flatRows, eligibleSCACs) {
-  const eligibleSet = new Set(eligibleSCACs.map(s => s.toUpperCase()));
-  const refGroups = {};
+export function computeScenario(flatRows, eligibleSCACs, options = {}) {
+  const {
+    locationEligibility = null,
+    exceptionLanes = null,
+    customerLocations = null,
+  } = options;
 
-  for (const row of flatRows) {
-    if (!row.hasRate || row.rate.validRate === 'false') continue;
-    const scac = (row.rate.carrierSCAC || '').toUpperCase();
-    if (!eligibleSet.has(scac)) continue;
-    const ref = row.reference || '';
-    if (!refGroups[ref]) refGroups[ref] = [];
-    refGroups[ref].push(row);
+  const globalEligible = new Set(eligibleSCACs.map(s => s.toUpperCase()));
+  const hasLocEligibility = locationEligibility && Object.keys(locationEligibility).length > 0;
+  const hasExceptions = Array.isArray(exceptionLanes) && exceptionLanes.length > 0;
+
+  // Lazy import would create a cycle; locationResolver is a sibling util.
+  // Keep lookup inline for purity & easy Java port.
+  function resolveOriginLocationName(row) {
+    if (!hasLocEligibility || !customerLocations || customerLocations.length === 0) return null;
+    const z = String(row.origPostal || '').trim();
+    if (!z) return null;
+    for (const loc of customerLocations) {
+      const start = String(loc.zipStart || '').trim();
+      if (!start) continue;
+      const end = loc.zipEnd ? String(loc.zipEnd).trim() : '';
+      if (end) {
+        if (z >= start && z <= end) return loc.name;
+      } else if (z === start || z.startsWith(start)) {
+        return loc.name;
+      }
+    }
+    return null;
   }
 
-  const allRefs = new Set(flatRows.map(r => r.reference || ''));
+  function matchExceptionLane(row) {
+    if (!hasExceptions) return null;
+    const oState = (row.origState || '').toUpperCase();
+    const dState = (row.destState || '').toUpperCase();
+    const oP3 = String(row.origPostal || '').slice(0, 3);
+    const dP3 = String(row.destPostal || '').slice(0, 3);
+    for (const ex of exceptionLanes) {
+      const wantOState = (ex.origState || '').toUpperCase();
+      const wantDState = (ex.destState || '').toUpperCase();
+      const wantOP3 = String(ex.origPostal3 || '').slice(0, 3);
+      const wantDP3 = String(ex.destPostal3 || '').slice(0, 3);
+      // Treat empty fields as wildcards but require at least one match dimension.
+      if (!wantOState && !wantDState && !wantOP3 && !wantDP3) continue;
+      if (wantOState && wantOState !== oState) continue;
+      if (wantDState && wantDState !== dState) continue;
+      if (wantOP3 && wantOP3 !== oP3) continue;
+      if (wantDP3 && wantDP3 !== dP3) continue;
+      return ex;
+    }
+    return null;
+  }
+
+  // Group all rated candidates by reference (regardless of eligibility) so
+  // we can both pick a winner from the effective set AND look up forced-SCAC
+  // rates for exception lanes.
+  const allCandidatesByRef = {};
+  for (const row of flatRows) {
+    if (!row.hasRate || row.rate.validRate === 'false') continue;
+    const ref = row.reference || '';
+    if (!allCandidatesByRef[ref]) allCandidatesByRef[ref] = [];
+    allCandidatesByRef[ref].push(row);
+  }
+
+  // Pre-compute one representative row per reference for exception/location
+  // resolution (origPostal/state are shipment-level, identical across rates).
+  const repByRef = {};
+  for (const row of flatRows) {
+    const ref = row.reference || '';
+    if (!repByRef[ref]) repByRef[ref] = row;
+  }
+
+  const allRefs = new Set(Object.keys(repByRef));
   const awards = {};
   const unserviced = [];
 
   for (const ref of allRefs) {
-    const candidates = refGroups[ref];
-    if (!candidates || candidates.length === 0) {
+    const rep = repByRef[ref];
+    const candidates = allCandidatesByRef[ref] || [];
+
+    // 1. Exception lane match — force-award.
+    const exMatch = matchExceptionLane(rep);
+    if (exMatch) {
+      const forcedScac = (exMatch.scac || '').toUpperCase();
+      const forcedRow = candidates.find(r => (r.rate.carrierSCAC || '').toUpperCase() === forcedScac);
+      if (forcedRow) {
+        awards[ref] = {
+          scac: forcedRow.rate.carrierSCAC,
+          carrierName: forcedRow.rate.carrierName,
+          totalCharge: forcedRow.rate.totalCharge,
+          isMinimumRated: forcedRow.rate.isMinimumRated,
+          tariffDiscountPct: forcedRow.rate.tariffDiscountPct,
+          laneKey: getLaneKey(forcedRow),
+          row: forcedRow,
+          isException: true,
+          exceptionReason: exMatch.reason || '',
+          noRate: false,
+        };
+      } else {
+        // Forced SCAC didn't return a rate — record the exception so downstream
+        // surfaces it for follow-up quoting.
+        awards[ref] = {
+          scac: exMatch.scac,
+          carrierName: '',
+          totalCharge: null,
+          isMinimumRated: false,
+          tariffDiscountPct: null,
+          laneKey: getLaneKey(rep),
+          row: rep,
+          isException: true,
+          exceptionReason: exMatch.reason || '',
+          noRate: true,
+        };
+      }
+      continue;
+    }
+
+    // 2. Determine effective eligibility (per-location override or global).
+    let effective = globalEligible;
+    if (hasLocEligibility) {
+      const locName = resolveOriginLocationName(rep);
+      if (locName && Array.isArray(locationEligibility[locName]) && locationEligibility[locName].length > 0) {
+        effective = new Set(locationEligibility[locName].map(s => s.toUpperCase()));
+      }
+    }
+
+    // 3. Filter candidates by effective eligibility, then pick lowest-cost.
+    const eligibleCandidates = candidates.filter(r => effective.has((r.rate.carrierSCAC || '').toUpperCase()));
+    if (eligibleCandidates.length === 0) {
       unserviced.push(ref);
       continue;
     }
@@ -625,7 +744,7 @@ export function computeScenario(flatRows, eligibleSCACs) {
     // contribute once per load to prevent cost multiplication.
     const seenScacs = new Set();
     let best = null;
-    for (const r of candidates) {
+    for (const r of eligibleCandidates) {
       const scac = (r.rate.carrierSCAC || '').toUpperCase();
       if (seenScacs.has(scac)) continue;
       seenScacs.add(scac);
@@ -641,19 +760,24 @@ export function computeScenario(flatRows, eligibleSCACs) {
         tariffDiscountPct: best.rate.tariffDiscountPct,
         laneKey: getLaneKey(best),
         row: best,
+        isException: false,
+        noRate: false,
       };
     }
   }
 
   // Summary
   const awardedList = Object.values(awards);
-  const discAwarded = awardedList.filter(a => !a.isMinimumRated);
+  // Discount-rate stats exclude minimum-rated AND noRate (no quote yet) awards.
+  const discAwarded = awardedList.filter(a => !a.isMinimumRated && !a.noRate);
   const summary = {
     totalSpend: awardedList.reduce((s, a) => s + (a.totalCharge ?? 0), 0),
     carrierCount: new Set(awardedList.map(a => a.scac)).size,
     shipmentsAwarded: awardedList.length,
     unservicedCount: unserviced.length,
     minRatedCount: awardedList.filter(a => a.isMinimumRated).length,
+    exceptionCount: awardedList.filter(a => a.isException).length,
+    exceptionNoRateCount: awardedList.filter(a => a.isException && a.noRate).length,
     avgDiscountPct: discAwarded.length > 0 ? mean(discAwarded.map(a => a.tariffDiscountPct ?? 0)) : 0,
   };
 
@@ -665,14 +789,23 @@ export function computeScenario(flatRows, eligibleSCACs) {
       carrierBreakdown[scac] = {
         carrierName: a.carrierName, shipmentCount: 0,
         lanes: new Set(), totalSpend: 0, minCount: 0, discCount: 0, discPcts: [],
+        exceptionCount: 0, noRateCount: 0,
       };
     }
     const cb = carrierBreakdown[scac];
     cb.shipmentCount++;
     cb.lanes.add(a.laneKey);
     cb.totalSpend += a.totalCharge ?? 0;
-    if (a.isMinimumRated) cb.minCount++;
-    else { cb.discCount++; cb.discPcts.push(a.tariffDiscountPct ?? 0); }
+    if (a.isException) cb.exceptionCount++;
+    if (a.noRate) cb.noRateCount++;
+    if (a.noRate) {
+      // No quote — don't count toward min/disc stats.
+    } else if (a.isMinimumRated) {
+      cb.minCount++;
+    } else {
+      cb.discCount++;
+      cb.discPcts.push(a.tariffDiscountPct ?? 0);
+    }
   }
 
   const carrierBreakdownResult = {};
@@ -686,6 +819,8 @@ export function computeScenario(flatRows, eligibleSCACs) {
       minCount: cb.minCount,
       discCount: cb.discCount,
       avgDiscount: cb.discPcts.length > 0 ? mean(cb.discPcts) : 0,
+      exceptionCount: cb.exceptionCount,
+      noRateCount: cb.noRateCount,
     };
   }
 
@@ -702,7 +837,7 @@ export function computeScenario(flatRows, eligibleSCACs) {
     lb.weights.push(parseFloat(row.inputNetWt) || 0);
     lb.classes.push(row.inputClass || '');
     lb.totalCost += a.totalCharge ?? 0;
-    lb.detailAwards.push({ reference: ref, scac: a.scac, totalCharge: a.totalCharge, isMinimumRated: a.isMinimumRated });
+    lb.detailAwards.push({ reference: ref, scac: a.scac, totalCharge: a.totalCharge, isMinimumRated: a.isMinimumRated, isException: !!a.isException, noRate: !!a.noRate });
     lb.scacCounts[a.scac] = (lb.scacCounts[a.scac] || 0) + 1;
   }
 

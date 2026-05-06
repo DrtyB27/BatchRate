@@ -1115,28 +1115,6 @@ export function computeHistoricCarrierMatch(flatRows) {
 }
 
 /**
- * Compute deltas between two scenarios.
- */
-export function computeScenarioDeltas(scenarioA, scenarioB) {
-  const spendDelta = scenarioA.summary.totalSpend - scenarioB.summary.totalSpend;
-  const spendPctDelta = scenarioB.summary.totalSpend > 0
-    ? (spendDelta / scenarioB.summary.totalSpend) * 100 : 0;
-
-  const laneDiffs = {};
-  const allLanes = new Set([...Object.keys(scenarioA.laneBreakdown), ...Object.keys(scenarioB.laneBreakdown)]);
-  for (const lk of allLanes) {
-    const a = scenarioA.laneBreakdown[lk];
-    const b = scenarioB.laneBreakdown[lk];
-    laneDiffs[lk] = {
-      costDelta: (a?.awardedCost ?? 0) - (b?.awardedCost ?? 0),
-      carrierChanged: (a?.awardedSCAC || '') !== (b?.awardedSCAC || ''),
-    };
-  }
-
-  return { spendDelta, spendPctDelta, laneDiffs };
-}
-
-/**
  * Build scenario comparison CSV export.
  */
 export function buildScenarioCsv(scenarios) {

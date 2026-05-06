@@ -1197,7 +1197,7 @@ export default function ResultsScreen({
           }
         />
       ) : viewMode === 'feedback' ? (
-        <CarrierFeedback flatRows={flatRows} computedScenarios={computedScenarios} sampleWeeks={sampleWeeks} annualization={annualization} historicBaseline={historicBaseline} />
+        <CarrierFeedback flatRows={flatRows} computedScenarios={computedScenarios} sampleWeeks={sampleWeeks} annualization={annualization} historicBaseline={historicBaseline} customerLocations={customerLocations} />
       ) : viewMode === 'annual' ? (
         <AnnualAwardBuilder flatRows={flatRows} computedScenarios={computedScenarios} activeMarkups={activeMarkups} sampleWeeks={sampleWeeks} weeksOverride={weeksOverride} onWeeksChange={setWeeksOverride} detectedWeeks={detectedWeeks} annualization={annualization} historicBaseline={historicBaseline} customerLocations={customerLocations} onCustomerLocationsChange={onCustomerLocationsChange} preparedBy={credentials?.username || ''} />
       ) : (

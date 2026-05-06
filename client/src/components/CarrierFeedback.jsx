@@ -1,5 +1,5 @@
-import React, { useState, useMemo, useCallback } from 'react';
-import { computeCarrierFeedback, computeCarrierFeedbackSummary, computeAnnualAward, computeCarrierSummary, computeScenario, getLaneKey } from '../services/analyticsEngine.js';
+import React, { useState, useMemo, useCallback, useEffect } from 'react';
+import { computeCarrierFeedback, computeCarrierFeedbackSummary, computeCarrierLocationFeedback, computeAnnualAward, computeCarrierSummary, computeScenario, getLaneKey } from '../services/analyticsEngine.js';
 import { generateCarrierFeedbackPdf } from '../services/pdfExport.js';
 import { useScenario } from '../context/ScenarioContext.jsx';
 import { formatShipments, formatTons } from '../utils/annualizedMetrics.js';
@@ -240,7 +240,7 @@ function CarrierSummaryTable({ summary, onSelectCarrier, awardContext }) {
 }
 
 // ── Main Component ──────────────────────────────────────────
-export default function CarrierFeedback({ flatRows, computedScenarios, sampleWeeks, annualization, historicBaseline }) {
+export default function CarrierFeedback({ flatRows, computedScenarios, sampleWeeks, annualization, historicBaseline, customerLocations }) {
   const { carrierSelections, scenarioName: ctxScenarioName } = useScenario();
   const customScenarioSCACs = useMemo(
     () => Object.entries(carrierSelections).filter(([, v]) => v.awarded).map(([scac]) => scac),
@@ -331,9 +331,29 @@ export default function CarrierFeedback({ flatRows, computedScenarios, sampleWee
     return computeCarrierFeedback(flatRows, selectedSCAC);
   }, [flatRows, selectedSCAC]);
 
+  // Per-customer-location feedback for the selected SCAC
+  const locationFeedback = useMemo(() => {
+    if (!selectedSCAC) return [];
+    return computeCarrierLocationFeedback(flatRows, selectedSCAC, customerLocations || []);
+  }, [flatRows, selectedSCAC, customerLocations]);
+
+  const [showLocationPanel, setShowLocationPanel] = useState(false);
+  const [locationFilter, setLocationFilter] = useState(null); // location entry or null
+
+  // Reset filter when SCAC changes
+  useEffect(() => { setLocationFilter(null); }, [selectedSCAC]);
+
+  const filteredLaneKeys = useMemo(() => {
+    if (!locationFilter) return null;
+    return new Set(locationFilter.laneKeys || []);
+  }, [locationFilter]);
+
   const sortedLanes = useMemo(() => {
     if (!feedback) return [];
-    const lanes = [...feedback.lanes];
+    const all = filteredLaneKeys
+      ? feedback.lanes.filter(l => filteredLaneKeys.has(l.laneKey))
+      : feedback.lanes;
+    const lanes = [...all];
     lanes.sort((a, b) => {
       let va = a[sortKey], vb = b[sortKey];
       if (typeof va === 'string') va = va.toLowerCase();
@@ -700,11 +720,120 @@ export default function CarrierFeedback({ flatRows, computedScenarios, sampleWee
               );
             })()}
 
+            {/* Per-Customer-Location Drill-down */}
+            {locationFeedback.length > 0 && (
+              <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setShowLocationPanel(v => !v)}
+                  className="w-full bg-[#002144] text-white px-4 py-2 flex items-center justify-between hover:bg-[#003366]"
+                  style={{ fontFamily: "'Montserrat', Arial, sans-serif" }}
+                >
+                  <h3 className="text-sm font-semibold">
+                    By Origin Location — {feedback.scac}
+                    <span className="ml-2 text-xs text-[#39b6e6] font-normal">
+                      ({locationFeedback.filter(l => l.locationName).length} mapped
+                      {locationFeedback.some(l => !l.locationName) ? `, ${locationFeedback.filter(l => !l.locationName).length} unmapped` : ''})
+                    </span>
+                  </h3>
+                  <div className="flex items-center gap-3">
+                    {locationFilter && (
+                      <span
+                        onClick={(e) => { e.stopPropagation(); setLocationFilter(null); }}
+                        className="text-[11px] bg-[#39b6e6] hover:bg-[#2da0cc] text-white px-2 py-0.5 rounded cursor-pointer"
+                      >
+                        Filtered: {locationFilter.locationName || `${locationFilter.city}, ${locationFilter.state}`} ✕
+                      </span>
+                    )}
+                    <span className="text-xs">{showLocationPanel ? '▾' : '▸'}</span>
+                  </div>
+                </button>
+                {showLocationPanel && (
+                  <div className="overflow-auto max-h-[320px]">
+                    <table className="w-full text-xs border-collapse">
+                      <thead className="bg-gray-50 sticky top-0">
+                        <tr className="text-left">
+                          <th className="px-3 py-2 font-medium text-gray-600">Location</th>
+                          <th className="px-3 py-2 font-medium text-gray-600 text-right">Ship.</th>
+                          <th className="px-3 py-2 font-medium text-gray-600 text-right">Lanes</th>
+                          <th className="px-3 py-2 font-medium text-gray-600 text-right">Wins</th>
+                          <th className="px-3 py-2 font-medium text-gray-600 text-right">Win %</th>
+                          <th className="px-3 py-2 font-medium text-gray-600 text-right">Avg Gap %</th>
+                          <th className="px-3 py-2 font-medium text-gray-600 text-right">$ Gap</th>
+                          <th className="px-3 py-2 font-medium text-gray-600 text-right">Avg Disc.</th>
+                          <th className="px-3 py-2 font-medium text-gray-600 text-right">Min %</th>
+                          <th className="px-3 py-2 font-medium text-gray-600 text-right">Spend</th>
+                          <th className="px-3 py-2 font-medium text-gray-600"></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {locationFeedback.map((loc, i) => {
+                          const isActive = locationFilter && (
+                            (locationFilter.locationName && locationFilter.locationName === loc.locationName) ||
+                            (!locationFilter.locationName && !loc.locationName && locationFilter.city === loc.city && locationFilter.state === loc.state)
+                          );
+                          const stoplight = loc.winPct >= 50 ? 'bg-green-50' : loc.avgGapPct <= 5 ? 'bg-amber-50' : 'bg-red-50';
+                          return (
+                            <tr
+                              key={`${loc.locationName || 'unmapped'}-${i}`}
+                              className={`border-b border-gray-100 cursor-pointer hover:bg-gray-50 ${isActive ? 'bg-blue-50 ring-1 ring-[#39b6e6]' : ''}`}
+                              onClick={() => setLocationFilter(isActive ? null : loc)}
+                            >
+                              <td className="px-3 py-1.5">
+                                <div className="flex items-center gap-2">
+                                  <span className={`inline-block w-2 h-2 rounded-full ${stoplight.replace('bg-', 'bg-').replace('-50', '-400')}`} />
+                                  <div>
+                                    <div className="font-medium text-[#002144]">
+                                      {loc.locationName || <span className="italic text-gray-500">Unmapped</span>}
+                                    </div>
+                                    {(loc.city || loc.state) && (
+                                      <div className="text-[10px] text-gray-400">{loc.city}{loc.city && loc.state ? ', ' : ''}{loc.state}</div>
+                                    )}
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="px-3 py-1.5 text-right">{loc.shipments.toLocaleString()}</td>
+                              <td className="px-3 py-1.5 text-right">{loc.lanes}</td>
+                              <td className="px-3 py-1.5 text-right">{loc.wins}</td>
+                              <td className={`px-3 py-1.5 text-right font-medium ${loc.winPct >= 50 ? 'text-green-700' : 'text-gray-600'}`}>{loc.winPct}%</td>
+                              <td className={`px-3 py-1.5 text-right ${loc.avgGapPct > 15 ? 'text-red-600' : loc.avgGapPct > 5 ? 'text-amber-600' : 'text-gray-600'}`}>
+                                {loc.avgGapPct > 0 ? `${loc.avgGapPct}%` : '—'}
+                              </td>
+                              <td className="px-3 py-1.5 text-right">{loc.dollarGap > 0 ? `$${loc.dollarGap.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : '—'}</td>
+                              <td className="px-3 py-1.5 text-right">{loc.avgDiscount != null ? `${loc.avgDiscount}%` : '—'}</td>
+                              <td className="px-3 py-1.5 text-right">{loc.minPct > 0 ? `${loc.minPct}%` : '—'}</td>
+                              <td className="px-3 py-1.5 text-right text-gray-600">${loc.totalSpend.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
+                              <td className="px-3 py-1.5 text-[#39b6e6]">{isActive ? 'Filtered' : 'Filter →'}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Lane table */}
             <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
-              <div className="bg-[#002144] text-white px-4 py-2"
+              <div className="bg-[#002144] text-white px-4 py-2 flex items-center justify-between"
                    style={{ fontFamily: "'Montserrat', Arial, sans-serif" }}>
-                <h3 className="text-sm font-semibold">Lane Performance — {feedback.scac}</h3>
+                <h3 className="text-sm font-semibold">
+                  Lane Performance — {feedback.scac}
+                  {locationFilter && (
+                    <span className="ml-2 text-[11px] text-[#39b6e6] font-normal">
+                      filtered to {locationFilter.locationName || `${locationFilter.city}, ${locationFilter.state}`}
+                    </span>
+                  )}
+                </h3>
+                {locationFilter && (
+                  <button
+                    onClick={() => setLocationFilter(null)}
+                    className="text-[11px] bg-[#39b6e6] hover:bg-[#2da0cc] text-white px-2 py-0.5 rounded"
+                  >
+                    Clear filter
+                  </button>
+                )}
               </div>
               <div className="overflow-auto max-h-[500px]">
                 <table className="w-full text-xs border-collapse">

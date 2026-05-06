@@ -1361,6 +1361,141 @@ export function computeCarrierFeedback(flatRows, selectedSCAC) {
 }
 
 // ============================================================
+// CARRIER FEEDBACK — by customer origin location
+// ============================================================
+/**
+ * Aggregate selected carrier's performance by customer origin location
+ * (resolved via origPostal against the customerLocations zip ranges).
+ *
+ * Returns one entry per location the carrier serves, plus an "Unmapped"
+ * bucket for shipments whose origin doesn't match any location.
+ *
+ * @returns Array<{
+ *   locationName, city, state, shipments, lanes (count of distinct lane keys),
+ *   wins, winPct, avgGapPct, dollarGap, totalSpend, avgDiscount, minCount,
+ *   refs: string[]   // shipment references at this location (for drill-down)
+ * }>
+ */
+export function computeCarrierLocationFeedback(flatRows, selectedSCAC, customerLocations) {
+  if (!selectedSCAC) return [];
+  const scacUpper = selectedSCAC.toUpperCase();
+  const validRows = flatRows.filter(r => r.hasRate && r.rate.validRate !== 'false');
+
+  // Per-reference best (lowest) totalCharge across carriers, and the SCAC's own row.
+  const seenPerRef = {};
+  const refData = {}; // ref -> { mine: row|null, bestCharge: number, refRow: representative row }
+
+  for (const row of validRows) {
+    const scac = (row.rate.carrierSCAC || '').toUpperCase();
+    const ref = row.reference || '';
+    const dedupKey = `${ref}|${scac}`;
+    if (seenPerRef[dedupKey]) continue;
+    seenPerRef[dedupKey] = true;
+    if (!refData[ref]) refData[ref] = { mine: null, bestCharge: Infinity, refRow: row };
+    const tc = row.rate.totalCharge ?? Infinity;
+    if (tc < refData[ref].bestCharge) refData[ref].bestCharge = tc;
+    if (scac === scacUpper) refData[ref].mine = row;
+  }
+
+  function resolveLoc(zip) {
+    if (!customerLocations || customerLocations.length === 0 || !zip) return null;
+    const z = String(zip).trim();
+    for (const loc of customerLocations) {
+      const start = String(loc.zipStart || '').trim();
+      if (!start) continue;
+      const end = loc.zipEnd ? String(loc.zipEnd).trim() : '';
+      if (end) {
+        if (z >= start && z <= end) return loc;
+      } else if (z === start || z.startsWith(start)) {
+        return loc;
+      }
+    }
+    return null;
+  }
+
+  // Group references where the SCAC has a rate by resolved location.
+  const groups = {}; // key -> aggregator
+
+  for (const [ref, d] of Object.entries(refData)) {
+    if (!d.mine) continue; // SCAC didn't quote this lane
+    const myCharge = d.mine.rate.totalCharge ?? null;
+    const bestCharge = d.bestCharge !== Infinity ? d.bestCharge : null;
+    const loc = resolveLoc(d.mine.origPostal);
+    const groupKey = loc ? `loc::${loc.name}` : `unmapped::${d.mine.origState || 'XX'}::${d.mine.origPostal || ''}`;
+
+    if (!groups[groupKey]) {
+      groups[groupKey] = {
+        locationName: loc ? loc.name : null,
+        city: loc ? loc.city : (d.mine.origCity || ''),
+        state: loc ? loc.state : (d.mine.origState || ''),
+        shipments: 0,
+        lanes: new Set(),
+        laneKeys: new Set(),
+        wins: 0,
+        gapPctSum: 0,
+        gapPctCount: 0,
+        dollarGap: 0,
+        totalSpend: 0,
+        discountSum: 0,
+        discountCount: 0,
+        minCount: 0,
+        refs: [],
+      };
+    }
+    const g = groups[groupKey];
+    g.shipments++;
+    const lk = getLaneKey(d.mine);
+    g.lanes.add(lk);
+    g.laneKeys.add(lk);
+    g.totalSpend += myCharge ?? 0;
+    g.refs.push(ref);
+    if (d.mine.rate.isMinimumRated) {
+      g.minCount++;
+    } else if (d.mine.rate.tariffDiscountPct != null) {
+      g.discountSum += d.mine.rate.tariffDiscountPct;
+      g.discountCount++;
+    }
+    if (myCharge != null && bestCharge != null) {
+      if (Math.abs(myCharge - bestCharge) < 0.01) {
+        g.wins++;
+      } else {
+        g.dollarGap += (myCharge - bestCharge);
+        if (bestCharge > 0) {
+          g.gapPctSum += ((myCharge - bestCharge) / bestCharge) * 100;
+          g.gapPctCount++;
+        }
+      }
+    }
+  }
+
+  const out = Object.values(groups).map(g => ({
+    locationName: g.locationName,
+    city: g.city,
+    state: g.state,
+    shipments: g.shipments,
+    lanes: g.lanes.size,
+    laneKeys: [...g.laneKeys],
+    wins: g.wins,
+    winPct: g.shipments > 0 ? Math.round((g.wins / g.shipments) * 1000) / 10 : 0,
+    avgGapPct: g.gapPctCount > 0 ? Math.round((g.gapPctSum / g.gapPctCount) * 10) / 10 : 0,
+    dollarGap: Math.round(g.dollarGap * 100) / 100,
+    totalSpend: Math.round(g.totalSpend * 100) / 100,
+    avgDiscount: g.discountCount > 0 ? Math.round((g.discountSum / g.discountCount) * 10) / 10 : null,
+    minCount: g.minCount,
+    minPct: g.shipments > 0 ? Math.round((g.minCount / g.shipments) * 1000) / 10 : 0,
+    refs: g.refs,
+  }));
+
+  // Mapped locations first, sorted by shipments desc; unmapped last.
+  out.sort((a, b) => {
+    if (!!a.locationName !== !!b.locationName) return a.locationName ? -1 : 1;
+    return b.shipments - a.shipments;
+  });
+
+  return out;
+}
+
+// ============================================================
 // CARRIER FEEDBACK SUMMARY — multi-carrier comparison table
 // ============================================================
 export function computeCarrierFeedbackSummary(flatRows) {

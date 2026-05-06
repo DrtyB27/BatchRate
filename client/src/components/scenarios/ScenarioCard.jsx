@@ -20,7 +20,7 @@ function getScenarioColor(index, isCurrentState, isLowCost, isHistoricMatch) {
 let _exId = 1;
 const newExceptionId = () => `ex_${Date.now()}_${_exId++}`;
 
-const EMPTY_EX = { matchBy: 'state', origState: '', destState: '', origPostal3: '', destPostal3: '', scac: '', reason: '' };
+const EMPTY_EX = { mode: 'include', matchBy: 'state', origState: '', destState: '', origPostal3: '', destPostal3: '', scac: '', reason: '' };
 
 export default function ScenarioCard({ scenario, allSCACs, onChange, onDelete, colorIndex, customerLocations }) {
   const { name, eligibleSCACs, locked, isCurrentState, isLowCost, isHistoricMatch } = scenario;
@@ -91,6 +91,7 @@ export default function ScenarioCard({ scenario, allSCACs, onChange, onDelete, c
     if (!hasMatch) return;
     const lane = {
       id: newExceptionId(),
+      mode: exDraft.mode === 'exclude' ? 'exclude' : 'include',
       scac: exDraft.scac.toUpperCase(),
       reason: exDraft.reason.trim(),
       origState: isState ? exDraft.origState.toUpperCase() : '',
@@ -253,14 +254,22 @@ export default function ScenarioCard({ scenario, allSCACs, onChange, onDelete, c
               {exceptionLanes.length > 0 && (
                 <div className="space-y-1 max-h-32 overflow-auto">
                   {exceptionLanes.map(ex => {
+                    const isExclude = ex.mode === 'exclude';
                     const left = ex.origState
                       ? `${ex.origState || '*'} → ${ex.destState || '*'}`
                       : `${ex.origPostal3 || '***'}- → ${ex.destPostal3 || '***'}-`;
+                    const tone = isExclude
+                      ? 'bg-slate-50 border-slate-200'
+                      : 'bg-amber-50 border-amber-200';
+                    const arrowTone = isExclude ? 'text-slate-700' : 'text-amber-700';
                     return (
-                      <div key={ex.id} className="flex items-start gap-1 text-[11px] bg-amber-50 border border-amber-200 rounded px-1.5 py-1">
+                      <div key={ex.id} className={`flex items-start gap-1 text-[11px] border rounded px-1.5 py-1 ${tone}`}>
+                        <span className={`text-[9px] uppercase tracking-wide font-bold shrink-0 px-1 rounded ${isExclude ? 'bg-slate-600 text-white' : 'bg-amber-600 text-white'}`}>
+                          {isExclude ? 'Excl' : 'Incl'}
+                        </span>
                         <div className="flex-1 min-w-0">
                           <div className="font-mono">{left}</div>
-                          <div className="text-amber-700">→ {ex.scac}</div>
+                          <div className={arrowTone}>{isExclude ? '✕ ' : '→ '}{ex.scac}</div>
                           {ex.reason && <div className="text-gray-600 truncate" title={ex.reason}>{ex.reason}</div>}
                         </div>
                         <button onClick={() => removeException(ex.id)} className="text-red-400 hover:text-red-600 px-1">×</button>
@@ -271,6 +280,18 @@ export default function ScenarioCard({ scenario, allSCACs, onChange, onDelete, c
               )}
               {/* Add form */}
               <div className="border border-dashed border-gray-300 rounded p-1.5 space-y-1">
+                <div className="flex gap-1 text-[10px]">
+                  <button
+                    onClick={() => setExDraft(d => ({ ...d, mode: 'include' }))}
+                    className={`px-1.5 py-0.5 rounded ${exDraft.mode === 'include' ? 'bg-amber-600 text-white' : 'bg-gray-200 text-gray-600'}`}
+                    title="Force-award the listed carrier on matched lanes"
+                  >Include (force)</button>
+                  <button
+                    onClick={() => setExDraft(d => ({ ...d, mode: 'exclude' }))}
+                    className={`px-1.5 py-0.5 rounded ${exDraft.mode === 'exclude' ? 'bg-slate-600 text-white' : 'bg-gray-200 text-gray-600'}`}
+                    title="Block the listed carrier on matched lanes; next-best wins"
+                  >Exclude (block)</button>
+                </div>
                 <div className="flex gap-1 text-[10px]">
                   <button
                     onClick={() => setExDraft(d => ({ ...d, matchBy: 'state' }))}
@@ -323,7 +344,7 @@ export default function ScenarioCard({ scenario, allSCACs, onChange, onDelete, c
                   onChange={e => setExDraft(d => ({ ...d, scac: e.target.value }))}
                   className="w-full px-1 py-0.5 text-[11px] border rounded"
                 >
-                  <option value="">Award SCAC…</option>
+                  <option value="">{exDraft.mode === 'exclude' ? 'Block SCAC…' : 'Award SCAC…'}</option>
                   {allSCACs.map(s => <option key={s} value={s}>{s}</option>)}
                 </select>
                 <input
@@ -341,7 +362,8 @@ export default function ScenarioCard({ scenario, allSCACs, onChange, onDelete, c
                 </button>
               </div>
               <div className="text-[10px] text-gray-400 italic">
-                Matched lanes are force-awarded to the listed carrier. Empty fields act as wildcards. If the carrier returned no rate, the lane is flagged for follow-up quote.
+                <span className="font-semibold">Include</span> force-awards the listed carrier on matched lanes (flagged for follow-up if they didn't quote).{' '}
+                <span className="font-semibold">Exclude</span> blocks the listed carrier from matched lanes — the next-best eligible carrier wins. Empty fields act as wildcards.
               </div>
             </div>
           )}

@@ -639,12 +639,14 @@ export function computeScenario(flatRows, eligibleSCACs, options = {}) {
     return null;
   }
 
-  function matchExceptionLane(row) {
-    if (!hasExceptions) return null;
+  function collectExceptionMatches(row) {
+    if (!hasExceptions) return { include: null, excludes: [] };
     const oState = (row.origState || '').toUpperCase();
     const dState = (row.destState || '').toUpperCase();
     const oP3 = String(row.origPostal || '').slice(0, 3);
     const dP3 = String(row.destPostal || '').slice(0, 3);
+    let include = null;
+    const excludes = [];
     for (const ex of exceptionLanes) {
       const wantOState = (ex.origState || '').toUpperCase();
       const wantDState = (ex.destState || '').toUpperCase();
@@ -656,9 +658,16 @@ export function computeScenario(flatRows, eligibleSCACs, options = {}) {
       if (wantDState && wantDState !== dState) continue;
       if (wantOP3 && wantOP3 !== oP3) continue;
       if (wantDP3 && wantDP3 !== dP3) continue;
-      return ex;
+      const mode = ex.mode === 'exclude' ? 'exclude' : 'include';
+      if (mode === 'exclude') {
+        excludes.push(ex);
+      } else if (!include) {
+        // First include match wins — multiple force-awards on the same lane
+        // would conflict, so we deterministically take the first.
+        include = ex;
+      }
     }
-    return null;
+    return { include, excludes };
   }
 
   // Group all rated candidates by reference (regardless of eligibility) so
@@ -688,10 +697,14 @@ export function computeScenario(flatRows, eligibleSCACs, options = {}) {
     const rep = repByRef[ref];
     const candidates = allCandidatesByRef[ref] || [];
 
-    // 1. Exception lane match — force-award.
-    const exMatch = matchExceptionLane(rep);
-    if (exMatch) {
-      const forcedScac = (exMatch.scac || '').toUpperCase();
+    // 1. Exception lane matches.
+    //    - Any matching `include` rule short-circuits to a force-award.
+    //    - All matching `exclude` rules stack and remove their SCACs from
+    //      the eligible candidate pool for this row.
+    const { include: includeMatch, excludes } = collectExceptionMatches(rep);
+
+    if (includeMatch) {
+      const forcedScac = (includeMatch.scac || '').toUpperCase();
       const forcedRow = candidates.find(r => (r.rate.carrierSCAC || '').toUpperCase() === forcedScac);
       if (forcedRow) {
         awards[ref] = {
@@ -703,14 +716,15 @@ export function computeScenario(flatRows, eligibleSCACs, options = {}) {
           laneKey: getLaneKey(forcedRow),
           row: forcedRow,
           isException: true,
-          exceptionReason: exMatch.reason || '',
+          exceptionMode: 'include',
+          exceptionReason: includeMatch.reason || '',
           noRate: false,
         };
       } else {
         // Forced SCAC didn't return a rate — record the exception so downstream
         // surfaces it for follow-up quoting.
         awards[ref] = {
-          scac: exMatch.scac,
+          scac: includeMatch.scac,
           carrierName: '',
           totalCharge: null,
           isMinimumRated: false,
@@ -718,7 +732,8 @@ export function computeScenario(flatRows, eligibleSCACs, options = {}) {
           laneKey: getLaneKey(rep),
           row: rep,
           isException: true,
-          exceptionReason: exMatch.reason || '',
+          exceptionMode: 'include',
+          exceptionReason: includeMatch.reason || '',
           noRate: true,
         };
       }
@@ -732,6 +747,16 @@ export function computeScenario(flatRows, eligibleSCACs, options = {}) {
       if (locName && Array.isArray(locationEligibility[locName]) && locationEligibility[locName].length > 0) {
         effective = new Set(locationEligibility[locName].map(s => s.toUpperCase()));
       }
+    }
+
+    // 2b. Apply exclude rules — remove the listed SCACs from the eligible set
+    //     for this row. If the result drops to zero candidates, the row is
+    //     unserviced (and remembered as an exclude-driven block).
+    const excludedSet = excludes.length > 0
+      ? new Set(excludes.map(ex => (ex.scac || '').toUpperCase()).filter(Boolean))
+      : null;
+    if (excludedSet && excludedSet.size > 0) {
+      effective = new Set([...effective].filter(s => !excludedSet.has(s)));
     }
 
     // 3. Filter candidates by effective eligibility, then pick lowest-cost.
@@ -752,6 +777,7 @@ export function computeScenario(flatRows, eligibleSCACs, options = {}) {
       if (!best || tc < (best.rate.totalCharge ?? Infinity)) best = r;
     }
     if (best) {
+      const excludeApplied = !!(excludedSet && excludedSet.size > 0);
       awards[ref] = {
         scac: best.rate.carrierSCAC,
         carrierName: best.rate.carrierName,
@@ -760,7 +786,10 @@ export function computeScenario(flatRows, eligibleSCACs, options = {}) {
         tariffDiscountPct: best.rate.tariffDiscountPct,
         laneKey: getLaneKey(best),
         row: best,
-        isException: false,
+        isException: excludeApplied,
+        exceptionMode: excludeApplied ? 'exclude' : undefined,
+        exceptionReason: excludeApplied ? excludes.map(e => e.reason).filter(Boolean).join('; ') : '',
+        excludedSCACs: excludeApplied ? [...excludedSet] : undefined,
         noRate: false,
       };
     }

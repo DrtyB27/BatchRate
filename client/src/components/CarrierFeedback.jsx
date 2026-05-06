@@ -240,7 +240,7 @@ function CarrierSummaryTable({ summary, onSelectCarrier, awardContext }) {
 }
 
 // ── Main Component ──────────────────────────────────────────
-export default function CarrierFeedback({ flatRows, computedScenarios, sampleWeeks, annualization, historicBaseline, customerLocations }) {
+export default function CarrierFeedback({ flatRows, computedScenarios, sampleWeeks, annualization, historicBaseline, customerLocations, selectedSCAC: selectedSCACProp, onSelectedSCACChange }) {
   const { carrierSelections, scenarioName: ctxScenarioName } = useScenario();
   const customScenarioSCACs = useMemo(
     () => Object.entries(carrierSelections).filter(([, v]) => v.awarded).map(([scac]) => scac),
@@ -256,7 +256,24 @@ export default function CarrierFeedback({ flatRows, computedScenarios, sampleWee
     return [...scacs].sort();
   }, [flatRows]);
 
-  const [selectedSCAC, setSelectedSCAC] = useState(allSCACs[0] || '');
+  // Selected SCAC may be lifted to the parent (ResultsScreen) for cross-tab
+  // continuity. If a controlled prop is provided we mirror it; otherwise we
+  // own the state internally as before.
+  const [selectedSCACInternal, setSelectedSCACInternal] = useState(allSCACs[0] || '');
+  const selectedSCAC = selectedSCACProp ?? selectedSCACInternal;
+  const setSelectedSCAC = useCallback((next) => {
+    setSelectedSCACInternal(next);
+    if (onSelectedSCACChange) onSelectedSCACChange(next);
+  }, [onSelectedSCACChange]);
+
+  // First non-empty SCAC list — push it up so the parent's selection seeds.
+  useEffect(() => {
+    if (!selectedSCACProp && !selectedSCACInternal && allSCACs.length > 0) {
+      const initial = allSCACs[0];
+      setSelectedSCACInternal(initial);
+      if (onSelectedSCACChange) onSelectedSCACChange(initial);
+    }
+  }, [allSCACs, selectedSCACProp, selectedSCACInternal, onSelectedSCACChange]);
   const [sortKey, setSortKey] = useState('percentile');
   const [sortAsc, setSortAsc] = useState(false);
   const [selectedScenarioId, setSelectedScenarioId] = useState('');

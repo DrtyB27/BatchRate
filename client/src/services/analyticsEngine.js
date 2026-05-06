@@ -2303,13 +2303,19 @@ export function computeSankeyData(phaseSequence, awardContext) {
   }
 
   // Pass 2a — per-column nodes (carriers present in this column with weight > 0).
+  // Also track per-carrier annualShipments + annualTons so the right-most
+  // column can render a multi-line tag (shipments / tons / spend).
   const columnData = visibleColumns.map((col, idx) => {
     const lanes = lanesByColumn[idx] || [];
     const totalsByCarrier = {};
+    const shipsByCarrier = {};
+    const tonsByCarrier = {};
     for (const lane of lanes) {
       const cid = laneCarrierForColumn(lane, col.type);
       if (!cid) continue;
       totalsByCarrier[cid] = (totalsByCarrier[cid] || 0) + laneWeightForColumn(lane, col.type);
+      shipsByCarrier[cid] = (shipsByCarrier[cid] || 0) + (normalizeNumber(lane.annualShipments) || 0);
+      tonsByCarrier[cid] = (tonsByCarrier[cid] || 0) + (normalizeNumber(lane.annualTons) || 0);
     }
     const totalFlow = Object.values(totalsByCarrier).reduce((s, v) => s + v, 0);
     // Order this column's nodes following the global carrierOrder so the
@@ -2318,7 +2324,13 @@ export function computeSankeyData(phaseSequence, awardContext) {
     for (const cid of carrierOrder) {
       const share = totalsByCarrier[cid] || 0;
       if (share <= 0) continue;
-      nodes.push({ carrierId: cid, share, label: cid });
+      nodes.push({
+        carrierId: cid,
+        share,
+        annualShipments: shipsByCarrier[cid] || 0,
+        annualTons: tonsByCarrier[cid] || 0,
+        label: cid,
+      });
     }
     return {
       columnIndex: idx,

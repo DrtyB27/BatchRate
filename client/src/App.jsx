@@ -3,6 +3,7 @@ import CredentialScreen from './screens/CredentialScreen.jsx';
 import InputScreen from './screens/InputScreen.jsx';
 import ResultsScreen from './screens/ResultsScreen.jsx';
 import RateLoadValidator from './rateload/RateLoadValidator.jsx';
+import HelpScreen from './screens/HelpScreen.jsx';
 import { deserializeRun, readJsonFile, validateRunFile } from './services/runPersistence.js';
 import { isRowRetryable } from './utils/retryClassification.js';
 
@@ -24,6 +25,7 @@ export default function App() {
   const orchestratorRef = useRef(null);
   const executorRef = useRef(null);
   const autoKickTriggered = useRef(false);
+  const prevScreenRef = useRef('credentials');
 
 
   const handleConnected = useCallback((creds) => {
@@ -413,6 +415,25 @@ export default function App() {
           >
             Rate Validator
           </button>
+          <button
+            onClick={() => {
+              if (screen === 'help') {
+                setScreen(prevScreenRef.current || (credentials ? (results.length ? 'results' : 'input') : 'credentials'));
+              } else {
+                prevScreenRef.current = screen;
+                setScreen('help');
+              }
+            }}
+            className={`text-sm w-9 h-9 rounded-full transition-colors border flex items-center justify-center font-bold ${
+              screen === 'help'
+                ? 'bg-[#39b6e6] text-white border-[#39b6e6]'
+                : 'bg-[#39b6e6]/20 border-[#39b6e6] text-[#39b6e6] hover:bg-[#39b6e6]/30'
+            }`}
+            title="Help / Wiki"
+            aria-label="Help"
+          >
+            ?
+          </button>
         </div>
       </header>
 
@@ -450,6 +471,12 @@ export default function App() {
           />
         )}
         {screen === 'rateValidator' && <RateLoadValidator />}
+        {screen === 'help' && (
+          <HelpScreen
+            version={typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : ''}
+            onClose={() => setScreen(prevScreenRef.current || (credentials ? (results.length ? 'results' : 'input') : 'credentials'))}
+          />
+        )}
         {screen === 'results' && (
           <ResultsScreen
             results={results}

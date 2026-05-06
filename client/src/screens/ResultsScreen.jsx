@@ -8,6 +8,7 @@ import BatchPerformance from '../components/BatchPerformance.jsx';
 import CarrierFeedback from '../components/CarrierFeedback.jsx';
 import AnnualAwardBuilder from '../components/AnnualAwardBuilder.jsx';
 import CombineRunsDialog from '../components/CombineRunsDialog.jsx';
+import PersistentKpiBar from '../components/PersistentKpiBar.jsx';
 import { serializeRun, downloadRunFile } from '../services/runPersistence.js';
 import {
   computeScenario, computeCurrentState, computeHistoricCarrierMatch,
@@ -282,6 +283,20 @@ export default function ResultsScreen({
   const [showCombine, setShowCombine] = useState(false);
   const loadInputRef = useRef(null);
 
+  // Cross-tab continuity: tabs visited at least once stay mounted (display:none
+  // when inactive) so internal state — selected SCAC, sort/filter, expanded
+  // panels, scroll position — survives tab switches. raw/customer/both all
+  // share the same ResultsTable mount via the 'table' key.
+  const [visitedTabs, setVisitedTabs] = useState(() => new Set(['table']));
+  useEffect(() => {
+    const tabKey = (viewMode === 'raw' || viewMode === 'customer' || viewMode === 'both') ? 'table' : viewMode;
+    setVisitedTabs(prev => prev.has(tabKey) ? prev : new Set([...prev, tabKey]));
+  }, [viewMode]);
+
+  // Shared selected SCAC — picked in CarrierFeedback or AnnualAwardBuilder,
+  // surfaced in PersistentKpiBar. Each tab still owns its own deeper state.
+  const [selectedSCAC, setSelectedSCAC] = useState('');
+
   // Yield Optimizer markup state — lifted here so it's shared between
   // AnalyticsDashboard and Customer CSV export
   const [activeMarkups, setActiveMarkups] = useState(
@@ -388,11 +403,15 @@ export default function ResultsScreen({
         result = computeHistoricCarrierMatch(flatRows);
       } else {
         const scacs = s.eligibleSCACs.length > 0 ? s.eligibleSCACs : allSCACs;
-        result = computeScenario(flatRows, scacs);
+        result = computeScenario(flatRows, scacs, {
+          locationEligibility: s.locationEligibility || null,
+          exceptionLanes: s.exceptionLanes || null,
+          customerLocations,
+        });
       }
       return { ...s, result };
     });
-  }, [scenarios, flatRows, allSCACs]);
+  }, [scenarios, flatRows, allSCACs, customerLocations]);
 
   // Summary stats — partitioned via the central classifyRow helper so the
   // banner, retry button, and persistence layer agree on what "retryable"
@@ -1150,60 +1169,112 @@ export default function ResultsScreen({
       </div>
 
       {/* Content */}
-      {viewMode === 'analytics' ? (
-        <AnalyticsDashboard
-          flatRows={flatRows}
-          activeMarkups={activeMarkups}
-          onMarkupsChange={setActiveMarkups}
-          computedScenarios={computedScenarios}
-          allSCACs={allSCACs}
-        />
-      ) : viewMode === 'scenarios' ? (
-        <ScenarioBuilder
-          flatRows={flatRows}
-          activeMarkups={activeMarkups}
-          scenarios={scenarios}
-          setScenarios={setScenarios}
-          computedScenarios={computedScenarios}
-          allSCACs={allSCACs}
-          hasHistoric={hasHistoric}
-        />
-      ) : viewMode === 'optimize' ? (
-        <OptimizationDashboard flatRows={flatRows} sampleWeeks={sampleWeeks} credentials={credentials} batchParams={batchParams} />
-      ) : viewMode === 'performance' ? (
-        <BatchPerformance
-          results={results}
-          batchMeta={batchMeta}
-          totalRows={totalRows}
-          onRetryInPlace={onRetryInPlace}
-          retryProgress={retryProgress}
-          csvRows={csvRows}
-          topSlot={
-            <AdaptiveThrottlePanel
-              config={throttleConfig}
-              onConfigChange={setThrottleConfig}
-              perAgentConcurrency={perAgentConcurrency}
-              log={throttleLog}
-              active={isActiveRun}
-              pendingRows={throttlePendingRows}
-              calibrationState={calibrationState}
-              onManualThresholdChange={handleManualThresholdEdit}
-            />
-          }
-        />
-      ) : viewMode === 'feedback' ? (
-        <CarrierFeedback flatRows={flatRows} computedScenarios={computedScenarios} sampleWeeks={sampleWeeks} annualization={annualization} historicBaseline={historicBaseline} />
-      ) : viewMode === 'annual' ? (
-        <AnnualAwardBuilder flatRows={flatRows} computedScenarios={computedScenarios} activeMarkups={activeMarkups} sampleWeeks={sampleWeeks} weeksOverride={weeksOverride} onWeeksChange={setWeeksOverride} detectedWeeks={detectedWeeks} annualization={annualization} historicBaseline={historicBaseline} customerLocations={customerLocations} onCustomerLocationsChange={onCustomerLocationsChange} preparedBy={credentials?.username || ''} />
-      ) : (
-        <ResultsTable
-          flatRows={flatRows}
-          lowCostFlags={lowCostFlags}
-          viewMode={viewMode}
-          onRowClick={handleRowClick}
-          activeMarkups={activeMarkups}
-        />
+      {/* Pinned KPI bar — visible on every tab so headline numbers stay consistent */}
+      {results.length > 0 && (
+        <PersistentKpiBar flatRows={flatRows} activeMarkups={activeMarkups} selectedSCAC={selectedSCAC} />
       )}
+
+      {/* Cross-tab continuity: each tab is mounted on first visit and kept
+          mounted (display:none when inactive) so internal state survives tab
+          switches. tabKey collapses raw/customer/both into a single 'table'
+          mount since they all use the same ResultsTable. */}
+      {(() => {
+        const tabKey = (viewMode === 'raw' || viewMode === 'customer' || viewMode === 'both') ? 'table' : viewMode;
+        const slot = (key, child) => (
+          visitedTabs.has(key) ? (
+            <div key={key} className="flex-1 flex flex-col min-h-0" style={{ display: tabKey === key ? 'flex' : 'none' }}>
+              {child}
+            </div>
+          ) : null
+        );
+        return (
+          <>
+            {slot('analytics',
+              <AnalyticsDashboard
+                flatRows={flatRows}
+                activeMarkups={activeMarkups}
+                onMarkupsChange={setActiveMarkups}
+                computedScenarios={computedScenarios}
+                allSCACs={allSCACs}
+              />
+            )}
+            {slot('scenarios',
+              <ScenarioBuilder
+                flatRows={flatRows}
+                activeMarkups={activeMarkups}
+                scenarios={scenarios}
+                setScenarios={setScenarios}
+                computedScenarios={computedScenarios}
+                allSCACs={allSCACs}
+                hasHistoric={hasHistoric}
+                customerLocations={customerLocations}
+              />
+            )}
+            {slot('optimize',
+              <OptimizationDashboard flatRows={flatRows} sampleWeeks={sampleWeeks} credentials={credentials} batchParams={batchParams} />
+            )}
+            {slot('performance',
+              <BatchPerformance
+                results={results}
+                batchMeta={batchMeta}
+                totalRows={totalRows}
+                onRetryInPlace={onRetryInPlace}
+                retryProgress={retryProgress}
+                csvRows={csvRows}
+                topSlot={
+                  <AdaptiveThrottlePanel
+                    config={throttleConfig}
+                    onConfigChange={setThrottleConfig}
+                    perAgentConcurrency={perAgentConcurrency}
+                    log={throttleLog}
+                    active={isActiveRun}
+                    pendingRows={throttlePendingRows}
+                    calibrationState={calibrationState}
+                    onManualThresholdChange={handleManualThresholdEdit}
+                  />
+                }
+              />
+            )}
+            {slot('feedback',
+              <CarrierFeedback
+                flatRows={flatRows}
+                computedScenarios={computedScenarios}
+                sampleWeeks={sampleWeeks}
+                annualization={annualization}
+                historicBaseline={historicBaseline}
+                customerLocations={customerLocations}
+                selectedSCAC={selectedSCAC}
+                onSelectedSCACChange={setSelectedSCAC}
+              />
+            )}
+            {slot('annual',
+              <AnnualAwardBuilder
+                flatRows={flatRows}
+                computedScenarios={computedScenarios}
+                activeMarkups={activeMarkups}
+                sampleWeeks={sampleWeeks}
+                weeksOverride={weeksOverride}
+                onWeeksChange={setWeeksOverride}
+                detectedWeeks={detectedWeeks}
+                annualization={annualization}
+                historicBaseline={historicBaseline}
+                customerLocations={customerLocations}
+                onCustomerLocationsChange={onCustomerLocationsChange}
+                preparedBy={credentials?.username || ''}
+              />
+            )}
+            {slot('table',
+              <ResultsTable
+                flatRows={flatRows}
+                lowCostFlags={lowCostFlags}
+                viewMode={viewMode}
+                onRowClick={handleRowClick}
+                activeMarkups={activeMarkups}
+              />
+            )}
+          </>
+        );
+      })()}
 
       {/* Export warning modal */}
       {modal && (

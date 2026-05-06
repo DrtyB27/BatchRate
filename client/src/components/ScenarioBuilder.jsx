@@ -26,7 +26,7 @@ function timestamp() {
 
 let nextId = 100;
 
-export default function ScenarioBuilder({ flatRows, activeMarkups, scenarios, setScenarios, computedScenarios, allSCACs, hasHistoric }) {
+export default function ScenarioBuilder({ flatRows, activeMarkups, scenarios, setScenarios, computedScenarios, allSCACs, hasHistoric, customerLocations }) {
   const [scenarioView, setScenarioView] = useState('internal');
   const isCustomer = scenarioView === 'customer';
   const currentStateResult = useMemo(() => {
@@ -118,6 +118,7 @@ export default function ScenarioBuilder({ flatRows, activeMarkups, scenarios, se
               scenario={s}
               allSCACs={allSCACs}
               colorIndex={idx}
+              customerLocations={customerLocations}
               onChange={handleUpdateScenario}
               onDelete={!s.isCurrentState && !s.isLowCost && !s.isHistoricMatch ? () => handleDeleteScenario(s.id) : null}
             />

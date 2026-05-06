@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { computeSankeyData, SANKEY_CARRIER_PALETTE } from '../services/analyticsEngine.js';
+import { formatShipments, formatTons } from '../utils/annualizedMetrics.js';
 
 const CARRIER_PALETTE = SANKEY_CARRIER_PALETTE;
 
@@ -291,10 +292,10 @@ function computeLegacyLayout(data, width, height) {
  */
 function computeNColumnLayout(scaffold, columnData, flows, width, height) {
   // left/right pad fit a SCAC + ($value) label outside the node rect on
-  // column 0 (anchored "end") and a SCAC label on the last column
-  // (anchored "start"); top pad reserves room for the in-SVG column
-  // header strip rendered just above the chart area.
-  const padding = { top: 36, bottom: 16, left: 150, right: 90 };
+  // column 0 (anchored "end") and a SCAC + annual ship/tons/spend tag on
+  // the last column (anchored "start"); top pad reserves room for the
+  // in-SVG column header strip rendered just above the chart area.
+  const padding = { top: 36, bottom: 16, left: 150, right: 150 };
   const columnCount = scaffold.columnCount;
   if (columnCount <= 0) return { columns: [], paths: [] };
 
@@ -327,6 +328,8 @@ function computeNColumnLayout(scaffold, columnData, flows, width, height) {
         width: NODE_WIDTH,
         height: h,
         flow: node.share,
+        annualShipments: node.annualShipments || 0,
+        annualTons: node.annualTons || 0,
       });
       y += h + NODE_GAP;
     }
@@ -818,6 +821,24 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
                         >
                           {n.carrierId} ({fmtMoney(n.flow)})
                         </text>
+                      ) : isLastCol ? (
+                        // Right-most column: SCAC + annual ship/tons/spend tag
+                        <text
+                          x={n.x + n.width + LABEL_GAP}
+                          y={n.y + n.height / 2}
+                          textAnchor="start"
+                          dominantBaseline="central"
+                          style={labelStyle}
+                        >
+                          <tspan x={n.x + n.width + LABEL_GAP} dy="-1.6em" fontWeight="600">{n.carrierId}</tspan>
+                          {n.annualShipments > 0 && (
+                            <tspan x={n.x + n.width + LABEL_GAP} dy="1.15em" fill="#475569">{formatShipments(n.annualShipments)} ship</tspan>
+                          )}
+                          {n.annualTons > 0 && (
+                            <tspan x={n.x + n.width + LABEL_GAP} dy="1.15em" fill="#475569">{formatTons(n.annualTons)}</tspan>
+                          )}
+                          <tspan x={n.x + n.width + LABEL_GAP} dy="1.15em" fill="#475569">{fmtMoney(n.flow)}</tspan>
+                        </text>
                       ) : (
                         <text
                           x={n.x + n.width + LABEL_GAP}
@@ -826,7 +847,7 @@ const CarrierSankey = React.forwardRef(function CarrierSankey(props, ref) {
                           dominantBaseline="central"
                           style={labelStyle}
                         >
-                          {isLastCol ? n.carrierId : `${n.carrierId} (${fmtMoney(n.flow)})`}
+                          {`${n.carrierId} (${fmtMoney(n.flow)})`}
                         </text>
                       )}
                     </g>

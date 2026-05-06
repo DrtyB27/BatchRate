@@ -168,10 +168,7 @@ export default function BatchPerformance({ results, batchMeta, totalRows, onRetr
             {/* THE RETRY BUTTON — big, blue, unmissable */}
             {onRetryInPlace && !retryProgress && retryableCount > 0 && (
               <button
-                onClick={() => {
-                  console.log('[BRAT] Retry clicked. retryableCount:', retryableCount, 'results:', results.length, 'totalRows:', totalRows);
-                  onRetryInPlace();
-                }}
+                onClick={onRetryInPlace}
                 className="bg-[#39b6e6] hover:bg-[#2d9bc4] text-white px-6 py-3 rounded-lg font-bold text-sm shadow-lg transition-colors whitespace-nowrap animate-pulse hover:animate-none"
               >
                 ⟳ Retry {retryableCount} Rows
